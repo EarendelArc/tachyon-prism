@@ -24,6 +24,26 @@ button {
   padding: 8px 12px;
 }
 
+input {
+  border: 1px solid #c8d2df;
+  border-radius: 6px;
+  color: #17202a;
+  font: inherit;
+  min-width: 0;
+  padding: 8px 10px;
+}
+
+textarea {
+  border: 1px solid #c8d2df;
+  border-radius: 6px;
+  color: #17202a;
+  font: inherit;
+  min-height: 88px;
+  min-width: 0;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
 .app-shell {
   min-height: 100vh;
   padding: 24px;
@@ -87,6 +107,43 @@ button {
   height: 260px;
 }
 
+.status-metrics {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 16px;
+}
+
+.status-metrics div {
+  border: 1px solid #edf1f6;
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.status-metrics strong {
+  display: block;
+  font-size: 28px;
+}
+
+.status-metrics span {
+  color: #627187;
+  display: block;
+  font-size: 13px;
+}
+
+.form-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 12px;
+}
+
+.wide-input,
+.full-input {
+  grid-column: 1 / -1;
+  width: 100%;
+}
+
 .profile-list {
   display: grid;
   gap: 8px;
@@ -101,11 +158,50 @@ button {
 .profile-row strong,
 .profile-row span {
   display: block;
+  overflow-wrap: anywhere;
 }
 
 .profile-row span {
   color: #627187;
   font-size: 13px;
+}
+
+.row-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.active-button {
+  background: #162033;
+  border-color: #162033;
+  color: #ffffff;
+}
+
+.selected-node {
+  background: #f4f8fc;
+  border: 1px solid #dbe6f1;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  padding: 12px;
+}
+
+.selected-node strong,
+.selected-node span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.selected-node span {
+  color: #627187;
+  font-size: 13px;
+  margin-top: 2px;
+}
+
+.suggestion-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 @media (max-width: 840px) {

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 src-tauri/target/
+target-mvp*/
 src-tauri/gen/
 .idea/
 .vscode/

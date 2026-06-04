@@ -4,6 +4,20 @@ export interface ListGameProfilesResponse {
   profiles: GameProfile[];
 }
 
+export interface SteamAppManifest {
+  appId: number;
+  name: string;
+  installDir: string;
+  universe: string;
+  stateFlags: number;
+  libraryPath: string;
+}
+
+export interface ScanSteamResponse {
+  apps: SteamAppManifest[];
+  profiles: GameProfile[];
+}
+
 export class CoreApi {
   constructor(private readonly baseUrl = "http://127.0.0.1:55123") {}
 
@@ -35,6 +49,15 @@ export class CoreApi {
   async removeGameProfile(id: string): Promise<void> {
     await this.request<void>(`/v1/routing/game-profiles/${encodeURIComponent(id)}`, {
       method: "DELETE",
+    });
+  }
+
+  async scanSteam(root?: string): Promise<ScanSteamResponse> {
+    const params = root?.trim()
+      ? `?root=${encodeURIComponent(root.trim())}`
+      : "";
+    return this.request<ScanSteamResponse>(`/v1/launchers/steam/scan${params}`, {
+      method: "GET",
     });
   }
 
