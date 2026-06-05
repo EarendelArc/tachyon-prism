@@ -15,6 +15,8 @@ sent through Tachyon Core for low-latency acceleration.
 - Runtime and profile status dashboard.
 - Local manual game profile management.
 - Local Steam library scan and game-profile suggestions.
+- Persistent Steam launcher settings for child-process tracking, game UDP
+  acceleration, and optional Steam download acceleration.
 - Per-program UDP/TCP routing policy controls.
 - Basic subscription import from URL or pasted payload.
 - Local node list with selected-node persistence.
@@ -65,7 +67,8 @@ The Config panel generates two JSON drafts from the selected node:
 
 - `xray-client.json`: a local SOCKS inbound plus the selected Xray outbound.
 - `client.json`: a Tachyon Core client config for the TGP UDP game path,
-  including Prism-managed game profiles under `client.routing.game_profiles`.
+  including Prism-managed game profiles under `client.routing.game_profiles`
+  and launcher policy under `client.routing.launchers`.
 
 For complete Xray feature support, Prism prefers the preserved outbound object
 from the subscription or full Xray JSON input instead of rebuilding fields from
@@ -76,6 +79,9 @@ and shows the exact paths in the Config panel. Core still remains pure and only
 needs the generated `client.json`; Xray is launched and configured by Prism.
 Game profiles are owned by Prism but embedded into the generated Core JSON so a
 single Core config captures the intended UDP acceleration policy.
+Launcher settings are also owned by Prism and embedded into the generated Core
+JSON so Steam child-process detection and optional Steam download handling can
+be changed without adding subscription or GUI responsibilities to Core.
 
 The Binaries panel can copy a local `xray` or `tachyon-core` executable into
 Prism's managed app config `bin` directory and point `runtime-settings.json` at

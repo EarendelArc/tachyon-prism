@@ -1,4 +1,5 @@
-import type { GameProfile } from "./gameProfiles";
+import { defaultLauncherSettings } from "./gameProfiles";
+import type { GameProfile, LauncherSettings } from "./gameProfiles";
 import { buildXrayOutboundDraft } from "./subscriptions";
 import type { ProxyNode, XrayOutboundObject } from "./subscriptions";
 
@@ -9,6 +10,7 @@ export interface XrayClientDraftOptions {
 
 export interface CoreClientDraftOptions {
   gameProfiles?: GameProfile[];
+  launchers?: LauncherSettings;
 }
 
 export function buildXrayClientConfigDraft(
@@ -52,6 +54,7 @@ export function buildCoreClientConfigDraft(
 ): Record<string, unknown> {
   const endpoint = nodeEndpoint(node);
   const gameProfiles = options.gameProfiles ?? [];
+  const launchers = options.launchers ?? defaultLauncherSettings;
 
   return {
     mode: "client",
@@ -66,14 +69,7 @@ export function buildCoreClientConfigDraft(
       routing: {
         default_action: "direct",
         game_profiles: gameProfiles,
-        launchers: {
-          steam: {
-            enabled: true,
-            trackChildProcesses: true,
-            accelerateGameUdp: true,
-            accelerateSteamDownloads: false,
-          },
-        },
+        launchers,
         rules: [
           {
             cidr: "192.168.0.0/16",

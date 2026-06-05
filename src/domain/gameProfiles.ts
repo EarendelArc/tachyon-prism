@@ -40,6 +40,17 @@ export interface SteamScanResult {
   profiles: GameProfile[];
 }
 
+export interface SteamLauncherSettings {
+  enabled: boolean;
+  trackChildProcesses: boolean;
+  accelerateGameUdp: boolean;
+  accelerateSteamDownloads: boolean;
+}
+
+export interface LauncherSettings {
+  steam: SteamLauncherSettings;
+}
+
 export const defaultGameProfiles: GameProfile[] = [
   {
     id: "cs2",
@@ -59,6 +70,17 @@ export const defaultGameProfiles: GameProfile[] = [
   },
 ];
 
+export const defaultLauncherSettings: LauncherSettings = {
+  steam: {
+    enabled: true,
+    trackChildProcesses: true,
+    accelerateGameUdp: true,
+    accelerateSteamDownloads: false,
+  },
+};
+
+const launcherSettingsKey = "tachyon.prism.launchers.v1";
+
 export async function listGameProfiles(): Promise<GameProfile[]> {
   const file = await invoke<GameProfilesFile>("list_game_profiles");
   return file.profiles;
@@ -77,4 +99,55 @@ export async function scanSteamLibrary(root?: string): Promise<SteamScanResult> 
   return invoke<SteamScanResult>("scan_steam_library", {
     root: root?.trim() ? root.trim() : null,
   });
+}
+
+export function loadLauncherSettings(): LauncherSettings {
+  try {
+    const raw = globalThis.localStorage?.getItem(launcherSettingsKey);
+    if (!raw) {
+      return defaultLauncherSettings;
+    }
+    return normalizeLauncherSettings(JSON.parse(raw));
+  } catch {
+    return defaultLauncherSettings;
+  }
+}
+
+export function saveLauncherSettings(settings: LauncherSettings): void {
+  globalThis.localStorage?.setItem(
+    launcherSettingsKey,
+    JSON.stringify(normalizeLauncherSettings(settings)),
+  );
+}
+
+function normalizeLauncherSettings(value: unknown): LauncherSettings {
+  if (!isRecord(value)) {
+    return defaultLauncherSettings;
+  }
+  const steam = isRecord(value.steam) ? value.steam : {};
+  return {
+    steam: {
+      enabled: booleanValue(steam.enabled, defaultLauncherSettings.steam.enabled),
+      trackChildProcesses: booleanValue(
+        steam.trackChildProcesses,
+        defaultLauncherSettings.steam.trackChildProcesses,
+      ),
+      accelerateGameUdp: booleanValue(
+        steam.accelerateGameUdp,
+        defaultLauncherSettings.steam.accelerateGameUdp,
+      ),
+      accelerateSteamDownloads: booleanValue(
+        steam.accelerateSteamDownloads,
+        defaultLauncherSettings.steam.accelerateSteamDownloads,
+      ),
+    },
+  };
+}
+
+function booleanValue(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

@@ -9,12 +9,14 @@ import {
   saveConfigDrafts,
   type ConfigDraftPaths,
 } from "./domain/desktopConfig";
-import type { GameProfile } from "./domain/gameProfiles";
+import type { GameProfile, LauncherSettings } from "./domain/gameProfiles";
 import {
   defaultGameProfiles,
+  loadLauncherSettings,
   listGameProfiles,
   removeGameProfile,
   saveGameProfile,
+  saveLauncherSettings,
   scanSteamLibrary,
 } from "./domain/gameProfiles";
 import {
@@ -167,6 +169,7 @@ function binaryReadiness(
 function draftText(
   activeNode: ProxyNode | undefined,
   profiles: GameProfile[],
+  launcherSettings: LauncherSettings,
 ): {
   core: string;
   error: string;
@@ -178,7 +181,12 @@ function draftText(
 
   try {
     return {
-      core: stringifyDraft(buildCoreClientConfigDraft(activeNode, { gameProfiles: profiles })),
+      core: stringifyDraft(
+        buildCoreClientConfigDraft(activeNode, {
+          gameProfiles: profiles,
+          launchers: launcherSettings,
+        }),
+      ),
       error: "",
       xray: stringifyDraft(buildXrayClientConfigDraft(activeNode)),
     };
@@ -195,6 +203,7 @@ export function App() {
   const [activeView, setActiveView] = useState<PrismView>("overview");
   const [connection, setConnection] = useState<ConnectionState>("checking");
   const [profiles, setProfiles] = useState<GameProfile[]>(defaultGameProfiles);
+  const [launcherSettings, setLauncherSettings] = useState(loadLauncherSettings);
   const [suggestions, setSuggestions] = useState<GameProfile[]>([]);
   const [steamRoot, setSteamRoot] = useState("");
   const [manualProfile, setManualProfile] = useState(emptyProfile);
@@ -218,7 +227,10 @@ export function App() {
     [profiles],
   );
   const activeNode = useMemo(() => selectedNode(subscription), [subscription]);
-  const drafts = useMemo(() => draftText(activeNode, profiles), [activeNode, profiles]);
+  const drafts = useMemo(
+    () => draftText(activeNode, profiles, launcherSettings),
+    [activeNode, launcherSettings, profiles],
+  );
   const readinessItems = useMemo<ReadinessItem[]>(() => {
     const items: ReadinessItem[] = [];
     items.push(
@@ -375,6 +387,22 @@ export function App() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Add failed");
     }
+  }
+
+  function updateSteamLauncherSetting<K extends keyof LauncherSettings["steam"]>(
+    key: K,
+    value: LauncherSettings["steam"][K],
+  ) {
+    const nextSettings: LauncherSettings = {
+      ...launcherSettings,
+      steam: {
+        ...launcherSettings.steam,
+        [key]: value,
+      },
+    };
+    saveLauncherSettings(nextSettings);
+    setLauncherSettings(nextSettings);
+    setMessage("Launcher settings saved");
   }
 
   async function updateSubscriptionFromUrl() {
@@ -1078,12 +1106,50 @@ export function App() {
                 onChange={(event) => setSteamRoot(event.target.value)}
               />
               <div className="switch-row">
+                <span>Steam launcher detection</span>
+                <input
+                  type="checkbox"
+                  checked={launcherSettings.steam.enabled}
+                  onChange={(event) =>
+                    updateSteamLauncherSetting("enabled", event.currentTarget.checked)
+                  }
+                />
+              </div>
+              <div className="switch-row">
                 <span>Steam child process tracking</span>
-                <input type="checkbox" defaultChecked />
+                <input
+                  type="checkbox"
+                  checked={launcherSettings.steam.trackChildProcesses}
+                  disabled={!launcherSettings.steam.enabled}
+                  onChange={(event) =>
+                    updateSteamLauncherSetting("trackChildProcesses", event.currentTarget.checked)
+                  }
+                />
+              </div>
+              <div className="switch-row">
+                <span>Accelerate Steam game UDP</span>
+                <input
+                  type="checkbox"
+                  checked={launcherSettings.steam.accelerateGameUdp}
+                  disabled={!launcherSettings.steam.enabled}
+                  onChange={(event) =>
+                    updateSteamLauncherSetting("accelerateGameUdp", event.currentTarget.checked)
+                  }
+                />
               </div>
               <div className="switch-row">
                 <span>Accelerate Steam downloads</span>
-                <input type="checkbox" />
+                <input
+                  type="checkbox"
+                  checked={launcherSettings.steam.accelerateSteamDownloads}
+                  disabled={!launcherSettings.steam.enabled}
+                  onChange={(event) =>
+                    updateSteamLauncherSetting(
+                      "accelerateSteamDownloads",
+                      event.currentTarget.checked,
+                    )
+                  }
+                />
               </div>
               <div className="suggestion-list">
                 {suggestions.map((profile) => (
