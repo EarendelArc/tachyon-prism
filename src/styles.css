@@ -188,13 +188,26 @@ textarea {
   padding: 12px;
 }
 
+.release-summary {
+  background: #f4f8fc;
+  border: 1px solid #dbe6f1;
+  border-radius: 6px;
+  display: grid;
+  gap: 2px;
+  margin-bottom: 12px;
+  padding: 12px;
+}
+
 .selected-node strong,
-.selected-node span {
+.selected-node span,
+.release-summary strong,
+.release-summary span {
   display: block;
   overflow-wrap: anywhere;
 }
 
-.selected-node span {
+.selected-node span,
+.release-summary span {
   color: #627187;
   font-size: 13px;
   margin-top: 2px;

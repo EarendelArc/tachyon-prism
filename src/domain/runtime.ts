@@ -36,6 +36,23 @@ export interface ManagedBinaryInventory {
   xray: ManagedBinaryInfo;
 }
 
+export interface XrayReleaseInfo {
+  tagName: string;
+  assetName: string;
+  assetUrl: string;
+  assetSizeBytes: number;
+  checksumAssetName: string;
+  checksumUrl: string;
+  publishedAt: string | null;
+}
+
+export interface XrayInstallResult {
+  release: XrayReleaseInfo;
+  sha256: string;
+  binaryPath: string;
+  inventory: ManagedBinaryInventory;
+}
+
 export interface ProcessStatus {
   state: ProcessState;
   pid: number | null;
@@ -76,6 +93,14 @@ export async function installManagedBinary(
     kind,
     sourcePath,
   });
+}
+
+export async function getLatestXrayRelease(): Promise<XrayReleaseInfo> {
+  return invoke<XrayReleaseInfo>("latest_xray_release");
+}
+
+export async function installLatestXray(): Promise<XrayInstallResult> {
+  return invoke<XrayInstallResult>("install_latest_xray");
 }
 
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {

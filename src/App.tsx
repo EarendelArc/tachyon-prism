@@ -14,9 +14,11 @@ import type { GameProfile } from "./domain/gameProfiles";
 import { defaultGameProfiles } from "./domain/gameProfiles";
 import {
   getManagedBinaries,
+  getLatestXrayRelease,
   getRuntimePaths,
   getRuntimeSettings,
   getRuntimeStatus,
+  installLatestXray,
   installManagedBinary,
   saveRuntimeSettings,
   startTachyonCore,
@@ -29,6 +31,7 @@ import {
   type ProcessStatus,
   type RuntimePaths,
   type RuntimeStatus,
+  type XrayReleaseInfo,
 } from "./domain/runtime";
 import {
   createSubscriptionSnapshot,
@@ -134,6 +137,8 @@ export function App() {
   const [runtimeInputs, setRuntimeInputs] = useState(emptyRuntimeInputs);
   const [managedBinaries, setManagedBinaries] = useState<ManagedBinaryInventory | null>(null);
   const [binarySourceInputs, setBinarySourceInputs] = useState(emptyBinarySourceInputs);
+  const [xrayRelease, setXrayRelease] = useState<XrayReleaseInfo | null>(null);
+  const [binaryBusy, setBinaryBusy] = useState(false);
   const [message, setMessage] = useState("Ready");
 
   const activeProfiles = useMemo(
@@ -363,6 +368,34 @@ export function App() {
       setMessage(`${binary.displayName} selected`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Binary selection failed");
+    }
+  }
+
+  async function checkLatestXray() {
+    try {
+      setBinaryBusy(true);
+      const release = await getLatestXrayRelease();
+      setXrayRelease(release);
+      setMessage(`Latest Xray ${release.tagName}`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Xray release check failed");
+    } finally {
+      setBinaryBusy(false);
+    }
+  }
+
+  async function downloadLatestXray() {
+    try {
+      setBinaryBusy(true);
+      const result = await installLatestXray();
+      setXrayRelease(result.release);
+      setManagedBinaries(result.inventory);
+      setRuntimeInputs(result.inventory.runtimeSettings);
+      setMessage(`Xray ${result.release.tagName} installed`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Xray install failed");
+    } finally {
+      setBinaryBusy(false);
     }
   }
 
@@ -677,10 +710,27 @@ export function App() {
         <article className="panel binary-panel">
           <header>
             <h2>Binaries</h2>
-            <button type="button" onClick={() => void refreshManagedBinaries()}>
-              Refresh
-            </button>
+            <div className="row-actions">
+              <button type="button" disabled={binaryBusy} onClick={() => void checkLatestXray()}>
+                Check Xray
+              </button>
+              <button type="button" disabled={binaryBusy} onClick={() => void downloadLatestXray()}>
+                Install Latest Xray
+              </button>
+              <button type="button" onClick={() => void refreshManagedBinaries()}>
+                Refresh
+              </button>
+            </div>
           </header>
+          {xrayRelease ? (
+            <div className="release-summary">
+              <strong>Xray {xrayRelease.tagName}</strong>
+              <span>
+                {xrayRelease.assetName} / {formatBytes(xrayRelease.assetSizeBytes)}
+              </span>
+              <span>{xrayRelease.checksumAssetName}</span>
+            </div>
+          ) : null}
           {managedBinaries ? (
             <div className="path-list">
               <div>

@@ -1,10 +1,12 @@
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
 #[derive(Serialize)]
@@ -53,6 +55,41 @@ struct ManagedBinaryInfo {
     configured_size_bytes: Option<u64>,
     managed_modified_at: Option<u64>,
     configured_modified_at: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct XrayReleaseInfo {
+    tag_name: String,
+    asset_name: String,
+    asset_url: String,
+    asset_size_bytes: u64,
+    checksum_asset_name: String,
+    checksum_url: String,
+    published_at: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct XrayInstallResult {
+    release: XrayReleaseInfo,
+    sha256: String,
+    binary_path: String,
+    inventory: ManagedBinaryInventory,
+}
+
+#[derive(Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    published_at: Option<String>,
+    assets: Vec<GithubAsset>,
+}
+
+#[derive(Clone, Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
+    size: u64,
 }
 
 #[derive(Serialize)]
@@ -183,6 +220,16 @@ fn install_managed_binary(
     }
     let _ = save_runtime_settings_file(&app, settings)?;
     managed_binary_inventory(&app)
+}
+
+#[tauri::command]
+fn latest_xray_release() -> Result<XrayReleaseInfo, String> {
+    fetch_latest_xray_release()
+}
+
+#[tauri::command]
+fn install_latest_xray(app: tauri::AppHandle) -> Result<XrayInstallResult, String> {
+    install_latest_xray_release(&app)
 }
 
 #[tauri::command]
@@ -452,6 +499,276 @@ fn managed_binary_target(
     Ok(config_dir.join("bin").join(binary_name(kind.binary_base())))
 }
 
+fn fetch_latest_xray_release() -> Result<XrayReleaseInfo, String> {
+    let release: GithubRelease =
+        http_get_json("https://api.github.com/repos/XTLS/Xray-core/releases/latest")?;
+    xray_release_info(release)
+}
+
+fn install_latest_xray_release(app: &tauri::AppHandle) -> Result<XrayInstallResult, String> {
+    let release = fetch_latest_xray_release()?;
+    let download_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|err| format!("resolve app config directory: {err}"))?
+        .join("downloads")
+        .join("xray")
+        .join(sanitize_file_component(&release.tag_name));
+    fs::create_dir_all(&download_dir).map_err(|err| {
+        format!(
+            "create download directory {}: {err}",
+            download_dir.display()
+        )
+    })?;
+
+    let archive_path = download_dir.join(&release.asset_name);
+    let checksum_path = download_dir.join(&release.checksum_asset_name);
+    download_to_file(&release.asset_url, &archive_path)?;
+    download_to_file(&release.checksum_url, &checksum_path)?;
+
+    let checksum_text = fs::read_to_string(&checksum_path)
+        .map_err(|err| format!("read checksum file {}: {err}", checksum_path.display()))?;
+    let expected_sha256 = find_checksum_for_asset(&checksum_text, &release.asset_name)?;
+    let actual_sha256 = sha256_file(&archive_path)?;
+    if !actual_sha256.eq_ignore_ascii_case(&expected_sha256) {
+        return Err(format!(
+            "checksum mismatch for {}: expected {}, got {}",
+            release.asset_name, expected_sha256, actual_sha256
+        ));
+    }
+
+    let target = managed_binary_target(app, ManagedBinaryKind::Xray)?;
+    extract_binary_from_zip(&archive_path, &target, &binary_name("xray"))?;
+    make_executable(&target)?;
+
+    let mut settings = load_runtime_settings(app)?;
+    settings.xray_binary_path = path_string(&target);
+    let _ = save_runtime_settings_file(app, settings)?;
+
+    Ok(XrayInstallResult {
+        release,
+        sha256: actual_sha256,
+        binary_path: path_string(&target),
+        inventory: managed_binary_inventory(app)?,
+    })
+}
+
+fn xray_release_info(release: GithubRelease) -> Result<XrayReleaseInfo, String> {
+    let marker = xray_platform_asset_marker()?;
+    let asset = release
+        .assets
+        .iter()
+        .find(|asset| {
+            let name = asset.name.to_ascii_lowercase();
+            name.starts_with("xray-") && name.ends_with(".zip") && name.contains(marker)
+        })
+        .cloned()
+        .ok_or_else(|| format!("no Xray asset found for current platform marker {marker}"))?;
+    let checksum_asset = release
+        .assets
+        .iter()
+        .find(|candidate| {
+            candidate
+                .name
+                .eq_ignore_ascii_case(&format!("{}.dgst", asset.name))
+        })
+        .or_else(|| {
+            release.assets.iter().find(|candidate| {
+                let candidate_name = candidate.name.to_ascii_lowercase();
+                candidate_name.ends_with(".dgst")
+                    && candidate_name.contains(&asset.name.to_ascii_lowercase())
+            })
+        })
+        .or_else(|| {
+            release
+                .assets
+                .iter()
+                .find(|candidate| candidate.name.eq_ignore_ascii_case("Xray-checksums.txt"))
+        })
+        .or_else(|| {
+            release
+                .assets
+                .iter()
+                .find(|candidate| candidate.name.to_ascii_lowercase().contains("checksum"))
+        })
+        .cloned()
+        .ok_or_else(|| "no Xray checksum asset found".to_string())?;
+
+    Ok(XrayReleaseInfo {
+        tag_name: release.tag_name,
+        asset_name: asset.name,
+        asset_url: asset.browser_download_url,
+        asset_size_bytes: asset.size,
+        checksum_asset_name: checksum_asset.name,
+        checksum_url: checksum_asset.browser_download_url,
+        published_at: release.published_at,
+    })
+}
+
+fn xray_platform_asset_marker() -> Result<&'static str, String> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => Ok("windows-64"),
+        ("windows", "aarch64") => Ok("windows-arm64"),
+        ("linux", "x86_64") => Ok("linux-64"),
+        ("linux", "aarch64") => Ok("linux-arm64"),
+        ("macos", "x86_64") => Ok("macos-64"),
+        ("macos", "aarch64") => Ok("macos-arm64"),
+        (os, arch) => Err(format!("unsupported Xray platform: {os}/{arch}")),
+    }
+}
+
+fn http_get_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
+    let agent = http_agent();
+    let mut response = agent
+        .get(url)
+        .header("User-Agent", "Tachyon-Prism/0.1")
+        .header("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(|err| format!("request {url}: {err}"))?;
+    response
+        .body_mut()
+        .read_json::<T>()
+        .map_err(|err| format!("decode JSON from {url}: {err}"))
+}
+
+fn download_to_file(url: &str, path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "download target has no parent".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|err| format!("create download directory {}: {err}", parent.display()))?;
+
+    let temp_path = path.with_extension("download.tmp");
+    let agent = http_agent();
+    let mut response = agent
+        .get(url)
+        .header("User-Agent", "Tachyon-Prism/0.1")
+        .call()
+        .map_err(|err| format!("download {url}: {err}"))?;
+    let mut output = fs::File::create(&temp_path)
+        .map_err(|err| format!("create {}: {err}", temp_path.display()))?;
+    io::copy(&mut response.body_mut().as_reader(), &mut output)
+        .map_err(|err| format!("write {}: {err}", temp_path.display()))?;
+    if path.exists() {
+        fs::remove_file(path).map_err(|err| format!("replace {}: {err}", path.display()))?;
+    }
+    fs::rename(&temp_path, path).map_err(|err| format!("move {}: {err}", path.display()))
+}
+
+fn http_agent() -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(120)))
+        .build();
+    config.into()
+}
+
+fn find_checksum_for_asset(checksum_text: &str, asset_name: &str) -> Result<String, String> {
+    for line in checksum_text.lines() {
+        if !line.contains(asset_name) {
+            continue;
+        }
+        for token in line
+            .split(|character: char| character.is_whitespace() || character == '=')
+            .map(|token| token.trim_matches(|character: char| !character.is_ascii_hexdigit()))
+        {
+            if token.len() == 64 && token.chars().all(|character| character.is_ascii_hexdigit()) {
+                return Ok(token.to_ascii_lowercase());
+            }
+        }
+    }
+    Err(format!("checksum for {asset_name} not found"))
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+
+    let mut file = fs::File::open(path).map_err(|err| format!("open {}: {err}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = io::Read::read(&mut file, &mut buffer)
+            .map_err(|err| format!("read {}: {err}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex_encode(&hasher.finalize()))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn extract_binary_from_zip(
+    archive_path: &Path,
+    target: &Path,
+    binary_file_name: &str,
+) -> Result<(), String> {
+    let archive_file = fs::File::open(archive_path)
+        .map_err(|err| format!("open archive {}: {err}", archive_path.display()))?;
+    let mut archive = zip::ZipArchive::new(archive_file)
+        .map_err(|err| format!("read archive {}: {err}", archive_path.display()))?;
+    let temp_path = target.with_extension("extract.tmp");
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|err| format!("read archive entry {index}: {err}"))?;
+        let Some(name) = Path::new(entry.name()).file_name() else {
+            continue;
+        };
+        if name.to_string_lossy() != binary_file_name {
+            continue;
+        }
+
+        let parent = target
+            .parent()
+            .ok_or_else(|| "binary target has no parent".to_string())?;
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("create binary directory {}: {err}", parent.display()))?;
+        let mut output = fs::File::create(&temp_path)
+            .map_err(|err| format!("create {}: {err}", temp_path.display()))?;
+        io::copy(&mut entry, &mut output)
+            .map_err(|err| format!("extract {}: {err}", temp_path.display()))?;
+        if target.exists() {
+            fs::remove_file(target)
+                .map_err(|err| format!("replace {}: {err}", target.display()))?;
+        }
+        return fs::rename(&temp_path, target)
+            .map_err(|err| format!("move {}: {err}", target.display()));
+    }
+
+    Err(format!(
+        "{binary_file_name} not found in {}",
+        archive_path.display()
+    ))
+}
+
+fn sanitize_file_component(input: &str) -> String {
+    let sanitized = input
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "release".to_string()
+    } else {
+        sanitized
+    }
+}
+
 struct BinaryMetadata {
     exists: bool,
     size_bytes: Option<u64>,
@@ -681,6 +998,8 @@ pub fn run() {
             save_runtime_settings,
             managed_binaries,
             install_managed_binary,
+            latest_xray_release,
+            install_latest_xray,
             runtime_status,
             start_xray,
             stop_xray,
