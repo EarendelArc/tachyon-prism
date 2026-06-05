@@ -36,7 +36,7 @@ export interface ManagedBinaryInventory {
   xray: ManagedBinaryInfo;
 }
 
-export interface XrayReleaseInfo {
+export interface RuntimeReleaseInfo {
   tagName: string;
   assetName: string;
   assetUrl: string;
@@ -46,8 +46,8 @@ export interface XrayReleaseInfo {
   publishedAt: string | null;
 }
 
-export interface XrayInstallResult {
-  release: XrayReleaseInfo;
+export interface RuntimeInstallResult {
+  release: RuntimeReleaseInfo;
   sha256: string;
   binaryPath: string;
   inventory: ManagedBinaryInventory;
@@ -95,12 +95,20 @@ export async function installManagedBinary(
   });
 }
 
-export async function getLatestXrayRelease(): Promise<XrayReleaseInfo> {
-  return invoke<XrayReleaseInfo>("latest_xray_release");
+export async function getLatestXrayRelease(): Promise<RuntimeReleaseInfo> {
+  return invoke<RuntimeReleaseInfo>("latest_xray_release");
 }
 
-export async function installLatestXray(): Promise<XrayInstallResult> {
-  return invoke<XrayInstallResult>("install_latest_xray");
+export async function installLatestXray(): Promise<RuntimeInstallResult> {
+  return invoke<RuntimeInstallResult>("install_latest_xray");
+}
+
+export async function getLatestTachyonCoreRelease(): Promise<RuntimeReleaseInfo> {
+  return invoke<RuntimeReleaseInfo>("latest_tachyon_core_release");
+}
+
+export async function installLatestTachyonCore(): Promise<RuntimeInstallResult> {
+  return invoke<RuntimeInstallResult>("install_latest_tachyon_core");
 }
 
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {

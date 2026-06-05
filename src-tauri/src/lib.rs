@@ -59,7 +59,7 @@ struct ManagedBinaryInfo {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct XrayReleaseInfo {
+struct RuntimeReleaseInfo {
     tag_name: String,
     asset_name: String,
     asset_url: String,
@@ -71,8 +71,8 @@ struct XrayReleaseInfo {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct XrayInstallResult {
-    release: XrayReleaseInfo,
+struct RuntimeInstallResult {
+    release: RuntimeReleaseInfo,
     sha256: String,
     binary_path: String,
     inventory: ManagedBinaryInventory,
@@ -223,13 +223,23 @@ fn install_managed_binary(
 }
 
 #[tauri::command]
-fn latest_xray_release() -> Result<XrayReleaseInfo, String> {
+fn latest_xray_release() -> Result<RuntimeReleaseInfo, String> {
     fetch_latest_xray_release()
 }
 
 #[tauri::command]
-fn install_latest_xray(app: tauri::AppHandle) -> Result<XrayInstallResult, String> {
+fn install_latest_xray(app: tauri::AppHandle) -> Result<RuntimeInstallResult, String> {
     install_latest_xray_release(&app)
+}
+
+#[tauri::command]
+fn latest_tachyon_core_release() -> Result<RuntimeReleaseInfo, String> {
+    fetch_latest_tachyon_core_release()
+}
+
+#[tauri::command]
+fn install_latest_tachyon_core(app: tauri::AppHandle) -> Result<RuntimeInstallResult, String> {
+    install_latest_tachyon_core_release(&app)
 }
 
 #[tauri::command]
@@ -499,20 +509,41 @@ fn managed_binary_target(
     Ok(config_dir.join("bin").join(binary_name(kind.binary_base())))
 }
 
-fn fetch_latest_xray_release() -> Result<XrayReleaseInfo, String> {
+fn fetch_latest_xray_release() -> Result<RuntimeReleaseInfo, String> {
     let release: GithubRelease =
         http_get_json("https://api.github.com/repos/XTLS/Xray-core/releases/latest")?;
     xray_release_info(release)
 }
 
-fn install_latest_xray_release(app: &tauri::AppHandle) -> Result<XrayInstallResult, String> {
+fn install_latest_xray_release(app: &tauri::AppHandle) -> Result<RuntimeInstallResult, String> {
     let release = fetch_latest_xray_release()?;
+    install_release_archive(app, ManagedBinaryKind::Xray, release)
+}
+
+fn fetch_latest_tachyon_core_release() -> Result<RuntimeReleaseInfo, String> {
+    let release: GithubRelease =
+        http_get_json("https://api.github.com/repos/EarendelArc/tachyon-core/releases/latest")?;
+    tachyon_core_release_info(release)
+}
+
+fn install_latest_tachyon_core_release(
+    app: &tauri::AppHandle,
+) -> Result<RuntimeInstallResult, String> {
+    let release = fetch_latest_tachyon_core_release()?;
+    install_release_archive(app, ManagedBinaryKind::TachyonCore, release)
+}
+
+fn install_release_archive(
+    app: &tauri::AppHandle,
+    kind: ManagedBinaryKind,
+    release: RuntimeReleaseInfo,
+) -> Result<RuntimeInstallResult, String> {
     let download_dir = app
         .path()
         .app_config_dir()
         .map_err(|err| format!("resolve app config directory: {err}"))?
         .join("downloads")
-        .join("xray")
+        .join(kind.key())
         .join(sanitize_file_component(&release.tag_name));
     fs::create_dir_all(&download_dir).map_err(|err| {
         format!(
@@ -537,15 +568,18 @@ fn install_latest_xray_release(app: &tauri::AppHandle) -> Result<XrayInstallResu
         ));
     }
 
-    let target = managed_binary_target(app, ManagedBinaryKind::Xray)?;
-    extract_binary_from_zip(&archive_path, &target, &binary_name("xray"))?;
+    let target = managed_binary_target(app, kind)?;
+    extract_binary_from_zip(&archive_path, &target, &binary_name(kind.binary_base()))?;
     make_executable(&target)?;
 
     let mut settings = load_runtime_settings(app)?;
-    settings.xray_binary_path = path_string(&target);
+    match kind {
+        ManagedBinaryKind::TachyonCore => settings.tachyon_core_binary_path = path_string(&target),
+        ManagedBinaryKind::Xray => settings.xray_binary_path = path_string(&target),
+    }
     let _ = save_runtime_settings_file(app, settings)?;
 
-    Ok(XrayInstallResult {
+    Ok(RuntimeInstallResult {
         release,
         sha256: actual_sha256,
         binary_path: path_string(&target),
@@ -553,7 +587,7 @@ fn install_latest_xray_release(app: &tauri::AppHandle) -> Result<XrayInstallResu
     })
 }
 
-fn xray_release_info(release: GithubRelease) -> Result<XrayReleaseInfo, String> {
+fn xray_release_info(release: GithubRelease) -> Result<RuntimeReleaseInfo, String> {
     let marker = xray_platform_asset_marker()?;
     let asset = release
         .assets
@@ -594,7 +628,44 @@ fn xray_release_info(release: GithubRelease) -> Result<XrayReleaseInfo, String> 
         .cloned()
         .ok_or_else(|| "no Xray checksum asset found".to_string())?;
 
-    Ok(XrayReleaseInfo {
+    Ok(RuntimeReleaseInfo {
+        tag_name: release.tag_name,
+        asset_name: asset.name,
+        asset_url: asset.browser_download_url,
+        asset_size_bytes: asset.size,
+        checksum_asset_name: checksum_asset.name,
+        checksum_url: checksum_asset.browser_download_url,
+        published_at: release.published_at,
+    })
+}
+
+fn tachyon_core_release_info(release: GithubRelease) -> Result<RuntimeReleaseInfo, String> {
+    let marker = tachyon_core_platform_asset_marker()?;
+    let asset = release
+        .assets
+        .iter()
+        .find(|asset| {
+            let name = asset.name.to_ascii_lowercase();
+            name.starts_with("tachyon-core_") && name.ends_with(".zip") && name.contains(marker)
+        })
+        .cloned()
+        .ok_or_else(|| {
+            format!("no Tachyon Core asset found for current platform marker {marker}")
+        })?;
+    let checksum_asset = release
+        .assets
+        .iter()
+        .find(|candidate| candidate.name.eq_ignore_ascii_case("SHA256SUMS.txt"))
+        .or_else(|| {
+            release.assets.iter().find(|candidate| {
+                let name = candidate.name.to_ascii_lowercase();
+                name.contains("sha256") || name.contains("checksum")
+            })
+        })
+        .cloned()
+        .ok_or_else(|| "no Tachyon Core checksum asset found".to_string())?;
+
+    Ok(RuntimeReleaseInfo {
         tag_name: release.tag_name,
         asset_name: asset.name,
         asset_url: asset.browser_download_url,
@@ -614,6 +685,19 @@ fn xray_platform_asset_marker() -> Result<&'static str, String> {
         ("macos", "x86_64") => Ok("macos-64"),
         ("macos", "aarch64") => Ok("macos-arm64"),
         (os, arch) => Err(format!("unsupported Xray platform: {os}/{arch}")),
+    }
+}
+
+fn tachyon_core_platform_asset_marker() -> Result<&'static str, String> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86") => Ok("windows_386"),
+        ("windows", "x86_64") => Ok("windows_amd64"),
+        ("windows", "aarch64") => Ok("windows_arm64"),
+        ("linux", "x86_64") => Ok("linux_amd64"),
+        ("linux", "aarch64") => Ok("linux_arm64"),
+        ("macos", "x86_64") => Ok("darwin_amd64"),
+        ("macos", "aarch64") => Ok("darwin_arm64"),
+        (os, arch) => Err(format!("unsupported Tachyon Core platform: {os}/{arch}")),
     }
 }
 
@@ -986,6 +1070,58 @@ fn epoch_seconds(time: SystemTime) -> Option<u64> {
         .ok()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selects_tachyon_core_asset_for_current_platform() {
+        let marker = tachyon_core_platform_asset_marker().expect("supported test platform");
+        let release = GithubRelease {
+            tag_name: "v0.1.0-alpha.1".to_string(),
+            published_at: Some("2026-06-05T00:00:00Z".to_string()),
+            assets: vec![
+                asset("tachyon-core_v0.1.0-alpha.1_windows_386.zip", 101),
+                asset("tachyon-core_v0.1.0-alpha.1_windows_amd64.zip", 102),
+                asset("tachyon-core_v0.1.0-alpha.1_windows_arm64.zip", 103),
+                asset("tachyon-core_v0.1.0-alpha.1_darwin_amd64.zip", 104),
+                asset("tachyon-core_v0.1.0-alpha.1_darwin_arm64.zip", 105),
+                asset("tachyon-core_v0.1.0-alpha.1_linux_amd64.zip", 106),
+                asset("tachyon-core_v0.1.0-alpha.1_linux_arm64.zip", 107),
+                asset("SHA256SUMS.txt", 512),
+            ],
+        };
+
+        let info = tachyon_core_release_info(release).expect("release info");
+
+        assert!(info.asset_name.contains(marker));
+        assert_eq!(info.checksum_asset_name, "SHA256SUMS.txt");
+        assert_eq!(info.tag_name, "v0.1.0-alpha.1");
+    }
+
+    #[test]
+    fn parses_checksum_line_for_asset() {
+        let checksum = find_checksum_for_asset(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  tachyon-core_v0.1.0-alpha.1_windows_amd64.zip\n",
+            "tachyon-core_v0.1.0-alpha.1_windows_amd64.zip",
+        )
+        .expect("checksum");
+
+        assert_eq!(
+            checksum,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+    }
+
+    fn asset(name: &str, size: u64) -> GithubAsset {
+        GithubAsset {
+            name: name.to_string(),
+            browser_download_url: format!("https://example.invalid/{name}"),
+            size,
+        }
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(RuntimeState::default())
@@ -1000,6 +1136,8 @@ pub fn run() {
             install_managed_binary,
             latest_xray_release,
             install_latest_xray,
+            latest_tachyon_core_release,
+            install_latest_tachyon_core,
             runtime_status,
             start_xray,
             stop_xray,

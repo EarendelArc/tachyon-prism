@@ -24,8 +24,8 @@ sent through Tachyon Core for low-latency acceleration.
   Tauri app config directory.
 - Persistent runtime binary path settings for Xray Core and Tachyon Core.
 - Managed local binary installation into Prism's app config `bin` directory.
-- Online Xray Core latest-release discovery, download, SHA-256 verification,
-  and managed install from the official GitHub release channel.
+- Online Xray Core and Tachyon Core latest-release discovery, download,
+  SHA-256 verification, and managed install from GitHub release channels.
 - Runtime controls for launching and stopping Xray Core and Tachyon Core as
   separate subprocesses.
 
@@ -75,19 +75,19 @@ needs the generated `client.json`; Xray is launched and configured by Prism.
 
 The Binaries panel can copy a local `xray` or `tachyon-core` executable into
 Prism's managed app config `bin` directory and point `runtime-settings.json` at
-that managed copy. It can also query the latest official Xray GitHub release,
-choose the current platform archive, download the matching `.dgst` or checksum
-asset, verify the archive SHA-256, extract `xray`/`xray.exe`, and atomically
-install it into the managed `bin` directory.
+that managed copy. It can also query the latest Xray Core and Tachyon Core
+GitHub releases, choose the current platform archive, download the matching
+`.dgst` / `SHA256SUMS.txt` checksum asset, verify the archive SHA-256, extract
+`xray`/`xray.exe` or `tachyon-core`/`tachyon-core.exe`, and atomically install
+the executable into the managed `bin` directory.
 
 The Runtime panel stores binary paths in `runtime-settings.json`. `Start All`
 first writes the latest generated config files, then launches Xray with
 `xray-client.json` and Tachyon Core with `client.json`.
 
-The managed-binary API is intentionally separate from launch control so the
-next step can add Tachyon Core release discovery, mirror selection, background
-progress events, and privilege-elevation flows without changing the Runtime
-panel contract.
+The managed-binary API is intentionally separate from launch control so future
+mirror selection, background progress events, and privilege-elevation flows can
+be added without changing the Runtime panel contract.
 
 ## Development Environment
 

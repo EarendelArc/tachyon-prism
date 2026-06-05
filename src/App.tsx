@@ -14,10 +14,12 @@ import type { GameProfile } from "./domain/gameProfiles";
 import { defaultGameProfiles } from "./domain/gameProfiles";
 import {
   getManagedBinaries,
+  getLatestTachyonCoreRelease,
   getLatestXrayRelease,
   getRuntimePaths,
   getRuntimeSettings,
   getRuntimeStatus,
+  installLatestTachyonCore,
   installLatestXray,
   installManagedBinary,
   saveRuntimeSettings,
@@ -30,8 +32,8 @@ import {
   type ManagedBinaryKind,
   type ProcessStatus,
   type RuntimePaths,
+  type RuntimeReleaseInfo,
   type RuntimeStatus,
-  type XrayReleaseInfo,
 } from "./domain/runtime";
 import {
   createSubscriptionSnapshot,
@@ -99,6 +101,10 @@ function configuredStatusLabel(binary: ManagedBinaryInfo): string {
   return binary.configuredExists ? "configured path exists" : "configured path missing";
 }
 
+function managedBinaryDisplayName(kind: ManagedBinaryKind): string {
+  return kind === "xray" ? "Xray Core" : "Tachyon Core";
+}
+
 function draftText(activeNode: ProxyNode | undefined): {
   core: string;
   error: string;
@@ -139,7 +145,9 @@ export function App() {
   const [runtimeInputs, setRuntimeInputs] = useState(emptyRuntimeInputs);
   const [managedBinaries, setManagedBinaries] = useState<ManagedBinaryInventory | null>(null);
   const [binarySourceInputs, setBinarySourceInputs] = useState(emptyBinarySourceInputs);
-  const [xrayRelease, setXrayRelease] = useState<XrayReleaseInfo | null>(null);
+  const [binaryReleases, setBinaryReleases] = useState<
+    Partial<Record<ManagedBinaryKind, RuntimeReleaseInfo>>
+  >({});
   const [binaryBusy, setBinaryBusy] = useState(false);
   const [message, setMessage] = useState("Ready");
 
@@ -373,29 +381,43 @@ export function App() {
     }
   }
 
-  async function checkLatestXray() {
+  async function checkLatestRelease(kind: ManagedBinaryKind) {
     try {
       setBinaryBusy(true);
-      const release = await getLatestXrayRelease();
-      setXrayRelease(release);
-      setMessage(`Latest Xray ${release.tagName}`);
+      const release =
+        kind === "xray" ? await getLatestXrayRelease() : await getLatestTachyonCoreRelease();
+      setBinaryReleases((current) => ({
+        ...current,
+        [kind]: release,
+      }));
+      setMessage(`Latest ${managedBinaryDisplayName(kind)} ${release.tagName}`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Xray release check failed");
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : `${managedBinaryDisplayName(kind)} release check failed`,
+      );
     } finally {
       setBinaryBusy(false);
     }
   }
 
-  async function downloadLatestXray() {
+  async function downloadLatestRelease(kind: ManagedBinaryKind) {
     try {
       setBinaryBusy(true);
-      const result = await installLatestXray();
-      setXrayRelease(result.release);
+      const result =
+        kind === "xray" ? await installLatestXray() : await installLatestTachyonCore();
+      setBinaryReleases((current) => ({
+        ...current,
+        [kind]: result.release,
+      }));
       setManagedBinaries(result.inventory);
       setRuntimeInputs(result.inventory.runtimeSettings);
-      setMessage(`Xray ${result.release.tagName} installed`);
+      setMessage(`${managedBinaryDisplayName(kind)} ${result.release.tagName} installed`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Xray install failed");
+      setMessage(
+        error instanceof Error ? error.message : `${managedBinaryDisplayName(kind)} install failed`,
+      );
     } finally {
       setBinaryBusy(false);
     }
@@ -883,30 +905,11 @@ export function App() {
                 <header>
                   <h2>Binaries</h2>
                   <div className="row-actions">
-                    <button type="button" disabled={binaryBusy} onClick={() => void checkLatestXray()}>
-                      Check Xray
-                    </button>
-                    <button
-                      type="button"
-                      disabled={binaryBusy}
-                      onClick={() => void downloadLatestXray()}
-                    >
-                      Install Latest Xray
-                    </button>
                     <button type="button" onClick={() => void refreshManagedBinaries()}>
                       Refresh
                     </button>
                   </div>
                 </header>
-                {xrayRelease ? (
-                  <div className="release-summary">
-                    <strong>Xray {xrayRelease.tagName}</strong>
-                    <span>
-                      {xrayRelease.assetName} / {formatBytes(xrayRelease.assetSizeBytes)}
-                    </span>
-                    <span>{xrayRelease.checksumAssetName}</span>
-                  </div>
-                ) : null}
                 {managedBinaries ? (
                   <div className="path-list">
                     <div>
@@ -918,8 +921,8 @@ export function App() {
                 <div className="binary-grid">
                   {managedBinaryKinds.map((kind) => {
                     const binary = binaryInfo(kind);
-                    const displayName =
-                      binary?.displayName ?? (kind === "xray" ? "Xray Core" : "Tachyon Core");
+                    const displayName = binary?.displayName ?? managedBinaryDisplayName(kind);
+                    const release = binaryReleases[kind];
                     return (
                       <div className="binary-row" key={kind}>
                         <div className="binary-meta">
@@ -927,6 +930,12 @@ export function App() {
                           <span>{binary ? managedStatusLabel(binary) : "inventory unavailable"}</span>
                           {binary ? <span>{configuredStatusLabel(binary)}</span> : null}
                           {binary ? <span>{binary.targetPath}</span> : null}
+                          {release ? (
+                            <span>
+                              Latest {release.tagName}: {release.assetName} /{" "}
+                              {formatBytes(release.assetSizeBytes)}
+                            </span>
+                          ) : null}
                         </div>
                         <input
                           placeholder="Source binary path"
@@ -944,6 +953,20 @@ export function App() {
                           </button>
                           <button type="button" onClick={() => void useManagedBinary(kind)}>
                             Use Managed
+                          </button>
+                          <button
+                            type="button"
+                            disabled={binaryBusy}
+                            onClick={() => void checkLatestRelease(kind)}
+                          >
+                            Check Latest
+                          </button>
+                          <button
+                            type="button"
+                            disabled={binaryBusy}
+                            onClick={() => void downloadLatestRelease(kind)}
+                          >
+                            Install Latest
                           </button>
                         </div>
                       </div>
