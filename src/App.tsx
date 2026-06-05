@@ -44,6 +44,7 @@ import {
 import type { ProxyNode, SubscriptionSnapshot } from "./domain/subscriptions";
 
 type ConnectionState = "checking" | "connected" | "disconnected";
+type PrismView = "overview" | "nodes" | "game" | "launchers" | "runtime" | "config";
 
 const emptyProfile = {
   displayName: "",
@@ -123,6 +124,7 @@ function draftText(activeNode: ProxyNode | undefined): {
 }
 
 export function App() {
+  const [activeView, setActiveView] = useState<PrismView>("overview");
   const [connection, setConnection] = useState<ConnectionState>("checking");
   const [profiles, setProfiles] = useState<GameProfile[]>(defaultGameProfiles);
   const [suggestions, setSuggestions] = useState<GameProfile[]>([]);
@@ -512,387 +514,570 @@ export function App() {
     setSubscriptionUrl(subscription.sourceUrl === "manual" ? "" : subscription.sourceUrl);
   }, [subscription.sourceUrl]);
 
+  const viewMeta: Record<
+    PrismView,
+    { eyebrow: string; label: string; subtitle: string; title: string }
+  > = {
+    overview: {
+      eyebrow: "Dashboard",
+      label: "Overview",
+      subtitle: "Core health, selected egress, game acceleration and runtime state.",
+      title: "Overview",
+    },
+    nodes: {
+      eyebrow: "Profiles",
+      label: "Nodes",
+      subtitle: "Import subscriptions, inspect parsed Xray nodes and choose the active route.",
+      title: "Node Library",
+    },
+    game: {
+      eyebrow: "Rules",
+      label: "Game Mode",
+      subtitle: "Manage manual game profiles and process-aware UDP acceleration rules.",
+      title: "Game Mode",
+    },
+    launchers: {
+      eyebrow: "Discovery",
+      label: "Launchers",
+      subtitle: "Scan Steam libraries and add detected games to Tachyon acceleration.",
+      title: "Launchers",
+    },
+    runtime: {
+      eyebrow: "Cores",
+      label: "Runtime",
+      subtitle: "Install, select and supervise Xray Core and Tachyon Core binaries.",
+      title: "Runtime",
+    },
+    config: {
+      eyebrow: "Generated",
+      label: "Config",
+      subtitle: "Review and save generated JSON config files for both managed cores.",
+      title: "Config Drafts",
+    },
+  };
+
+  const navItems: Array<{ badge?: number; id: PrismView }> = [
+    { id: "overview" },
+    { badge: subscription.nodes.length, id: "nodes" },
+    { badge: activeProfiles, id: "game" },
+    { badge: suggestions.length, id: "launchers" },
+    { id: "runtime" },
+    { id: "config" },
+  ];
+  const currentView = viewMeta[activeView];
+  const connectionLabel =
+    connection === "connected"
+      ? "Connected"
+      : connection === "checking"
+        ? "Checking"
+        : "Disconnected";
+  const runtimeRows = [
+    { label: "Xray Core", value: processStatusLabel(runtimeStatus?.xray) },
+    { label: "Tachyon Core", value: processStatusLabel(runtimeStatus?.tachyonCore) },
+  ];
+
   return (
     <main className="app-shell">
-      <section className="topbar">
-        <div>
-          <h1>Tachyon Prism</h1>
-          <p>{connection === "connected" ? "Core connected" : "Core disconnected"}</p>
+      <aside className="sidebar">
+        <div className="brand-block">
+          <span className="brand-mark">T</span>
+          <div>
+            <h1>Tachyon Prism</h1>
+            <p>Xray + Tachyon control plane</p>
+          </div>
         </div>
-        <button type="button" onClick={() => void refreshProfiles()}>
-          Connect Core
-        </button>
-      </section>
-
-      <section className="dashboard-grid">
-        <article className="panel latency-panel">
-          <header>
-            <h2>Status</h2>
-            <span>{message}</span>
-          </header>
-          <div className="status-metrics">
-            <div>
-              <strong>{profiles.length}</strong>
-              <span>Profiles</span>
-            </div>
-            <div>
-              <strong>{activeProfiles}</strong>
-              <span>Active</span>
-            </div>
-            <div>
-              <strong>{suggestions.length}</strong>
-              <span>Suggestions</span>
-            </div>
-            <div>
-              <strong>{subscription.nodes.length}</strong>
-              <span>Nodes</span>
-            </div>
-          </div>
-          <div className="waveform" aria-label="latency waveform" />
-        </article>
-
-        <article className="panel">
-          <header>
-            <h2>Game Mode</h2>
-            <button type="button" onClick={() => void addManualProfile()}>
-              Add Program
+        <nav className="side-nav" aria-label="Primary">
+          {navItems.map((item) => (
+            <button
+              aria-current={item.id === activeView ? "page" : undefined}
+              className={item.id === activeView ? "nav-item active" : "nav-item"}
+              key={item.id}
+              type="button"
+              onClick={() => setActiveView(item.id)}
+            >
+              <span>{viewMeta[item.id].label}</span>
+              {typeof item.badge === "number" ? <strong>{item.badge}</strong> : null}
             </button>
-          </header>
-          <div className="form-grid">
-            <input
-              placeholder="Display name"
-              value={manualProfile.displayName}
-              onChange={(event) =>
-                setManualProfile((current) => ({
-                  ...current,
-                  displayName: event.target.value,
-                }))
-              }
-            />
-            <input
-              placeholder="Process name"
-              value={manualProfile.processName}
-              onChange={(event) =>
-                setManualProfile((current) => ({
-                  ...current,
-                  processName: event.target.value,
-                }))
-              }
-            />
-            <input
-              className="wide-input"
-              placeholder="Executable path"
-              value={manualProfile.executablePath}
-              onChange={(event) =>
-                setManualProfile((current) => ({
-                  ...current,
-                  executablePath: event.target.value,
-                }))
-              }
-            />
+          ))}
+        </nav>
+        <div className="sidebar-status">
+          <span className={`connection-pill ${connection}`}>{connectionLabel}</span>
+          <strong>{message}</strong>
+        </div>
+      </aside>
+
+      <section className="content-shell">
+        <header className="page-header">
+          <div>
+            <span className="eyebrow">{currentView.eyebrow}</span>
+            <h2>{currentView.title}</h2>
+            <p>{currentView.subtitle}</p>
           </div>
-          <div className="profile-list">
-            {profiles.map((profile) => (
-              <div className="profile-row" key={profile.id}>
-                <div>
-                  <strong>{profile.displayName}</strong>
+          <div className="header-actions">
+            <button type="button" onClick={() => void refreshProfiles()}>
+              Connect Core
+            </button>
+            <button type="button" onClick={() => void startAllRuntime()}>
+              Start All
+            </button>
+            <button type="button" onClick={() => void stopAllRuntime()}>
+              Stop All
+            </button>
+          </div>
+        </header>
+
+        <section className="view-stack">
+          {activeView === "overview" ? (
+            <div className="overview-layout">
+              <article className="panel latency-panel">
+                <header>
+                  <div>
+                    <h2>Status</h2>
+                    <p>{message}</p>
+                  </div>
+                  <span className={`status-chip ${connection}`}>{connectionLabel}</span>
+                </header>
+                <div className="status-metrics">
+                  <div>
+                    <strong>{profiles.length}</strong>
+                    <span>Profiles</span>
+                  </div>
+                  <div>
+                    <strong>{activeProfiles}</strong>
+                    <span>Active</span>
+                  </div>
+                  <div>
+                    <strong>{suggestions.length}</strong>
+                    <span>Suggestions</span>
+                  </div>
+                  <div>
+                    <strong>{subscription.nodes.length}</strong>
+                    <span>Nodes</span>
+                  </div>
+                </div>
+                <div className="waveform" aria-label="latency waveform" />
+              </article>
+
+              <div className="overview-side">
+                <article className="panel compact-panel">
+                  <header>
+                    <h2>Selected Node</h2>
+                    <button type="button" onClick={() => setActiveView("nodes")}>
+                      Manage
+                    </button>
+                  </header>
+                  {activeNode ? (
+                    <div className="selected-node">
+                      <strong>{activeNode.name}</strong>
+                      <span>
+                        {activeNode.protocol.toUpperCase()} {nodeEndpoint(activeNode)}
+                        {activeNode.transport ? ` / ${activeNode.transport}` : ""}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="empty-state">No node selected</div>
+                  )}
+                </article>
+
+                <article className="panel compact-panel">
+                  <header>
+                    <h2>Runtime</h2>
+                    <button type="button" onClick={() => setActiveView("runtime")}>
+                      Manage
+                    </button>
+                  </header>
+                  <div className="runtime-status-list">
+                    {runtimeRows.map((row) => (
+                      <div key={row.label}>
+                        <span>{row.label}</span>
+                        <strong>{row.value}</strong>
+                      </div>
+                    ))}
+                  </div>
+                </article>
+
+                <article className="panel compact-panel">
+                  <header>
+                    <h2>Game Mode</h2>
+                    <button type="button" onClick={() => setActiveView("game")}>
+                      Manage
+                    </button>
+                  </header>
+                  <div className="runtime-status-list">
+                    <div>
+                      <span>UDP Policy</span>
+                      <strong>TGP</strong>
+                    </div>
+                    <div>
+                      <span>Enabled Profiles</span>
+                      <strong>{activeProfiles}</strong>
+                    </div>
+                  </div>
+                </article>
+              </div>
+            </div>
+          ) : null}
+
+          {activeView === "game" ? (
+            <article className="panel">
+              <header>
+                <h2>Game Mode</h2>
+                <button type="button" onClick={() => void addManualProfile()}>
+                  Add Program
+                </button>
+              </header>
+              <div className="form-grid">
+                <input
+                  placeholder="Display name"
+                  value={manualProfile.displayName}
+                  onChange={(event) =>
+                    setManualProfile((current) => ({
+                      ...current,
+                      displayName: event.target.value,
+                    }))
+                  }
+                />
+                <input
+                  placeholder="Process name"
+                  value={manualProfile.processName}
+                  onChange={(event) =>
+                    setManualProfile((current) => ({
+                      ...current,
+                      processName: event.target.value,
+                    }))
+                  }
+                />
+                <input
+                  className="wide-input"
+                  placeholder="Executable path"
+                  value={manualProfile.executablePath}
+                  onChange={(event) =>
+                    setManualProfile((current) => ({
+                      ...current,
+                      executablePath: event.target.value,
+                    }))
+                  }
+                />
+              </div>
+              <div className="profile-list">
+                {profiles.map((profile) => (
+                  <div className="profile-row" key={profile.id}>
+                    <div>
+                      <strong>{profile.displayName}</strong>
+                      <span>
+                        {[...profile.match.processNames, ...profile.match.paths]
+                          .filter(Boolean)
+                          .join(", ") ||
+                          profile.match.steamAppIds.map((id) => `Steam ${id}`).join(", ")}
+                      </span>
+                    </div>
+                    <div className="row-actions">
+                      <span>{profile.udpPolicy.toUpperCase()}</span>
+                      <button type="button" onClick={() => void removeProfile(profile.id)}>
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </article>
+          ) : null}
+
+          {activeView === "nodes" ? (
+            <article className="panel">
+              <header>
+                <h2>Nodes</h2>
+                <button type="button" onClick={() => void updateSubscriptionFromUrl()}>
+                  Update
+                </button>
+              </header>
+              <div className="form-grid">
+                <input
+                  className="wide-input"
+                  placeholder="Subscription URL"
+                  value={subscriptionUrl}
+                  onChange={(event) => setSubscriptionUrl(event.target.value)}
+                />
+                <textarea
+                  className="wide-input"
+                  placeholder="Paste subscription payload"
+                  value={subscriptionText}
+                  onChange={(event) => setSubscriptionText(event.target.value)}
+                />
+                <button type="button" onClick={() => void importSubscriptionText()}>
+                  Import
+                </button>
+              </div>
+              {activeNode ? (
+                <div className="selected-node">
+                  <strong>{activeNode.name}</strong>
                   <span>
-                    {[...profile.match.processNames, ...profile.match.paths]
-                      .filter(Boolean)
-                      .join(", ") || profile.match.steamAppIds.map((id) => `Steam ${id}`).join(", ")}
+                    {activeNode.protocol.toUpperCase()} {nodeEndpoint(activeNode)}
                   </span>
                 </div>
+              ) : null}
+              <div className="profile-list">
+                {subscription.nodes.map((node) => (
+                  <div className="profile-row" key={node.id}>
+                    <div>
+                      <strong>{node.name}</strong>
+                      <span>
+                        {node.protocol.toUpperCase()} {nodeEndpoint(node)}
+                        {node.transport ? ` / ${node.transport}` : ""}
+                      </span>
+                    </div>
+                    <button
+                      className={node.id === subscription.selectedNodeId ? "active-button" : ""}
+                      type="button"
+                      onClick={() => chooseNode(node.id)}
+                    >
+                      {node.id === subscription.selectedNodeId ? "Selected" : "Select"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </article>
+          ) : null}
+
+          {activeView === "launchers" ? (
+            <article className="panel">
+              <header>
+                <h2>Launchers</h2>
+                <button type="button" onClick={() => void scanSteam()}>
+                  Scan Steam
+                </button>
+              </header>
+              <input
+                className="full-input"
+                placeholder="Steam root"
+                value={steamRoot}
+                onChange={(event) => setSteamRoot(event.target.value)}
+              />
+              <div className="switch-row">
+                <span>Steam child process tracking</span>
+                <input type="checkbox" defaultChecked />
+              </div>
+              <div className="switch-row">
+                <span>Accelerate Steam downloads</span>
+                <input type="checkbox" />
+              </div>
+              <div className="suggestion-list">
+                {suggestions.map((profile) => (
+                  <div className="profile-row" key={profile.id}>
+                    <div>
+                      <strong>{profile.displayName}</strong>
+                      <span>{profile.match.steamAppIds.map((id) => `Steam ${id}`).join(", ")}</span>
+                    </div>
+                    <button type="button" onClick={() => void addSuggestion(profile)}>
+                      Add
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </article>
+          ) : null}
+
+          {activeView === "runtime" ? (
+            <>
+              <article className="panel binary-panel">
+                <header>
+                  <h2>Binaries</h2>
+                  <div className="row-actions">
+                    <button type="button" disabled={binaryBusy} onClick={() => void checkLatestXray()}>
+                      Check Xray
+                    </button>
+                    <button
+                      type="button"
+                      disabled={binaryBusy}
+                      onClick={() => void downloadLatestXray()}
+                    >
+                      Install Latest Xray
+                    </button>
+                    <button type="button" onClick={() => void refreshManagedBinaries()}>
+                      Refresh
+                    </button>
+                  </div>
+                </header>
+                {xrayRelease ? (
+                  <div className="release-summary">
+                    <strong>Xray {xrayRelease.tagName}</strong>
+                    <span>
+                      {xrayRelease.assetName} / {formatBytes(xrayRelease.assetSizeBytes)}
+                    </span>
+                    <span>{xrayRelease.checksumAssetName}</span>
+                  </div>
+                ) : null}
+                {managedBinaries ? (
+                  <div className="path-list">
+                    <div>
+                      <span>managed bin</span>
+                      <strong>{managedBinaries.binDir}</strong>
+                    </div>
+                  </div>
+                ) : null}
+                <div className="binary-grid">
+                  {managedBinaryKinds.map((kind) => {
+                    const binary = binaryInfo(kind);
+                    const displayName =
+                      binary?.displayName ?? (kind === "xray" ? "Xray Core" : "Tachyon Core");
+                    return (
+                      <div className="binary-row" key={kind}>
+                        <div className="binary-meta">
+                          <strong>{displayName}</strong>
+                          <span>{binary ? managedStatusLabel(binary) : "inventory unavailable"}</span>
+                          {binary ? <span>{configuredStatusLabel(binary)}</span> : null}
+                          {binary ? <span>{binary.targetPath}</span> : null}
+                        </div>
+                        <input
+                          placeholder="Source binary path"
+                          value={binarySourceInputs[kind]}
+                          onChange={(event) =>
+                            setBinarySourceInputs((current) => ({
+                              ...current,
+                              [kind]: event.target.value,
+                            }))
+                          }
+                        />
+                        <div className="row-actions">
+                          <button type="button" onClick={() => void installBinary(kind)}>
+                            Install
+                          </button>
+                          <button type="button" onClick={() => void useManagedBinary(kind)}>
+                            Use Managed
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </article>
+
+              <article className="panel runtime-panel">
+                <header>
+                  <h2>Runtime</h2>
+                  <div className="row-actions">
+                    <button type="button" onClick={() => void saveRuntimeInputs()}>
+                      Save Paths
+                    </button>
+                    <button type="button" onClick={() => void startAllRuntime()}>
+                      Start All
+                    </button>
+                    <button type="button" onClick={() => void stopAllRuntime()}>
+                      Stop All
+                    </button>
+                    <button type="button" onClick={() => void refreshRuntime()}>
+                      Refresh
+                    </button>
+                  </div>
+                </header>
+                {runtimePaths ? (
+                  <div className="path-list">
+                    <div>
+                      <span>bin</span>
+                      <strong>{runtimePaths.binDir}</strong>
+                    </div>
+                    <div>
+                      <span>runtime-settings.json</span>
+                      <strong>{runtimePaths.runtimeSettingsPath}</strong>
+                    </div>
+                  </div>
+                ) : null}
+                <div className="runtime-grid">
+                  <div className="runtime-row">
+                    <div>
+                      <strong>Xray Core</strong>
+                      <span>{processStatusLabel(runtimeStatus?.xray)}</span>
+                    </div>
+                    <input
+                      placeholder="Xray binary"
+                      value={runtimeInputs.xrayBinaryPath}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({
+                          ...current,
+                          xrayBinaryPath: event.target.value,
+                        }))
+                      }
+                    />
+                    <div className="row-actions">
+                      <button type="button" onClick={() => void startRuntime("xray")}>
+                        Start
+                      </button>
+                      <button type="button" onClick={() => void stopRuntime("xray")}>
+                        Stop
+                      </button>
+                    </div>
+                  </div>
+                  <div className="runtime-row">
+                    <div>
+                      <strong>Tachyon Core</strong>
+                      <span>{processStatusLabel(runtimeStatus?.tachyonCore)}</span>
+                    </div>
+                    <input
+                      placeholder="Tachyon Core binary"
+                      value={runtimeInputs.tachyonCoreBinaryPath}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({
+                          ...current,
+                          tachyonCoreBinaryPath: event.target.value,
+                        }))
+                      }
+                    />
+                    <div className="row-actions">
+                      <button type="button" onClick={() => void startRuntime("tachyonCore")}>
+                        Start
+                      </button>
+                      <button type="button" onClick={() => void stopRuntime("tachyonCore")}>
+                        Stop
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </article>
+            </>
+          ) : null}
+
+          {activeView === "config" ? (
+            <article className="panel config-panel">
+              <header>
+                <h2>Config</h2>
                 <div className="row-actions">
-                  <span>{profile.udpPolicy.toUpperCase()}</span>
-                  <button type="button" onClick={() => void removeProfile(profile.id)}>
-                    Remove
+                  <button type="button" onClick={() => void saveDrafts()}>
+                    Save
+                  </button>
+                  <button type="button" onClick={() => void copyDraft("Xray config", drafts.xray)}>
+                    Copy Xray
+                  </button>
+                  <button type="button" onClick={() => void copyDraft("Core config", drafts.core)}>
+                    Copy Core
                   </button>
                 </div>
-              </div>
-            ))}
-          </div>
-        </article>
-
-        <article className="panel">
-          <header>
-            <h2>Nodes</h2>
-            <button type="button" onClick={() => void updateSubscriptionFromUrl()}>
-              Update
-            </button>
-          </header>
-          <div className="form-grid">
-            <input
-              className="wide-input"
-              placeholder="Subscription URL"
-              value={subscriptionUrl}
-              onChange={(event) => setSubscriptionUrl(event.target.value)}
-            />
-            <textarea
-              className="wide-input"
-              placeholder="Paste subscription payload"
-              value={subscriptionText}
-              onChange={(event) => setSubscriptionText(event.target.value)}
-            />
-            <button type="button" onClick={() => void importSubscriptionText()}>
-              Import
-            </button>
-          </div>
-          {activeNode ? (
-            <div className="selected-node">
-              <strong>{activeNode.name}</strong>
-              <span>
-                {activeNode.protocol.toUpperCase()} {nodeEndpoint(activeNode)}
-              </span>
-            </div>
-          ) : null}
-          <div className="profile-list">
-            {subscription.nodes.map((node) => (
-              <div className="profile-row" key={node.id}>
-                <div>
-                  <strong>{node.name}</strong>
-                  <span>
-                    {node.protocol.toUpperCase()} {nodeEndpoint(node)}
-                    {node.transport ? ` / ${node.transport}` : ""}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  className={node.id === subscription.selectedNodeId ? "active-button" : ""}
-                  onClick={() => chooseNode(node.id)}
-                >
-                  {node.id === subscription.selectedNodeId ? "Selected" : "Select"}
-                </button>
-              </div>
-            ))}
-          </div>
-        </article>
-
-        <article className="panel config-panel">
-          <header>
-            <h2>Config</h2>
-            <div className="row-actions">
-              <button type="button" onClick={() => void saveDrafts()}>
-                Save
-              </button>
-              <button type="button" onClick={() => void copyDraft("Xray config", drafts.xray)}>
-                Copy Xray
-              </button>
-              <button type="button" onClick={() => void copyDraft("Core config", drafts.core)}>
-                Copy Core
-              </button>
-            </div>
-          </header>
-          {drafts.error ? <div className="inline-error">{drafts.error}</div> : null}
-          {configPaths ? (
-            <div className="path-list">
-              <div>
-                <span>client.json</span>
-                <strong>{configPaths.coreConfigPath}</strong>
-              </div>
-              <div>
-                <span>xray-client.json</span>
-                <strong>{configPaths.xrayConfigPath}</strong>
-              </div>
-            </div>
-          ) : null}
-          <div className="config-grid">
-            <label>
-              <span>Xray</span>
-              <textarea readOnly value={drafts.xray} />
-            </label>
-            <label>
-              <span>Core</span>
-              <textarea readOnly value={drafts.core} />
-            </label>
-          </div>
-        </article>
-
-        <article className="panel binary-panel">
-          <header>
-            <h2>Binaries</h2>
-            <div className="row-actions">
-              <button type="button" disabled={binaryBusy} onClick={() => void checkLatestXray()}>
-                Check Xray
-              </button>
-              <button type="button" disabled={binaryBusy} onClick={() => void downloadLatestXray()}>
-                Install Latest Xray
-              </button>
-              <button type="button" onClick={() => void refreshManagedBinaries()}>
-                Refresh
-              </button>
-            </div>
-          </header>
-          {xrayRelease ? (
-            <div className="release-summary">
-              <strong>Xray {xrayRelease.tagName}</strong>
-              <span>
-                {xrayRelease.assetName} / {formatBytes(xrayRelease.assetSizeBytes)}
-              </span>
-              <span>{xrayRelease.checksumAssetName}</span>
-            </div>
-          ) : null}
-          {managedBinaries ? (
-            <div className="path-list">
-              <div>
-                <span>managed bin</span>
-                <strong>{managedBinaries.binDir}</strong>
-              </div>
-            </div>
-          ) : null}
-          <div className="binary-grid">
-            {managedBinaryKinds.map((kind) => {
-              const binary = binaryInfo(kind);
-              const displayName =
-                binary?.displayName ?? (kind === "xray" ? "Xray Core" : "Tachyon Core");
-              return (
-                <div className="binary-row" key={kind}>
-                  <div className="binary-meta">
-                    <strong>{displayName}</strong>
-                    <span>{binary ? managedStatusLabel(binary) : "inventory unavailable"}</span>
-                    {binary ? <span>{configuredStatusLabel(binary)}</span> : null}
-                    {binary ? <span>{binary.targetPath}</span> : null}
+              </header>
+              {drafts.error ? <div className="inline-error">{drafts.error}</div> : null}
+              {configPaths ? (
+                <div className="path-list">
+                  <div>
+                    <span>client.json</span>
+                    <strong>{configPaths.coreConfigPath}</strong>
                   </div>
-                  <input
-                    placeholder="Source binary path"
-                    value={binarySourceInputs[kind]}
-                    onChange={(event) =>
-                      setBinarySourceInputs((current) => ({
-                        ...current,
-                        [kind]: event.target.value,
-                      }))
-                    }
-                  />
-                  <div className="row-actions">
-                    <button type="button" onClick={() => void installBinary(kind)}>
-                      Install
-                    </button>
-                    <button type="button" onClick={() => void useManagedBinary(kind)}>
-                      Use Managed
-                    </button>
+                  <div>
+                    <span>xray-client.json</span>
+                    <strong>{configPaths.xrayConfigPath}</strong>
                   </div>
                 </div>
-              );
-            })}
-          </div>
-        </article>
-
-        <article className="panel runtime-panel">
-          <header>
-            <h2>Runtime</h2>
-            <div className="row-actions">
-              <button type="button" onClick={() => void saveRuntimeInputs()}>
-                Save Paths
-              </button>
-              <button type="button" onClick={() => void startAllRuntime()}>
-                Start All
-              </button>
-              <button type="button" onClick={() => void stopAllRuntime()}>
-                Stop All
-              </button>
-              <button type="button" onClick={() => void refreshRuntime()}>
-                Refresh
-              </button>
-            </div>
-          </header>
-          {runtimePaths ? (
-            <div className="path-list">
-              <div>
-                <span>bin</span>
-                <strong>{runtimePaths.binDir}</strong>
+              ) : null}
+              <div className="config-grid">
+                <label>
+                  <span>Xray</span>
+                  <textarea readOnly value={drafts.xray} />
+                </label>
+                <label>
+                  <span>Core</span>
+                  <textarea readOnly value={drafts.core} />
+                </label>
               </div>
-              <div>
-                <span>runtime-settings.json</span>
-                <strong>{runtimePaths.runtimeSettingsPath}</strong>
-              </div>
-            </div>
+            </article>
           ) : null}
-          <div className="runtime-grid">
-            <div className="runtime-row">
-              <div>
-                <strong>Xray Core</strong>
-                <span>{processStatusLabel(runtimeStatus?.xray)}</span>
-              </div>
-              <input
-                placeholder="Xray binary"
-                value={runtimeInputs.xrayBinaryPath}
-                onChange={(event) =>
-                  setRuntimeInputs((current) => ({
-                    ...current,
-                    xrayBinaryPath: event.target.value,
-                  }))
-                }
-              />
-              <div className="row-actions">
-                <button type="button" onClick={() => void startRuntime("xray")}>
-                  Start
-                </button>
-                <button type="button" onClick={() => void stopRuntime("xray")}>
-                  Stop
-                </button>
-              </div>
-            </div>
-            <div className="runtime-row">
-              <div>
-                <strong>Tachyon Core</strong>
-                <span>{processStatusLabel(runtimeStatus?.tachyonCore)}</span>
-              </div>
-              <input
-                placeholder="Tachyon Core binary"
-                value={runtimeInputs.tachyonCoreBinaryPath}
-                onChange={(event) =>
-                  setRuntimeInputs((current) => ({
-                    ...current,
-                    tachyonCoreBinaryPath: event.target.value,
-                  }))
-                }
-              />
-              <div className="row-actions">
-                <button type="button" onClick={() => void startRuntime("tachyonCore")}>
-                  Start
-                </button>
-                <button type="button" onClick={() => void stopRuntime("tachyonCore")}>
-                  Stop
-                </button>
-              </div>
-            </div>
-          </div>
-        </article>
-
-        <article className="panel">
-          <header>
-            <h2>Launchers</h2>
-            <button type="button" onClick={() => void scanSteam()}>
-              Scan Steam
-            </button>
-          </header>
-          <input
-            className="full-input"
-            placeholder="Steam root"
-            value={steamRoot}
-            onChange={(event) => setSteamRoot(event.target.value)}
-          />
-          <div className="switch-row">
-            <span>Steam child process tracking</span>
-            <input type="checkbox" defaultChecked />
-          </div>
-          <div className="switch-row">
-            <span>Accelerate Steam downloads</span>
-            <input type="checkbox" />
-          </div>
-          <div className="suggestion-list">
-            {suggestions.map((profile) => (
-              <div className="profile-row" key={profile.id}>
-                <div>
-                  <strong>{profile.displayName}</strong>
-                  <span>{profile.match.steamAppIds.map((id) => `Steam ${id}`).join(", ")}</span>
-                </div>
-                <button type="button" onClick={() => void addSuggestion(profile)}>
-                  Add
-                </button>
-              </div>
-            ))}
-          </div>
-        </article>
+        </section>
       </section>
     </main>
   );
