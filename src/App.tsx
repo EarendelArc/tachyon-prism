@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { coreApi } from "./domain/coreApi";
 import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
@@ -11,7 +10,13 @@ import {
   type ConfigDraftPaths,
 } from "./domain/desktopConfig";
 import type { GameProfile } from "./domain/gameProfiles";
-import { defaultGameProfiles } from "./domain/gameProfiles";
+import {
+  defaultGameProfiles,
+  listGameProfiles,
+  removeGameProfile,
+  saveGameProfile,
+  scanSteamLibrary,
+} from "./domain/gameProfiles";
 import {
   getManagedBinaries,
   getLatestTachyonCoreRelease,
@@ -101,6 +106,16 @@ function configuredStatusLabel(binary: ManagedBinaryInfo): string {
   return binary.configuredExists ? "configured path exists" : "configured path missing";
 }
 
+function profileMatchLabel(profile: GameProfile): string {
+  const labels = [
+    ...profile.match.processNames,
+    ...profile.match.paths,
+    ...profile.match.pathPrefixes.map((path) => `${path}/*`),
+    ...profile.match.steamAppIds.map((id) => `Steam ${id}`),
+  ].filter(Boolean);
+  return labels.join(", ") || "No match rule";
+}
+
 function managedBinaryDisplayName(kind: ManagedBinaryKind): string {
   return kind === "xray" ? "Xray Core" : "Tachyon Core";
 }
@@ -160,13 +175,13 @@ export function App() {
 
   async function refreshProfiles() {
     try {
-      const nextProfiles = await coreApi.listGameProfiles();
+      const nextProfiles = await listGameProfiles();
       setProfiles(nextProfiles);
       setConnection("connected");
-      setMessage("Core connected");
+      setMessage("Profiles loaded");
     } catch (error) {
       setConnection("disconnected");
-      setMessage(error instanceof Error ? error.message : "Core unavailable");
+      setMessage(error instanceof Error ? error.message : "Profile store unavailable");
     }
   }
 
@@ -198,7 +213,7 @@ export function App() {
     };
 
     try {
-      await coreApi.addGameProfile(profile);
+      await saveGameProfile(profile);
       setManualProfile(emptyProfile);
       await refreshProfiles();
       setMessage("Profile added");
@@ -209,8 +224,8 @@ export function App() {
 
   async function removeProfile(id: string) {
     try {
-      await coreApi.removeGameProfile(id);
-      await refreshProfiles();
+      const nextProfiles = await removeGameProfile(id);
+      setProfiles(nextProfiles);
       setMessage("Profile removed");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Remove failed");
@@ -219,7 +234,7 @@ export function App() {
 
   async function scanSteam() {
     try {
-      const result = await coreApi.scanSteam(steamRoot);
+      const result = await scanSteamLibrary(steamRoot);
       setSuggestions(result.profiles);
       setConnection("connected");
       setMessage(`${result.apps.length} Steam apps found`);
@@ -230,7 +245,7 @@ export function App() {
 
   async function addSuggestion(profile: GameProfile) {
     try {
-      await coreApi.addGameProfile({
+      await saveGameProfile({
         ...profile,
         manual: true,
         priority: 80,
@@ -543,7 +558,7 @@ export function App() {
     overview: {
       eyebrow: "Dashboard",
       label: "Overview",
-      subtitle: "Core health, selected egress, game acceleration and runtime state.",
+      subtitle: "Runtime health, selected egress, game acceleration and profile state.",
       title: "Overview",
     },
     nodes: {
@@ -637,7 +652,7 @@ export function App() {
           </div>
           <div className="header-actions">
             <button type="button" onClick={() => void refreshProfiles()}>
-              Connect Core
+              Refresh
             </button>
             <button type="button" onClick={() => void startAllRuntime()}>
               Start All
@@ -786,12 +801,7 @@ export function App() {
                   <div className="profile-row" key={profile.id}>
                     <div>
                       <strong>{profile.displayName}</strong>
-                      <span>
-                        {[...profile.match.processNames, ...profile.match.paths]
-                          .filter(Boolean)
-                          .join(", ") ||
-                          profile.match.steamAppIds.map((id) => `Steam ${id}`).join(", ")}
-                      </span>
+                      <span>{profileMatchLabel(profile)}</span>
                     </div>
                     <div className="row-actions">
                       <span>{profile.udpPolicy.toUpperCase()}</span>
@@ -888,7 +898,7 @@ export function App() {
                   <div className="profile-row" key={profile.id}>
                     <div>
                       <strong>{profile.displayName}</strong>
-                      <span>{profile.match.steamAppIds.map((id) => `Steam ${id}`).join(", ")}</span>
+                      <span>{profileMatchLabel(profile)}</span>
                     </div>
                     <button type="button" onClick={() => void addSuggestion(profile)}>
                       Add

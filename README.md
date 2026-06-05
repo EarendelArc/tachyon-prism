@@ -12,9 +12,9 @@ sent through Tachyon Core for low-latency acceleration.
 
 ## Current Features
 
-- Core status dashboard.
-- Manual game profile management.
-- Steam library scan entry point.
+- Runtime and profile status dashboard.
+- Local manual game profile management.
+- Local Steam library scan and game-profile suggestions.
 - Per-program UDP/TCP routing policy controls.
 - Basic subscription import from URL or pasted payload.
 - Local node list with selected-node persistence.
@@ -32,8 +32,9 @@ sent through Tachyon Core for low-latency acceleration.
 ## Subscription Boundary
 
 Prism parses subscription payloads locally and stores the selected node in the
-desktop control plane. Core does not store subscriptions and does not fetch
-subscription URLs.
+desktop control plane. Prism also owns game profiles and launcher discovery.
+Core does not store subscriptions, does not fetch subscription URLs, and does
+not manage GUI-side game rules.
 
 Supported input formats in the current parser:
 

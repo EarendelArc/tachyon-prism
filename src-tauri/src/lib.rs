@@ -110,6 +110,54 @@ struct RuntimeStatus {
     xray: ProcessStatus,
 }
 
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct MatchRule {
+    process_names: Vec<String>,
+    paths: Vec<String>,
+    path_prefixes: Vec<String>,
+    sha256: Vec<String>,
+    steam_app_ids: Vec<u32>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GameProfile {
+    id: String,
+    display_name: String,
+    enabled: bool,
+    manual: bool,
+    priority: u32,
+    #[serde(rename = "match")]
+    match_rule: MatchRule,
+    udp_policy: String,
+    tcp_policy: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GameProfilesFile {
+    profiles: Vec<GameProfile>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SteamAppManifest {
+    app_id: u32,
+    name: String,
+    install_dir: String,
+    universe: String,
+    state_flags: u32,
+    library_path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SteamScanResult {
+    apps: Vec<SteamAppManifest>,
+    profiles: Vec<GameProfile>,
+}
+
 struct RuntimeState {
     processes: Mutex<RuntimeProcesses>,
 }
@@ -140,6 +188,35 @@ struct ManagedProcess {
 #[tauri::command]
 fn core_status() -> String {
     "disconnected".to_string()
+}
+
+#[tauri::command]
+fn list_game_profiles(app: tauri::AppHandle) -> Result<GameProfilesFile, String> {
+    load_game_profiles(&app)
+}
+
+#[tauri::command]
+fn save_game_profile(app: tauri::AppHandle, profile: GameProfile) -> Result<GameProfile, String> {
+    validate_game_profile(&profile)?;
+    let mut file = load_game_profiles(&app)?;
+    file.profiles.retain(|current| current.id != profile.id);
+    file.profiles.push(profile.clone());
+    sort_game_profiles(&mut file.profiles);
+    save_game_profiles(&app, &file)?;
+    Ok(profile)
+}
+
+#[tauri::command]
+fn remove_game_profile(app: tauri::AppHandle, id: String) -> Result<GameProfilesFile, String> {
+    let mut file = load_game_profiles(&app)?;
+    file.profiles.retain(|profile| profile.id != id);
+    save_game_profiles(&app, &file)?;
+    Ok(file)
+}
+
+#[tauri::command]
+fn scan_steam_library(root: Option<String>) -> Result<SteamScanResult, String> {
+    scan_steam(root.as_deref())
 }
 
 #[tauri::command]
@@ -318,6 +395,323 @@ fn draft_paths(app: &tauri::AppHandle) -> Result<ConfigDraftPaths, String> {
         core_config_path: path_string(&core_config_path),
         xray_config_path: path_string(&xray_config_path),
     })
+}
+
+fn game_profiles_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|err| format!("resolve app config directory: {err}"))?;
+    Ok(config_dir.join("game-profiles.json"))
+}
+
+fn load_game_profiles(app: &tauri::AppHandle) -> Result<GameProfilesFile, String> {
+    let path = game_profiles_path(app)?;
+    if !path.exists() {
+        return Ok(GameProfilesFile {
+            profiles: default_game_profiles(),
+        });
+    }
+
+    let raw = fs::read_to_string(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
+    let mut file: GameProfilesFile =
+        serde_json::from_str(&raw).map_err(|err| format!("parse game profiles: {err}"))?;
+    if file.profiles.is_empty() {
+        file.profiles = default_game_profiles();
+    }
+    sort_game_profiles(&mut file.profiles);
+    Ok(file)
+}
+
+fn save_game_profiles(app: &tauri::AppHandle, file: &GameProfilesFile) -> Result<(), String> {
+    let path = game_profiles_path(app)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "game profile path has no parent".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|err| format!("create config directory {}: {err}", parent.display()))?;
+    let data =
+        serde_json::to_string_pretty(file).map_err(|err| format!("encode game profiles: {err}"))?;
+    write_atomic(&path, &(data + "\n"))
+}
+
+fn validate_game_profile(profile: &GameProfile) -> Result<(), String> {
+    if profile.id.trim().is_empty() {
+        return Err("profile id is required".to_string());
+    }
+    if profile.display_name.trim().is_empty() {
+        return Err("profile display name is required".to_string());
+    }
+    if profile.match_rule.process_names.is_empty()
+        && profile.match_rule.paths.is_empty()
+        && profile.match_rule.path_prefixes.is_empty()
+        && profile.match_rule.sha256.is_empty()
+        && profile.match_rule.steam_app_ids.is_empty()
+    {
+        return Err("profile needs at least one match rule".to_string());
+    }
+    Ok(())
+}
+
+fn sort_game_profiles(profiles: &mut [GameProfile]) {
+    profiles.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| left.display_name.cmp(&right.display_name))
+    });
+}
+
+fn default_game_profiles() -> Vec<GameProfile> {
+    vec![GameProfile {
+        id: "cs2".to_string(),
+        display_name: "Counter-Strike 2".to_string(),
+        enabled: true,
+        manual: true,
+        priority: 100,
+        match_rule: MatchRule {
+            process_names: vec!["cs2.exe".to_string()],
+            paths: Vec::new(),
+            path_prefixes: Vec::new(),
+            sha256: Vec::new(),
+            steam_app_ids: vec![730],
+        },
+        udp_policy: "tgp".to_string(),
+        tcp_policy: "auto".to_string(),
+    }]
+}
+
+fn scan_steam(root: Option<&str>) -> Result<SteamScanResult, String> {
+    let candidates = steam_candidate_roots(root);
+    if root
+        .map(clean_path_input)
+        .is_some_and(|value| !value.is_empty())
+        && candidates.is_empty()
+    {
+        return Err("Steam root not found".to_string());
+    }
+
+    let mut libraries = Vec::new();
+    for candidate in candidates {
+        push_unique_path(&mut libraries, candidate.clone());
+        let library_file = candidate.join("steamapps").join("libraryfolders.vdf");
+        if let Ok(raw) = fs::read_to_string(&library_file) {
+            for path in vdf_values_for_key(&raw, "path") {
+                push_unique_path(&mut libraries, PathBuf::from(path));
+            }
+        }
+    }
+
+    let mut apps = Vec::new();
+    for library in libraries {
+        let steamapps = library.join("steamapps");
+        let Ok(entries) = fs::read_dir(&steamapps) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !file_name.starts_with("appmanifest_") || !file_name.ends_with(".acf") {
+                continue;
+            }
+            let Ok(raw) = fs::read_to_string(&path) else {
+                continue;
+            };
+            if let Some(app) = parse_steam_app_manifest(&raw, &library) {
+                apps.push(app);
+            }
+        }
+    }
+    let mut seen_app_ids = Vec::new();
+    apps.retain(|app| {
+        if seen_app_ids.contains(&app.app_id) {
+            false
+        } else {
+            seen_app_ids.push(app.app_id);
+            true
+        }
+    });
+    apps.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then(left.app_id.cmp(&right.app_id))
+    });
+
+    let profiles = apps.iter().map(steam_profile_from_app).collect();
+    Ok(SteamScanResult { apps, profiles })
+}
+
+fn steam_candidate_roots(root: Option<&str>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(root) = root.map(clean_path_input).filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(root);
+        if path.exists() {
+            push_unique_path(&mut roots, path);
+        }
+        return roots;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        for variable in ["ProgramFiles(x86)", "ProgramFiles"] {
+            if let Ok(base) = std::env::var(variable) {
+                let candidate = PathBuf::from(base).join("Steam");
+                if candidate.exists() {
+                    push_unique_path(&mut roots, candidate);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = home_dir() {
+            let candidate = home
+                .join("Library")
+                .join("Application Support")
+                .join("Steam");
+            if candidate.exists() {
+                push_unique_path(&mut roots, candidate);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(home) = home_dir() {
+            for relative in [
+                ".steam/steam",
+                ".steam/root",
+                ".local/share/Steam",
+                ".var/app/com.valvesoftware.Steam/data/Steam",
+            ] {
+                let candidate = home.join(relative);
+                if candidate.exists() {
+                    push_unique_path(&mut roots, candidate);
+                }
+            }
+        }
+    }
+
+    roots
+}
+
+fn parse_steam_app_manifest(input: &str, library_path: &Path) -> Option<SteamAppManifest> {
+    let app_id = first_vdf_value(input, "appid")?.parse::<u32>().ok()?;
+    let name = first_vdf_value(input, "name").unwrap_or_else(|| format!("Steam App {app_id}"));
+    let install_dir = first_vdf_value(input, "installdir").unwrap_or_else(|| app_id.to_string());
+    let universe = first_vdf_value(input, "Universe").unwrap_or_else(|| "1".to_string());
+    let state_flags = first_vdf_value(input, "StateFlags")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or_default();
+
+    Some(SteamAppManifest {
+        app_id,
+        name,
+        install_dir,
+        universe,
+        state_flags,
+        library_path: path_string(library_path),
+    })
+}
+
+fn steam_profile_from_app(app: &SteamAppManifest) -> GameProfile {
+    let install_path = Path::new(&app.library_path)
+        .join("steamapps")
+        .join("common")
+        .join(&app.install_dir);
+    GameProfile {
+        id: format!("steam-{}", app.app_id),
+        display_name: app.name.clone(),
+        enabled: true,
+        manual: false,
+        priority: 80,
+        match_rule: MatchRule {
+            process_names: Vec::new(),
+            paths: Vec::new(),
+            path_prefixes: vec![path_string(&install_path)],
+            sha256: Vec::new(),
+            steam_app_ids: vec![app.app_id],
+        },
+        udp_policy: "tgp".to_string(),
+        tcp_policy: "auto".to_string(),
+    }
+}
+
+fn first_vdf_value(input: &str, key: &str) -> Option<String> {
+    vdf_values_for_key(input, key).into_iter().next()
+}
+
+fn vdf_values_for_key(input: &str, key: &str) -> Vec<String> {
+    input
+        .lines()
+        .filter_map(|line| {
+            let values = quoted_vdf_values(line);
+            match values.as_slice() {
+                [candidate, value, ..] if candidate.eq_ignore_ascii_case(key) => {
+                    Some(value.clone())
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn quoted_vdf_values(line: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    let mut in_quote = false;
+
+    while let Some(character) = chars.next() {
+        if in_quote {
+            match character {
+                '"' => {
+                    values.push(current.clone());
+                    current.clear();
+                    in_quote = false;
+                }
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        current.push(next);
+                    }
+                }
+                _ => current.push(character),
+            }
+        } else if character == '"' {
+            in_quote = true;
+        }
+    }
+
+    values
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    let cleaned = path.components().collect::<PathBuf>();
+    if paths
+        .iter()
+        .any(|existing| same_path_lossy(existing, &cleaned))
+    {
+        return;
+    }
+    paths.push(cleaned);
+}
+
+fn same_path_lossy(left: &Path, right: &Path) -> bool {
+    if cfg!(target_os = "windows") {
+        path_string(left).eq_ignore_ascii_case(&path_string(right))
+    } else {
+        left == right
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 fn default_runtime_paths(app: &tauri::AppHandle) -> Result<RuntimePaths, String> {
@@ -1113,6 +1507,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parses_steam_library_paths() {
+        let raw = r#"
+        "libraryfolders"
+        {
+          "0"
+          {
+            "path" "C:\\Program Files (x86)\\Steam"
+          }
+          "1"
+          {
+            "path" "D:\\SteamLibrary"
+          }
+        }
+        "#;
+
+        let paths = vdf_values_for_key(raw, "path");
+
+        assert_eq!(
+            paths,
+            vec![
+                "C:\\Program Files (x86)\\Steam".to_string(),
+                "D:\\SteamLibrary".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_steam_app_manifest() {
+        let raw = r#"
+        "AppState"
+        {
+          "appid" "730"
+          "Universe" "1"
+          "name" "Counter-Strike 2"
+          "StateFlags" "4"
+          "installdir" "Counter-Strike Global Offensive"
+        }
+        "#;
+
+        let app = parse_steam_app_manifest(raw, Path::new("D:\\SteamLibrary")).expect("manifest");
+
+        assert_eq!(app.app_id, 730);
+        assert_eq!(app.name, "Counter-Strike 2");
+        assert_eq!(app.install_dir, "Counter-Strike Global Offensive");
+        assert_eq!(app.state_flags, 4);
+    }
+
     fn asset(name: &str, size: u64) -> GithubAsset {
         GithubAsset {
             name: name.to_string(),
@@ -1127,6 +1569,10 @@ pub fn run() {
         .manage(RuntimeState::default())
         .invoke_handler(tauri::generate_handler![
             core_status,
+            list_game_profiles,
+            save_game_profile,
+            remove_game_profile,
+            scan_steam_library,
             config_paths,
             save_config_drafts,
             runtime_paths,
