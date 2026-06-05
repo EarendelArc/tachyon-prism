@@ -13,6 +13,17 @@ import {
 import type { GameProfile } from "./domain/gameProfiles";
 import { defaultGameProfiles } from "./domain/gameProfiles";
 import {
+  getRuntimePaths,
+  getRuntimeStatus,
+  startTachyonCore,
+  startXray,
+  stopTachyonCore,
+  stopXray,
+  type ProcessStatus,
+  type RuntimePaths,
+  type RuntimeStatus,
+} from "./domain/runtime";
+import {
   createSubscriptionSnapshot,
   fetchSubscriptionNodes,
   loadSubscriptionSnapshot,
@@ -30,12 +41,24 @@ const emptyProfile = {
   executablePath: "",
 };
 
+const emptyRuntimeInputs = {
+  tachyonCoreBinaryPath: "",
+  xrayBinaryPath: "",
+};
+
 function selectedNode(snapshot: SubscriptionSnapshot): ProxyNode | undefined {
   return snapshot.nodes.find((node) => node.id === snapshot.selectedNodeId);
 }
 
 function nodeEndpoint(node: ProxyNode): string {
   return node.port > 0 ? `${node.address}:${node.port}` : node.address;
+}
+
+function processStatusLabel(status: ProcessStatus | undefined): string {
+  if (!status) {
+    return "unknown";
+  }
+  return status.pid ? `${status.state} pid ${status.pid}` : status.state;
 }
 
 function draftText(activeNode: ProxyNode | undefined): {
@@ -72,6 +95,9 @@ export function App() {
   const [subscriptionUrl, setSubscriptionUrl] = useState("");
   const [subscriptionText, setSubscriptionText] = useState("");
   const [configPaths, setConfigPaths] = useState<ConfigDraftPaths | null>(null);
+  const [runtimePaths, setRuntimePaths] = useState<RuntimePaths | null>(null);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [runtimeInputs, setRuntimeInputs] = useState(emptyRuntimeInputs);
   const [message, setMessage] = useState("Ready");
 
   const activeProfiles = useMemo(
@@ -230,11 +256,79 @@ export function App() {
     }
   }
 
+  async function currentConfigPaths(): Promise<ConfigDraftPaths> {
+    if (configPaths) {
+      return configPaths;
+    }
+    const paths = await getConfigPaths();
+    setConfigPaths(paths);
+    return paths;
+  }
+
+  async function refreshRuntime() {
+    try {
+      setRuntimeStatus(await getRuntimeStatus());
+    } catch {
+      // Runtime commands are available only inside Tauri.
+    }
+  }
+
+  async function startRuntime(kind: "tachyonCore" | "xray") {
+    try {
+      const paths = await currentConfigPaths();
+      if (kind === "xray") {
+        const binaryPath = runtimeInputs.xrayBinaryPath.trim();
+        if (!binaryPath) {
+          setMessage("Xray binary path required");
+          return;
+        }
+        await startXray(binaryPath, paths.xrayConfigPath);
+        setMessage("Xray started");
+      } else {
+        const binaryPath = runtimeInputs.tachyonCoreBinaryPath.trim();
+        if (!binaryPath) {
+          setMessage("Core binary path required");
+          return;
+        }
+        await startTachyonCore(binaryPath, paths.coreConfigPath);
+        setMessage("Tachyon Core started");
+      }
+      await refreshRuntime();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Start failed");
+    }
+  }
+
+  async function stopRuntime(kind: "tachyonCore" | "xray") {
+    try {
+      if (kind === "xray") {
+        await stopXray();
+        setMessage("Xray stopped");
+      } else {
+        await stopTachyonCore();
+        setMessage("Tachyon Core stopped");
+      }
+      await refreshRuntime();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Stop failed");
+    }
+  }
+
   useEffect(() => {
     void refreshProfiles();
     void getConfigPaths()
       .then((paths) => setConfigPaths(paths))
       .catch(() => undefined);
+    void getRuntimePaths()
+      .then((paths) => {
+        setRuntimePaths(paths);
+        setRuntimeInputs({
+          tachyonCoreBinaryPath: paths.tachyonCoreBinaryPath,
+          xrayBinaryPath: paths.xrayBinaryPath,
+        });
+      })
+      .catch(() => undefined);
+    void refreshRuntime();
   }, []);
 
   useEffect(() => {
@@ -433,6 +527,73 @@ export function App() {
               <span>Core</span>
               <textarea readOnly value={drafts.core} />
             </label>
+          </div>
+        </article>
+
+        <article className="panel runtime-panel">
+          <header>
+            <h2>Runtime</h2>
+            <button type="button" onClick={() => void refreshRuntime()}>
+              Refresh
+            </button>
+          </header>
+          {runtimePaths ? (
+            <div className="path-list">
+              <div>
+                <span>bin</span>
+                <strong>{runtimePaths.binDir}</strong>
+              </div>
+            </div>
+          ) : null}
+          <div className="runtime-grid">
+            <div className="runtime-row">
+              <div>
+                <strong>Xray Core</strong>
+                <span>{processStatusLabel(runtimeStatus?.xray)}</span>
+              </div>
+              <input
+                placeholder="Xray binary"
+                value={runtimeInputs.xrayBinaryPath}
+                onChange={(event) =>
+                  setRuntimeInputs((current) => ({
+                    ...current,
+                    xrayBinaryPath: event.target.value,
+                  }))
+                }
+              />
+              <div className="row-actions">
+                <button type="button" onClick={() => void startRuntime("xray")}>
+                  Start
+                </button>
+                <button type="button" onClick={() => void stopRuntime("xray")}>
+                  Stop
+                </button>
+              </div>
+            </div>
+            <div className="runtime-row">
+              <div>
+                <strong>Tachyon Core</strong>
+                <span>{processStatusLabel(runtimeStatus?.tachyonCore)}</span>
+              </div>
+              <input
+                placeholder="Tachyon Core binary"
+                value={runtimeInputs.tachyonCoreBinaryPath}
+                onChange={(event) =>
+                  setRuntimeInputs((current) => ({
+                    ...current,
+                    tachyonCoreBinaryPath: event.target.value,
+                  }))
+                }
+              />
+              <div className="row-actions">
+                <button type="button" onClick={() => void startRuntime("tachyonCore")}>
+                  Start
+                </button>
+                <button type="button" onClick={() => void stopRuntime("tachyonCore")}>
+                  Stop
+                </button>
+              </div>
+            </div>
           </div>
         </article>
 

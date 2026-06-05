@@ -237,6 +237,39 @@ textarea {
   grid-column: 1 / -1;
 }
 
+.runtime-panel {
+  grid-column: 1 / -1;
+}
+
+.runtime-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.runtime-row {
+  align-items: center;
+  border-top: 1px solid #edf1f6;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(150px, 0.6fr) minmax(0, 1.4fr) auto;
+  padding: 12px 0;
+}
+
+.runtime-row strong,
+.runtime-row span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.runtime-row span {
+  color: #627187;
+  font-size: 13px;
+}
+
+.runtime-row input {
+  width: 100%;
+}
+
 .config-grid {
   display: grid;
   gap: 12px;
@@ -276,6 +309,11 @@ textarea {
   }
 
   .config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-row {
+    align-items: stretch;
     grid-template-columns: 1fr;
   }
 }

@@ -2,6 +2,9 @@ use serde::Serialize;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
 #[derive(Serialize)]
@@ -10,6 +13,59 @@ struct ConfigDraftPaths {
     config_dir: String,
     core_config_path: String,
     xray_config_path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimePaths {
+    bin_dir: String,
+    tachyon_core_binary_path: String,
+    xray_binary_path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessStatus {
+    state: String,
+    pid: Option<u32>,
+    binary_path: Option<String>,
+    config_path: Option<String>,
+    started_at: Option<u64>,
+    last_error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeStatus {
+    tachyon_core: ProcessStatus,
+    xray: ProcessStatus,
+}
+
+struct RuntimeState {
+    processes: Mutex<RuntimeProcesses>,
+}
+
+impl Default for RuntimeState {
+    fn default() -> Self {
+        Self {
+            processes: Mutex::new(RuntimeProcesses::default()),
+        }
+    }
+}
+
+#[derive(Default)]
+struct RuntimeProcesses {
+    tachyon_core: ManagedProcess,
+    xray: ManagedProcess,
+}
+
+#[derive(Default)]
+struct ManagedProcess {
+    child: Option<Child>,
+    binary_path: Option<String>,
+    config_path: Option<String>,
+    started_at: Option<u64>,
+    last_error: Option<String>,
 }
 
 #[tauri::command]
@@ -41,6 +97,74 @@ fn save_config_drafts(
     Ok(paths)
 }
 
+#[tauri::command]
+fn runtime_paths(app: tauri::AppHandle) -> Result<RuntimePaths, String> {
+    default_runtime_paths(&app)
+}
+
+#[tauri::command]
+fn runtime_status(state: tauri::State<RuntimeState>) -> Result<RuntimeStatus, String> {
+    let mut processes = state
+        .processes
+        .lock()
+        .map_err(|err| format!("lock runtime state: {err}"))?;
+    Ok(processes.status())
+}
+
+#[tauri::command]
+fn start_xray(
+    state: tauri::State<RuntimeState>,
+    binary_path: String,
+    config_path: String,
+) -> Result<ProcessStatus, String> {
+    let mut processes = state
+        .processes
+        .lock()
+        .map_err(|err| format!("lock runtime state: {err}"))?;
+    processes.xray.start(
+        "xray",
+        binary_path,
+        config_path.clone(),
+        &["run", "-config", &config_path],
+    )
+}
+
+#[tauri::command]
+fn stop_xray(state: tauri::State<RuntimeState>) -> Result<ProcessStatus, String> {
+    let mut processes = state
+        .processes
+        .lock()
+        .map_err(|err| format!("lock runtime state: {err}"))?;
+    processes.xray.stop("xray")
+}
+
+#[tauri::command]
+fn start_tachyon_core(
+    state: tauri::State<RuntimeState>,
+    binary_path: String,
+    config_path: String,
+) -> Result<ProcessStatus, String> {
+    let mut processes = state
+        .processes
+        .lock()
+        .map_err(|err| format!("lock runtime state: {err}"))?;
+    processes.tachyon_core.start(
+        "tachyon-core",
+        binary_path,
+        config_path.clone(),
+        &["run", "--config", &config_path],
+    )
+}
+
+#[tauri::command]
+fn stop_tachyon_core(state: tauri::State<RuntimeState>) -> Result<ProcessStatus, String> {
+    let mut processes = state
+        .processes
+        .lock()
+        .map_err(|err| format!("lock runtime state: {err}"))?;
+    processes.tachyon_core.stop("tachyon-core")
+}
+
 fn draft_paths(app: &tauri::AppHandle) -> Result<ConfigDraftPaths, String> {
     let config_dir = app
         .path()
@@ -54,6 +178,27 @@ fn draft_paths(app: &tauri::AppHandle) -> Result<ConfigDraftPaths, String> {
         core_config_path: path_string(&core_config_path),
         xray_config_path: path_string(&xray_config_path),
     })
+}
+
+fn default_runtime_paths(app: &tauri::AppHandle) -> Result<RuntimePaths, String> {
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|err| format!("resolve app config directory: {err}"))?;
+    let bin_dir = config_dir.join("bin");
+    Ok(RuntimePaths {
+        bin_dir: path_string(&bin_dir),
+        tachyon_core_binary_path: path_string(&bin_dir.join(binary_name("tachyon-core"))),
+        xray_binary_path: path_string(&bin_dir.join(binary_name("xray"))),
+    })
+}
+
+fn binary_name(base: &str) -> String {
+    if cfg!(target_os = "windows") {
+        format!("{base}.exe")
+    } else {
+        base.to_string()
+    }
 }
 
 fn ensure_json_object(label: &str, input: &str) -> Result<(), String> {
@@ -79,12 +224,141 @@ fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+impl RuntimeProcesses {
+    fn status(&mut self) -> RuntimeStatus {
+        RuntimeStatus {
+            tachyon_core: self.tachyon_core.status(),
+            xray: self.xray.status(),
+        }
+    }
+}
+
+impl ManagedProcess {
+    fn start(
+        &mut self,
+        label: &str,
+        binary_path: String,
+        config_path: String,
+        args: &[&str],
+    ) -> Result<ProcessStatus, String> {
+        self.refresh(label)?;
+        if self.child.is_some() {
+            return Err(format!("{label} is already running"));
+        }
+
+        let binary = PathBuf::from(binary_path.trim());
+        if !binary.is_file() {
+            return Err(format!("{label} binary not found: {}", binary.display()));
+        }
+        let config = PathBuf::from(config_path.trim());
+        if !config.is_file() {
+            return Err(format!("{label} config not found: {}", config.display()));
+        }
+
+        let mut command = Command::new(&binary);
+        command.args(args);
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::null());
+        command.stderr(Stdio::null());
+        if let Some(work_dir) = config.parent().or_else(|| binary.parent()) {
+            command.current_dir(work_dir);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let child = command
+            .spawn()
+            .map_err(|err| format!("start {label}: {err}"))?;
+        self.child = Some(child);
+        self.binary_path = Some(path_string(&binary));
+        self.config_path = Some(path_string(&config));
+        self.started_at = Some(now_epoch_seconds());
+        self.last_error = None;
+        Ok(self.snapshot())
+    }
+
+    fn stop(&mut self, label: &str) -> Result<ProcessStatus, String> {
+        self.refresh(label)?;
+        let Some(mut child) = self.child.take() else {
+            return Ok(self.snapshot());
+        };
+        child.kill().map_err(|err| format!("stop {label}: {err}"))?;
+        let _ = child.wait();
+        self.started_at = None;
+        self.last_error = None;
+        Ok(self.snapshot())
+    }
+
+    fn status(&mut self) -> ProcessStatus {
+        if let Err(err) = self.refresh("process") {
+            self.child = None;
+            self.started_at = None;
+            self.last_error = Some(err);
+        }
+        self.snapshot()
+    }
+
+    fn refresh(&mut self, label: &str) -> Result<(), String> {
+        let exit_status = match self.child.as_mut() {
+            Some(child) => child
+                .try_wait()
+                .map_err(|err| format!("poll {label}: {err}"))?,
+            None => return Ok(()),
+        };
+        if let Some(status) = exit_status {
+            self.child = None;
+            self.started_at = None;
+            self.last_error = if status.success() {
+                None
+            } else {
+                Some(format!("{label} exited with {status}"))
+            };
+        }
+        Ok(())
+    }
+
+    fn snapshot(&self) -> ProcessStatus {
+        ProcessStatus {
+            state: if self.child.is_some() {
+                "running".to_string()
+            } else if self.last_error.is_some() {
+                "failed".to_string()
+            } else {
+                "stopped".to_string()
+            },
+            pid: self.child.as_ref().map(Child::id),
+            binary_path: self.binary_path.clone(),
+            config_path: self.config_path.clone(),
+            started_at: self.started_at,
+            last_error: self.last_error.clone(),
+        }
+    }
+}
+
+fn now_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .manage(RuntimeState::default())
         .invoke_handler(tauri::generate_handler![
             core_status,
             config_paths,
-            save_config_drafts
+            save_config_drafts,
+            runtime_paths,
+            runtime_status,
+            start_xray,
+            stop_xray,
+            start_tachyon_core,
+            stop_tachyon_core
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Tachyon Prism");

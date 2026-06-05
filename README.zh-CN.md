@@ -4,10 +4,10 @@
 
 Tachyon Prism 是 Tachyon 的图形化控制面。
 
-Prism 是桌面端整合客户端：负责交互、可视化、订阅获取、订阅解析、节点选择、
-Xray 生命周期、Xray JSON 生成，以及 Tachyon Core 编排。Tachyon Core 保持无头
-和纯粹：只读取明确的 JSON 配置，并只执行 UDP 游戏流量接管、游戏路由、TGP 传输
-和 TGP Relay 工作。
+Prism 是完整的 Xray GUI 客户端，并额外支持 Tachyon Core。它负责交互、可视化、
+订阅、节点选择、Xray 生命周期、Xray JSON 生成、路由 UI、规则 UI、游戏进程检测
+和双核心编排。普通代理流量走 Xray，游戏 UDP 流量可以交给 Tachyon Core 做低延迟
+加速。
 
 ## 当前功能
 
@@ -20,6 +20,7 @@ Xray 生命周期、Xray JSON 生成，以及 Tachyon Core 编排。Tachyon Core
 - 根据选中节点生成 Xray 客户端 JSON 草稿。
 - 生成用于 TGP 游戏路径的 Tachyon Core 客户端 JSON 草稿。
 - 一键把生成的 `client.json` 与 `xray-client.json` 保存到 Tauri 应用配置目录。
+- 作为独立子进程启动和停止 Xray Core 与 Tachyon Core。
 
 ## 订阅边界
 
@@ -60,6 +61,9 @@ outbound 对象，而不是重新猜测所有字段。
 
 Save 操作会把生成文件写入 Tauri 应用配置目录，并在 Config 面板显示确切路径。
 Core 仍然保持纯粹，只需要生成的 `client.json`；Xray 由 Prism 启动和配置。
+
+Runtime 面板会用 `xray-client.json` 启动 Xray，并用 `client.json` 启动 Tachyon
+Core。后续会继续补齐托管二进制下载、更新和权限提升流程。
 
 ## 开发环境
 

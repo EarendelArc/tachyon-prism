@@ -4,11 +4,11 @@
 
 Tachyon Prism is the graphical control plane for Tachyon.
 
-Prism is the desktop integration client: it owns interaction, visualization,
-subscription retrieval, subscription parsing, node selection, Xray lifecycle,
-Xray JSON generation, and Tachyon Core orchestration. Tachyon Core stays
-headless and pure: it reads explicit JSON config and performs only UDP game
-capture, game routing, TGP transport, and TGP relay work.
+Prism is a full Xray GUI client with Tachyon Core support. It owns interaction,
+visualization, subscriptions, node selection, Xray lifecycle, Xray JSON
+generation, routing UI, rules UI, game-process detection, and dual-core
+orchestration. Normal proxy traffic runs through Xray. Game UDP traffic can be
+sent through Tachyon Core for low-latency acceleration.
 
 ## Current Features
 
@@ -22,6 +22,8 @@ capture, game routing, TGP transport, and TGP relay work.
 - Tachyon Core client JSON draft generation for the TGP game path.
 - One-click saving of generated `client.json` and `xray-client.json` to the
   Tauri app config directory.
+- Runtime controls for launching and stopping Xray Core and Tachyon Core as
+  separate subprocesses.
 
 ## Subscription Boundary
 
@@ -66,6 +68,10 @@ scratch.
 The Save action writes the generated files into the Tauri app config directory
 and shows the exact paths in the Config panel. Core still remains pure and only
 needs the generated `client.json`; Xray is launched and configured by Prism.
+
+The Runtime panel starts Xray with `xray-client.json` and Tachyon Core with
+`client.json`. Future releases will add managed binary download, update, and
+privilege-elevation flows.
 
 ## Development Environment
 
