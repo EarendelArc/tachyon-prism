@@ -13,14 +13,19 @@ import {
 import type { GameProfile } from "./domain/gameProfiles";
 import { defaultGameProfiles } from "./domain/gameProfiles";
 import {
+  getManagedBinaries,
   getRuntimePaths,
   getRuntimeSettings,
   getRuntimeStatus,
+  installManagedBinary,
   saveRuntimeSettings,
   startTachyonCore,
   startXray,
   stopTachyonCore,
   stopXray,
+  type ManagedBinaryInfo,
+  type ManagedBinaryInventory,
+  type ManagedBinaryKind,
   type ProcessStatus,
   type RuntimePaths,
   type RuntimeStatus,
@@ -48,6 +53,13 @@ const emptyRuntimeInputs = {
   xrayBinaryPath: "",
 };
 
+const emptyBinarySourceInputs = {
+  tachyonCore: "",
+  xray: "",
+};
+
+const managedBinaryKinds: ManagedBinaryKind[] = ["xray", "tachyonCore"];
+
 function selectedNode(snapshot: SubscriptionSnapshot): ProxyNode | undefined {
   return snapshot.nodes.find((node) => node.id === snapshot.selectedNodeId);
 }
@@ -61,6 +73,26 @@ function processStatusLabel(status: ProcessStatus | undefined): string {
     return "unknown";
   }
   return status.pid ? `${status.state} pid ${status.pid}` : status.state;
+}
+
+function formatBytes(value: number | null): string {
+  if (value === null) {
+    return "unknown size";
+  }
+  if (value < 1024 * 1024) {
+    return `${Math.max(1, Math.round(value / 1024))} KB`;
+  }
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function managedStatusLabel(binary: ManagedBinaryInfo): string {
+  return binary.managedExists
+    ? `installed, ${formatBytes(binary.managedSizeBytes)}`
+    : "not installed";
+}
+
+function configuredStatusLabel(binary: ManagedBinaryInfo): string {
+  return binary.configuredExists ? "configured path exists" : "configured path missing";
 }
 
 function draftText(activeNode: ProxyNode | undefined): {
@@ -100,6 +132,8 @@ export function App() {
   const [runtimePaths, setRuntimePaths] = useState<RuntimePaths | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [runtimeInputs, setRuntimeInputs] = useState(emptyRuntimeInputs);
+  const [managedBinaries, setManagedBinaries] = useState<ManagedBinaryInventory | null>(null);
+  const [binarySourceInputs, setBinarySourceInputs] = useState(emptyBinarySourceInputs);
   const [message, setMessage] = useState("Ready");
 
   const activeProfiles = useMemo(
@@ -272,6 +306,66 @@ export function App() {
     }
   }
 
+  async function refreshManagedBinaries() {
+    try {
+      const inventory = await getManagedBinaries();
+      setManagedBinaries(inventory);
+      setRuntimeInputs(inventory.runtimeSettings);
+    } catch {
+      // Managed binary commands are available only inside Tauri.
+    }
+  }
+
+  function binaryInfo(kind: ManagedBinaryKind): ManagedBinaryInfo | null {
+    if (!managedBinaries) {
+      return null;
+    }
+    return kind === "xray" ? managedBinaries.xray : managedBinaries.tachyonCore;
+  }
+
+  async function installBinary(kind: ManagedBinaryKind) {
+    const sourcePath = binarySourceInputs[kind].trim();
+    if (!sourcePath) {
+      setMessage("Source binary path required");
+      return;
+    }
+
+    try {
+      const inventory = await installManagedBinary(kind, sourcePath);
+      setManagedBinaries(inventory);
+      setRuntimeInputs(inventory.runtimeSettings);
+      const installed = kind === "xray" ? inventory.xray : inventory.tachyonCore;
+      setMessage(`${installed.displayName} installed`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Binary install failed");
+    }
+  }
+
+  async function useManagedBinary(kind: ManagedBinaryKind) {
+    const binary = binaryInfo(kind);
+    if (!binary) {
+      setMessage("Binary inventory unavailable");
+      return;
+    }
+    if (!binary.managedExists) {
+      setMessage(`${binary.displayName} is not installed`);
+      return;
+    }
+
+    try {
+      const nextSettings =
+        kind === "xray"
+          ? { ...runtimeInputs, xrayBinaryPath: binary.targetPath }
+          : { ...runtimeInputs, tachyonCoreBinaryPath: binary.targetPath };
+      const settings = await saveRuntimeSettings(nextSettings);
+      setRuntimeInputs(settings);
+      await refreshManagedBinaries();
+      setMessage(`${binary.displayName} selected`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Binary selection failed");
+    }
+  }
+
   async function refreshRuntime() {
     try {
       setRuntimeStatus(await getRuntimeStatus());
@@ -377,6 +471,7 @@ export function App() {
     void getRuntimeSettings()
       .then((settings) => setRuntimeInputs(settings))
       .catch(() => undefined);
+    void refreshManagedBinaries();
     void refreshRuntime();
   }, []);
 
@@ -576,6 +671,58 @@ export function App() {
               <span>Core</span>
               <textarea readOnly value={drafts.core} />
             </label>
+          </div>
+        </article>
+
+        <article className="panel binary-panel">
+          <header>
+            <h2>Binaries</h2>
+            <button type="button" onClick={() => void refreshManagedBinaries()}>
+              Refresh
+            </button>
+          </header>
+          {managedBinaries ? (
+            <div className="path-list">
+              <div>
+                <span>managed bin</span>
+                <strong>{managedBinaries.binDir}</strong>
+              </div>
+            </div>
+          ) : null}
+          <div className="binary-grid">
+            {managedBinaryKinds.map((kind) => {
+              const binary = binaryInfo(kind);
+              const displayName =
+                binary?.displayName ?? (kind === "xray" ? "Xray Core" : "Tachyon Core");
+              return (
+                <div className="binary-row" key={kind}>
+                  <div className="binary-meta">
+                    <strong>{displayName}</strong>
+                    <span>{binary ? managedStatusLabel(binary) : "inventory unavailable"}</span>
+                    {binary ? <span>{configuredStatusLabel(binary)}</span> : null}
+                    {binary ? <span>{binary.targetPath}</span> : null}
+                  </div>
+                  <input
+                    placeholder="Source binary path"
+                    value={binarySourceInputs[kind]}
+                    onChange={(event) =>
+                      setBinarySourceInputs((current) => ({
+                        ...current,
+                        [kind]: event.target.value,
+                      }))
+                    }
+                  />
+                  <div className="row-actions">
+                    <button type="button" onClick={() => void installBinary(kind)}>
+                      Install
+                    </button>
+                    <button type="button" onClick={() => void useManagedBinary(kind)}>
+                      Use Managed
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </article>
 

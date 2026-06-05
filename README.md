@@ -23,6 +23,7 @@ sent through Tachyon Core for low-latency acceleration.
 - One-click saving of generated `client.json` and `xray-client.json` to the
   Tauri app config directory.
 - Persistent runtime binary path settings for Xray Core and Tachyon Core.
+- Managed local binary installation into Prism's app config `bin` directory.
 - Runtime controls for launching and stopping Xray Core and Tachyon Core as
   separate subprocesses.
 
@@ -70,10 +71,17 @@ The Save action writes the generated files into the Tauri app config directory
 and shows the exact paths in the Config panel. Core still remains pure and only
 needs the generated `client.json`; Xray is launched and configured by Prism.
 
-The Runtime panel stores binary paths in `runtime-settings.json`. `Start All`
-first writes the latest generated config files, then launches Xray with
-`xray-client.json` and Tachyon Core with `client.json`. Future releases will
-add managed binary download, update, and privilege-elevation flows.
+The Binaries panel can copy a local `xray` or `tachyon-core` executable into
+Prism's managed app config `bin` directory and point `runtime-settings.json` at
+that managed copy. The Runtime panel stores binary paths in
+`runtime-settings.json`. `Start All` first writes the latest generated config
+files, then launches Xray with `xray-client.json` and Tachyon Core with
+`client.json`.
+
+The managed-binary API is intentionally separate from launch control so the
+next step can add online release discovery, download, checksum verification,
+archive extraction, and privilege-elevation flows without changing the Runtime
+panel contract.
 
 ## Development Environment
 

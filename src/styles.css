@@ -239,8 +239,47 @@ textarea {
   grid-column: 1 / -1;
 }
 
+.binary-panel {
+  grid-column: 1 / -1;
+}
+
 .runtime-panel {
   grid-column: 1 / -1;
+}
+
+.binary-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.binary-row {
+  align-items: center;
+  border-top: 1px solid #edf1f6;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(0, 1.2fr) auto;
+  padding: 12px 0;
+}
+
+.binary-meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.binary-meta strong,
+.binary-meta span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.binary-meta span {
+  color: #627187;
+  font-size: 13px;
+}
+
+.binary-row input {
+  width: 100%;
 }
 
 .runtime-grid {
@@ -324,6 +363,11 @@ textarea {
   }
 
   .runtime-row {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .binary-row {
     align-items: stretch;
     grid-template-columns: 1fr;
   }

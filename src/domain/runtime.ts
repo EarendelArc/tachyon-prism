@@ -14,6 +14,28 @@ export interface RuntimeSettings {
   xrayBinaryPath: string;
 }
 
+export type ManagedBinaryKind = "tachyonCore" | "xray";
+
+export interface ManagedBinaryInfo {
+  kind: ManagedBinaryKind;
+  displayName: string;
+  targetPath: string;
+  configuredPath: string;
+  managedExists: boolean;
+  configuredExists: boolean;
+  managedSizeBytes: number | null;
+  configuredSizeBytes: number | null;
+  managedModifiedAt: number | null;
+  configuredModifiedAt: number | null;
+}
+
+export interface ManagedBinaryInventory {
+  binDir: string;
+  runtimeSettings: RuntimeSettings;
+  tachyonCore: ManagedBinaryInfo;
+  xray: ManagedBinaryInfo;
+}
+
 export interface ProcessStatus {
   state: ProcessState;
   pid: number | null;
@@ -40,6 +62,20 @@ export async function saveRuntimeSettings(
   settings: RuntimeSettings,
 ): Promise<RuntimeSettings> {
   return invoke<RuntimeSettings>("save_runtime_settings", { settings });
+}
+
+export async function getManagedBinaries(): Promise<ManagedBinaryInventory> {
+  return invoke<ManagedBinaryInventory>("managed_binaries");
+}
+
+export async function installManagedBinary(
+  kind: ManagedBinaryKind,
+  sourcePath: string,
+): Promise<ManagedBinaryInventory> {
+  return invoke<ManagedBinaryInventory>("install_managed_binary", {
+    kind,
+    sourcePath,
+  });
 }
 
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
