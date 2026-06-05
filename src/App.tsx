@@ -52,6 +52,13 @@ import type { ProxyNode, SubscriptionSnapshot } from "./domain/subscriptions";
 
 type ConnectionState = "checking" | "connected" | "disconnected";
 type PrismView = "overview" | "nodes" | "game" | "launchers" | "runtime" | "config";
+type ReadinessState = "error" | "ok" | "warning";
+
+interface ReadinessItem {
+  detail: string;
+  label: string;
+  state: ReadinessState;
+}
 
 const emptyProfile = {
   displayName: "",
@@ -120,6 +127,43 @@ function managedBinaryDisplayName(kind: ManagedBinaryKind): string {
   return kind === "xray" ? "Xray Core" : "Tachyon Core";
 }
 
+function readinessText(state: ReadinessState): string {
+  return state === "ok" ? "OK" : state === "warning" ? "Check" : "Fix";
+}
+
+function binaryReadiness(
+  label: string,
+  path: string,
+  binary: ManagedBinaryInfo | undefined,
+): ReadinessItem {
+  if (!path) {
+    return {
+      detail: "Choose a managed binary or enter an executable path.",
+      label,
+      state: "error",
+    };
+  }
+  if (!binary) {
+    return {
+      detail: path,
+      label,
+      state: "warning",
+    };
+  }
+  if (binary.configuredPath === path && !binary.configuredExists) {
+    return {
+      detail: `Configured executable is missing: ${path}`,
+      label,
+      state: "error",
+    };
+  }
+  return {
+    detail: path,
+    label,
+    state: "ok",
+  };
+}
+
 function draftText(activeNode: ProxyNode | undefined): {
   core: string;
   error: string;
@@ -172,6 +216,78 @@ export function App() {
   );
   const activeNode = useMemo(() => selectedNode(subscription), [subscription]);
   const drafts = useMemo(() => draftText(activeNode), [activeNode]);
+  const readinessItems = useMemo<ReadinessItem[]>(() => {
+    const items: ReadinessItem[] = [];
+    items.push(
+      activeNode
+        ? {
+            detail: `${activeNode.name} (${activeNode.protocol.toUpperCase()})`,
+            label: "Selected node",
+            state: "ok",
+          }
+        : {
+            detail: "Import a subscription or select a node before starting cores.",
+            label: "Selected node",
+            state: "error",
+          },
+    );
+    items.push(
+      drafts.xray && !drafts.error
+        ? { detail: "Xray client JSON can be generated.", label: "Xray config", state: "ok" }
+        : {
+            detail: drafts.error || "Xray config needs a selected node.",
+            label: "Xray config",
+            state: "error",
+          },
+    );
+    items.push(
+      drafts.core && !drafts.error
+        ? {
+            detail: "Tachyon Core client JSON can be generated.",
+            label: "Tachyon config",
+            state: "ok",
+          }
+        : {
+            detail: drafts.error || "Tachyon config needs a selected node.",
+            label: "Tachyon config",
+            state: "error",
+          },
+    );
+
+    const xrayPath = runtimeInputs.xrayBinaryPath.trim();
+    const corePath = runtimeInputs.tachyonCoreBinaryPath.trim();
+    const xrayBinary = managedBinaries?.xray;
+    const coreBinary = managedBinaries?.tachyonCore;
+    items.push(binaryReadiness("Xray Core binary", xrayPath, xrayBinary));
+    items.push(binaryReadiness("Tachyon Core binary", corePath, coreBinary));
+    items.push(
+      activeProfiles > 0
+        ? {
+            detail: `${activeProfiles} game profile${activeProfiles === 1 ? "" : "s"} enabled.`,
+            label: "Game profiles",
+            state: "ok",
+          }
+        : {
+            detail: "No enabled game profile. Add a program or scan Steam.",
+            label: "Game profiles",
+            state: "warning",
+          },
+    );
+    return items;
+  }, [
+    activeNode,
+    activeProfiles,
+    drafts.core,
+    drafts.error,
+    drafts.xray,
+    managedBinaries,
+    runtimeInputs.tachyonCoreBinaryPath,
+    runtimeInputs.xrayBinaryPath,
+  ]);
+  const readinessErrors = useMemo(
+    () => readinessItems.filter((item) => item.state === "error").length,
+    [readinessItems],
+  );
 
   async function refreshProfiles() {
     try {
@@ -446,8 +562,57 @@ export function App() {
     }
   }
 
+  function binaryPreflightError(kind: ManagedBinaryKind): string | null {
+    const path =
+      kind === "xray"
+        ? runtimeInputs.xrayBinaryPath.trim()
+        : runtimeInputs.tachyonCoreBinaryPath.trim();
+    if (!path) {
+      return `${managedBinaryDisplayName(kind)} binary path required`;
+    }
+    const binary = binaryInfo(kind);
+    if (binary && binary.configuredPath === path && !binary.configuredExists) {
+      return `${managedBinaryDisplayName(kind)} binary not found: ${path}`;
+    }
+    return null;
+  }
+
+  function runtimePreflightErrors(kind?: ManagedBinaryKind): string[] {
+    const errors: string[] = [];
+    if (!activeNode) {
+      errors.push("Select a node first");
+    }
+    if (drafts.error) {
+      errors.push(drafts.error);
+    }
+    if ((!kind || kind === "xray") && !drafts.xray) {
+      errors.push("Xray config draft unavailable");
+    }
+    if ((!kind || kind === "tachyonCore") && !drafts.core) {
+      errors.push("Tachyon config draft unavailable");
+    }
+    if (!kind || kind === "xray") {
+      const error = binaryPreflightError("xray");
+      if (error) {
+        errors.push(error);
+      }
+    }
+    if (!kind || kind === "tachyonCore") {
+      const error = binaryPreflightError("tachyonCore");
+      if (error) {
+        errors.push(error);
+      }
+    }
+    return Array.from(new Set(errors));
+  }
+
   async function startRuntime(kind: "tachyonCore" | "xray") {
     try {
+      const errors = runtimePreflightErrors(kind);
+      if (errors.length > 0) {
+        setMessage(errors[0]);
+        return;
+      }
       const paths = await writeDrafts();
       const settings = await saveRuntimeSettings(runtimeInputs);
       setRuntimeInputs(settings);
@@ -476,6 +641,11 @@ export function App() {
 
   async function startAllRuntime() {
     try {
+      const errors = runtimePreflightErrors();
+      if (errors.length > 0) {
+        setMessage(errors[0]);
+        return;
+      }
       const paths = await writeDrafts();
       const settings = await saveRuntimeSettings(runtimeInputs);
       setRuntimeInputs(settings);
@@ -751,6 +921,25 @@ export function App() {
                     </div>
                   </div>
                 </article>
+
+                <article className="panel compact-panel">
+                  <header>
+                    <h2>Readiness</h2>
+                    <button type="button" onClick={() => setActiveView("runtime")}>
+                      Review
+                    </button>
+                  </header>
+                  <div className="runtime-status-list">
+                    <div>
+                      <span>Blocking items</span>
+                      <strong>{readinessErrors}</strong>
+                    </div>
+                    <div>
+                      <span>Checks</span>
+                      <strong>{readinessItems.length}</strong>
+                    </div>
+                  </div>
+                </article>
               </div>
             </div>
           ) : null}
@@ -911,6 +1100,29 @@ export function App() {
 
           {activeView === "runtime" ? (
             <>
+              <article className="panel readiness-panel">
+                <header>
+                  <div>
+                    <h2>Readiness</h2>
+                    <p>{readinessErrors === 0 ? "Ready to start" : `${readinessErrors} item needs attention`}</p>
+                  </div>
+                  <button type="button" onClick={() => void refreshManagedBinaries()}>
+                    Refresh
+                  </button>
+                </header>
+                <div className="readiness-list">
+                  {readinessItems.map((item) => (
+                    <div className={`readiness-row ${item.state}`} key={item.label}>
+                      <span>{readinessText(item.state)}</span>
+                      <div>
+                        <strong>{item.label}</strong>
+                        <p>{item.detail}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </article>
+
               <article className="panel binary-panel">
                 <header>
                   <h2>Binaries</h2>

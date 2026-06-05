@@ -384,7 +384,8 @@ textarea {
 .suggestion-list,
 .binary-grid,
 .runtime-grid,
-.runtime-status-list {
+.runtime-status-list,
+.readiness-list {
   display: grid;
   gap: 8px;
 }
@@ -454,6 +455,56 @@ textarea {
   font-size: 14px;
   overflow-wrap: anywhere;
   text-align: right;
+}
+
+.readiness-row {
+  align-items: flex-start;
+  border-top: 1px solid #edf1ef;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 64px minmax(0, 1fr);
+  padding: 12px 0;
+}
+
+.readiness-row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.readiness-row > span {
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  padding: 7px 9px;
+  text-align: center;
+}
+
+.readiness-row.ok > span {
+  background: #dff4e7;
+  color: #115c39;
+}
+
+.readiness-row.warning > span {
+  background: #fff0cf;
+  color: #735019;
+}
+
+.readiness-row.error > span {
+  background: #ffe3dd;
+  color: #8d3322;
+}
+
+.readiness-row strong,
+.readiness-row p {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.readiness-row p {
+  color: #667570;
+  font-size: 13px;
+  margin: 3px 0 0;
 }
 
 .path-list {
