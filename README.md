@@ -24,17 +24,29 @@ Prism parses subscription payloads locally and stores the selected node in the
 desktop control plane. Core does not store subscriptions and does not fetch
 subscription URLs.
 
-Supported node URI formats in the current parser:
+Supported input formats in the current parser:
 
 - `vless://...`
+- `vmess://...`
 - `trojan://...`
 - `ss://...`
+- `socks://...` / `socks5://...`
+- `http://...` / `https://...`
+- `hysteria://...` / `hysteria2://...` / `hy2://...`
+- Basic `wireguard://...` links when key material is present.
+- Full Xray outbound JSON objects.
+- Full Xray config JSON with an `outbounds` array.
 - Plain newline-separated payloads.
 - Base64-encoded newline-separated payloads.
 
+The full Xray JSON path is intentionally lossless: Prism stores the outbound
+object as-is and extracts only the node summary needed for display. This is the
+path used for complete Xray feature coverage, including transport settings,
+TLS, REALITY, mux, proxy settings, and future fields.
+
 VLESS nodes preserve the user UUID and can be converted into a Core `proxy`
-JSON draft. Applying that generated config to a running Core process is a later
-control-plane step.
+JSON draft. Complete Xray outbound drafts are also preserved per node. Applying
+that generated config to a running Core process is a later control-plane step.
 
 ## Development Environment
 

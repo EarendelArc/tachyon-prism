@@ -24,6 +24,10 @@ function selectedNode(snapshot: SubscriptionSnapshot): ProxyNode | undefined {
   return snapshot.nodes.find((node) => node.id === snapshot.selectedNodeId);
 }
 
+function nodeEndpoint(node: ProxyNode): string {
+  return node.port > 0 ? `${node.address}:${node.port}` : node.address;
+}
+
 export function App() {
   const [connection, setConnection] = useState<ConnectionState>("checking");
   const [profiles, setProfiles] = useState<GameProfile[]>(defaultGameProfiles);
@@ -299,7 +303,7 @@ export function App() {
             <div className="selected-node">
               <strong>{activeNode.name}</strong>
               <span>
-                {activeNode.protocol.toUpperCase()} {activeNode.address}:{activeNode.port}
+                {activeNode.protocol.toUpperCase()} {nodeEndpoint(activeNode)}
               </span>
             </div>
           ) : null}
@@ -309,7 +313,7 @@ export function App() {
                 <div>
                   <strong>{node.name}</strong>
                   <span>
-                    {node.protocol.toUpperCase()} {node.address}:{node.port}
+                    {node.protocol.toUpperCase()} {nodeEndpoint(node)}
                     {node.transport ? ` / ${node.transport}` : ""}
                   </span>
                 </div>
