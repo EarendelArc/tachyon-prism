@@ -164,7 +164,10 @@ function binaryReadiness(
   };
 }
 
-function draftText(activeNode: ProxyNode | undefined): {
+function draftText(
+  activeNode: ProxyNode | undefined,
+  profiles: GameProfile[],
+): {
   core: string;
   error: string;
   xray: string;
@@ -175,7 +178,7 @@ function draftText(activeNode: ProxyNode | undefined): {
 
   try {
     return {
-      core: stringifyDraft(buildCoreClientConfigDraft(activeNode)),
+      core: stringifyDraft(buildCoreClientConfigDraft(activeNode, { gameProfiles: profiles })),
       error: "",
       xray: stringifyDraft(buildXrayClientConfigDraft(activeNode)),
     };
@@ -215,7 +218,7 @@ export function App() {
     [profiles],
   );
   const activeNode = useMemo(() => selectedNode(subscription), [subscription]);
-  const drafts = useMemo(() => draftText(activeNode), [activeNode]);
+  const drafts = useMemo(() => draftText(activeNode, profiles), [activeNode, profiles]);
   const readinessItems = useMemo<ReadinessItem[]>(() => {
     const items: ReadinessItem[] = [];
     items.push(

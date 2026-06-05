@@ -64,7 +64,8 @@ TGP relay endpoint needed for UDP game acceleration.
 The Config panel generates two JSON drafts from the selected node:
 
 - `xray-client.json`: a local SOCKS inbound plus the selected Xray outbound.
-- `client.json`: a Tachyon Core client config for the TGP UDP game path.
+- `client.json`: a Tachyon Core client config for the TGP UDP game path,
+  including Prism-managed game profiles under `client.routing.game_profiles`.
 
 For complete Xray feature support, Prism prefers the preserved outbound object
 from the subscription or full Xray JSON input instead of rebuilding fields from
@@ -73,6 +74,8 @@ scratch.
 The Save action writes the generated files into the Tauri app config directory
 and shows the exact paths in the Config panel. Core still remains pure and only
 needs the generated `client.json`; Xray is launched and configured by Prism.
+Game profiles are owned by Prism but embedded into the generated Core JSON so a
+single Core config captures the intended UDP acceleration policy.
 
 The Binaries panel can copy a local `xray` or `tachyon-core` executable into
 Prism's managed app config `bin` directory and point `runtime-settings.json` at

@@ -1,9 +1,14 @@
+import type { GameProfile } from "./gameProfiles";
 import { buildXrayOutboundDraft } from "./subscriptions";
 import type { ProxyNode, XrayOutboundObject } from "./subscriptions";
 
 export interface XrayClientDraftOptions {
   socksListen?: string;
   socksPort?: number;
+}
+
+export interface CoreClientDraftOptions {
+  gameProfiles?: GameProfile[];
 }
 
 export function buildXrayClientConfigDraft(
@@ -43,8 +48,10 @@ export function buildXrayClientConfigDraft(
 
 export function buildCoreClientConfigDraft(
   node: ProxyNode,
+  options: CoreClientDraftOptions = {},
 ): Record<string, unknown> {
   const endpoint = nodeEndpoint(node);
+  const gameProfiles = options.gameProfiles ?? [];
 
   return {
     mode: "client",
@@ -58,12 +65,16 @@ export function buildCoreClientConfigDraft(
       },
       routing: {
         default_action: "direct",
-        rules: [
-          {
-            process_name: "cs2.exe",
-            action: "tgp",
-            priority: 100,
+        game_profiles: gameProfiles,
+        launchers: {
+          steam: {
+            enabled: true,
+            trackChildProcesses: true,
+            accelerateGameUdp: true,
+            accelerateSteamDownloads: false,
           },
+        },
+        rules: [
           {
             cidr: "192.168.0.0/16",
             action: "direct",
