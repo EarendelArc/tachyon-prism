@@ -22,6 +22,7 @@ Prism 是完整的 Xray GUI 客户端，并额外支持 Tachyon Core。它负责
 - 把本地二进制安装到 Prism 应用配置目录下的托管 `bin` 目录。
 - 从 GitHub release channel 发现、下载、SHA-256 校验并托管安装最新版 Xray Core 与 Tachyon Core。
 - 作为独立子进程启动和停止 Xray Core 与 Tachyon Core。
+- Windows 运行时会检测 Tachyon Core 配置二进制同目录下必需的 `wintun.dll` sidecar。
 
 ## 订阅边界
 
@@ -60,6 +61,7 @@ Save 操作会把生成文件写入 Tauri 应用配置目录，并在 Config 面
 Binaries 面板可以把本地 `xray` 或 `tachyon-core` 可执行文件复制到 Prism 应用配置目录下的托管 `bin` 目录，并把 `runtime-settings.json` 指向这个托管副本。它也可以查询最新版 Xray Core 与 Tachyon Core GitHub release，选择当前平台压缩包，下载匹配的 `.dgst` / `SHA256SUMS.txt` 校验资产，校验压缩包 SHA-256，解压 `xray`/`xray.exe` 或 `tachyon-core`/`tachyon-core.exe`，并原子安装到托管 `bin` 目录。
 
 Runtime 面板会把二进制路径保存到 `runtime-settings.json`。`Start All` 会先写入最新生成的配置文件，再用 `xray-client.json` 启动 Xray，并用 `client.json` 启动 Tachyon Core。
+在 Windows 上，Tachyon Core 还要求 `wintun.dll` 与配置的 `tachyon-core.exe` 位于同一目录；Prism 会在 Runtime readiness 中提示，并在缺少必需 sidecar 时阻止启动 Core。
 
 托管二进制 API 与启动控制刻意分离。未来可以继续在同一层补齐镜像选择、后台进度事件以及权限提升流程，而不需要改 Runtime 面板的启动契约。
 

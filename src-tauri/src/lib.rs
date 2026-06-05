@@ -49,12 +49,22 @@ struct ManagedBinaryInfo {
     display_name: String,
     target_path: String,
     configured_path: String,
+    sidecar_dependencies: Vec<SidecarDependencyInfo>,
     managed_exists: bool,
     configured_exists: bool,
     managed_size_bytes: Option<u64>,
     configured_size_bytes: Option<u64>,
     managed_modified_at: Option<u64>,
     configured_modified_at: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SidecarDependencyInfo {
+    name: String,
+    path: String,
+    required: bool,
+    exists: bool,
 }
 
 #[derive(Serialize)]
@@ -816,7 +826,7 @@ fn binary_name(base: &str) -> String {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 enum ManagedBinaryKind {
     TachyonCore,
     Xray,
@@ -883,6 +893,7 @@ fn managed_binary_info(
         display_name: kind.display_name().to_string(),
         target_path: path_string(&target),
         configured_path,
+        sidecar_dependencies: sidecar_dependencies(kind, &configured),
         managed_exists: managed_meta.exists,
         configured_exists: configured_meta.exists,
         managed_size_bytes: managed_meta.size_bytes,
@@ -890,6 +901,22 @@ fn managed_binary_info(
         managed_modified_at: managed_meta.modified_at,
         configured_modified_at: configured_meta.modified_at,
     })
+}
+
+fn sidecar_dependencies(kind: ManagedBinaryKind, binary_path: &Path) -> Vec<SidecarDependencyInfo> {
+    if !cfg!(target_os = "windows") || kind != ManagedBinaryKind::TachyonCore {
+        return Vec::new();
+    }
+    let Some(parent) = binary_path.parent() else {
+        return Vec::new();
+    };
+    let path = parent.join("wintun.dll");
+    vec![SidecarDependencyInfo {
+        name: "wintun.dll".to_string(),
+        path: path_string(&path),
+        required: true,
+        exists: path.is_file(),
+    }]
 }
 
 fn managed_binary_target(
@@ -1505,6 +1532,25 @@ mod tests {
             checksum,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
+    }
+
+    #[test]
+    fn reports_wintun_sidecar_for_tachyon_core_on_windows() {
+        let binary_path = if cfg!(target_os = "windows") {
+            Path::new("C:\\Tachyon\\tachyon-core.exe")
+        } else {
+            Path::new("/opt/tachyon/tachyon-core")
+        };
+        let deps = sidecar_dependencies(ManagedBinaryKind::TachyonCore, binary_path);
+
+        if cfg!(target_os = "windows") {
+            assert_eq!(deps.len(), 1);
+            assert_eq!(deps[0].name, "wintun.dll");
+            assert!(deps[0].path.ends_with("wintun.dll"));
+            assert!(deps[0].required);
+        } else {
+            assert!(deps.is_empty());
+        }
     }
 
     #[test]

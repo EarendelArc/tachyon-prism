@@ -166,6 +166,21 @@ function binaryReadiness(
   };
 }
 
+function sidecarReadiness(binary: ManagedBinaryInfo | undefined): ReadinessItem[] {
+  if (!binary) {
+    return [];
+  }
+  return binary.sidecarDependencies
+    .filter((dependency) => dependency.required)
+    .map((dependency) => ({
+      detail: dependency.exists
+        ? dependency.path
+        : `Missing required sidecar: ${dependency.path}`,
+      label: dependency.name,
+      state: dependency.exists ? "ok" : "error",
+    }));
+}
+
 function draftText(
   activeNode: ProxyNode | undefined,
   profiles: GameProfile[],
@@ -275,6 +290,9 @@ export function App() {
     const coreBinary = managedBinaries?.tachyonCore;
     items.push(binaryReadiness("Xray Core binary", xrayPath, xrayBinary));
     items.push(binaryReadiness("Tachyon Core binary", corePath, coreBinary));
+    if (coreBinary?.configuredPath === corePath) {
+      items.push(...sidecarReadiness(coreBinary));
+    }
     items.push(
       activeProfiles > 0
         ? {
@@ -604,6 +622,14 @@ export function App() {
     const binary = binaryInfo(kind);
     if (binary && binary.configuredPath === path && !binary.configuredExists) {
       return `${managedBinaryDisplayName(kind)} binary not found: ${path}`;
+    }
+    if (binary && kind === "tachyonCore" && binary.configuredPath === path) {
+      const missingSidecar = binary.sidecarDependencies.find(
+        (dependency) => dependency.required && !dependency.exists,
+      );
+      if (missingSidecar) {
+        return `${missingSidecar.name} required next to Tachyon Core: ${missingSidecar.path}`;
+      }
     }
     return null;
   }
@@ -1221,6 +1247,11 @@ export function App() {
                           <span>{binary ? managedStatusLabel(binary) : "inventory unavailable"}</span>
                           {binary ? <span>{configuredStatusLabel(binary)}</span> : null}
                           {binary ? <span>{binary.targetPath}</span> : null}
+                          {binary?.sidecarDependencies.map((dependency) => (
+                            <span key={dependency.name}>
+                              {dependency.name}: {dependency.exists ? "found" : dependency.path}
+                            </span>
+                          ))}
                           {release ? (
                             <span>
                               Latest {release.tagName}: {release.assetName} /{" "}

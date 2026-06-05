@@ -16,11 +16,19 @@ export interface RuntimeSettings {
 
 export type ManagedBinaryKind = "tachyonCore" | "xray";
 
+export interface SidecarDependencyInfo {
+  name: string;
+  path: string;
+  required: boolean;
+  exists: boolean;
+}
+
 export interface ManagedBinaryInfo {
   kind: ManagedBinaryKind;
   displayName: string;
   targetPath: string;
   configuredPath: string;
+  sidecarDependencies: SidecarDependencyInfo[];
   managedExists: boolean;
   configuredExists: boolean;
   managedSizeBytes: number | null;

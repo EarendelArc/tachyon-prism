@@ -30,6 +30,8 @@ sent through Tachyon Core for low-latency acceleration.
   SHA-256 verification, and managed install from GitHub release channels.
 - Runtime controls for launching and stopping Xray Core and Tachyon Core as
   separate subprocesses.
+- Windows runtime readiness detects Tachyon Core's required `wintun.dll`
+  sidecar next to the configured Core binary.
 
 ## Subscription Boundary
 
@@ -94,6 +96,9 @@ the executable into the managed `bin` directory.
 The Runtime panel stores binary paths in `runtime-settings.json`. `Start All`
 first writes the latest generated config files, then launches Xray with
 `xray-client.json` and Tachyon Core with `client.json`.
+On Windows, Tachyon Core also requires `wintun.dll` in the same directory as
+the configured `tachyon-core.exe`; Prism reports this in Runtime readiness and
+blocks Core start when the required sidecar is missing.
 
 The managed-binary API is intentionally separate from launch control so future
 mirror selection, background progress events, and privilege-elevation flows can
