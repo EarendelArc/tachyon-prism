@@ -1,5 +1,5 @@
 export type UDPPolicy = "auto" | "tgp" | "direct" | "block";
-export type TCPPolicy = "auto" | "xray" | "direct" | "block";
+export type TCPPolicy = "auto" | "direct" | "block";
 
 export interface MatchRule {
   processNames: string[];

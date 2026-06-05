@@ -49,12 +49,6 @@ export interface SubscriptionSnapshot {
   selectedNodeId: string;
 }
 
-export interface CoreProxyConfigDraft {
-  server_addr: string;
-  vless_uuid: string;
-  sni?: string;
-}
-
 const storageKey = "tachyon.prism.subscription.v1";
 
 const xrayOutboundProtocols = new Set<XrayOutboundProtocol>([
@@ -144,21 +138,6 @@ export function selectSubscriptionNode(
   return {
     ...snapshot,
     selectedNodeId: nodeId,
-  };
-}
-
-export function buildCoreProxyConfigDraft(node: ProxyNode): CoreProxyConfigDraft {
-  if (node.protocol !== "vless") {
-    throw new Error("Only VLESS nodes can be exported to Core proxy config");
-  }
-  if (!node.credential) {
-    throw new Error("VLESS node is missing UUID");
-  }
-
-  return {
-    server_addr: `${node.address}:${node.port}`,
-    vless_uuid: node.credential,
-    sni: node.sni ?? node.address,
   };
 }
 

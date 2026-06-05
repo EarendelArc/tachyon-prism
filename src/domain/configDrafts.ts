@@ -1,13 +1,9 @@
-import { buildCoreProxyConfigDraft, buildXrayOutboundDraft } from "./subscriptions";
+import { buildXrayOutboundDraft } from "./subscriptions";
 import type { ProxyNode, XrayOutboundObject } from "./subscriptions";
 
 export interface XrayClientDraftOptions {
   socksListen?: string;
   socksPort?: number;
-}
-
-export interface CoreClientDraftOptions {
-  xrayConfigFile?: string;
 }
 
 export function buildXrayClientConfigDraft(
@@ -47,11 +43,8 @@ export function buildXrayClientConfigDraft(
 
 export function buildCoreClientConfigDraft(
   node: ProxyNode,
-  options: CoreClientDraftOptions = {},
 ): Record<string, unknown> {
   const endpoint = nodeEndpoint(node);
-  const vlessProxy =
-    node.protocol === "vless" ? buildCoreProxyConfigDraft(node) : undefined;
 
   return {
     mode: "client",
@@ -64,7 +57,7 @@ export function buildCoreClientConfigDraft(
         dns_hijack: true,
       },
       routing: {
-        default_action: "xray",
+        default_action: "direct",
         rules: [
           {
             process_name: "cs2.exe",
@@ -85,9 +78,7 @@ export function buildCoreClientConfigDraft(
       },
       proxy: {
         server_addr: endpoint,
-        vless_uuid: vlessProxy?.vless_uuid ?? "",
         tgp_server_addr: endpoint,
-        sni: vlessProxy?.sni ?? node.sni ?? node.address,
       },
     },
     tgp: {
@@ -104,10 +95,6 @@ export function buildCoreClientConfigDraft(
       multipath: false,
       handshake_timeout: "5s",
       session_idle_timeout: "60s",
-    },
-    xray: {
-      install_dir: "",
-      config_file: options.xrayConfigFile ?? "xray-client.json",
     },
     ipc: {
       websocket_addr: "127.0.0.1:55123",
