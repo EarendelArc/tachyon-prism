@@ -5,6 +5,11 @@ import {
   buildXrayClientConfigDraft,
   stringifyDraft,
 } from "./domain/configDrafts";
+import {
+  getConfigPaths,
+  saveConfigDrafts,
+  type ConfigDraftPaths,
+} from "./domain/desktopConfig";
 import type { GameProfile } from "./domain/gameProfiles";
 import { defaultGameProfiles } from "./domain/gameProfiles";
 import {
@@ -66,6 +71,7 @@ export function App() {
   const [subscription, setSubscription] = useState(loadSubscriptionSnapshot);
   const [subscriptionUrl, setSubscriptionUrl] = useState("");
   const [subscriptionText, setSubscriptionText] = useState("");
+  const [configPaths, setConfigPaths] = useState<ConfigDraftPaths | null>(null);
   const [message, setMessage] = useState("Ready");
 
   const activeProfiles = useMemo(
@@ -209,8 +215,26 @@ export function App() {
     }
   }
 
+  async function saveDrafts() {
+    if (!drafts.core || !drafts.xray) {
+      setMessage("No config draft available");
+      return;
+    }
+
+    try {
+      const paths = await saveConfigDrafts(drafts.core, drafts.xray);
+      setConfigPaths(paths);
+      setMessage("Config files saved");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Save failed");
+    }
+  }
+
   useEffect(() => {
     void refreshProfiles();
+    void getConfigPaths()
+      .then((paths) => setConfigPaths(paths))
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -376,6 +400,9 @@ export function App() {
           <header>
             <h2>Config</h2>
             <div className="row-actions">
+              <button type="button" onClick={() => void saveDrafts()}>
+                Save
+              </button>
               <button type="button" onClick={() => void copyDraft("Xray config", drafts.xray)}>
                 Copy Xray
               </button>
@@ -385,6 +412,18 @@ export function App() {
             </div>
           </header>
           {drafts.error ? <div className="inline-error">{drafts.error}</div> : null}
+          {configPaths ? (
+            <div className="path-list">
+              <div>
+                <span>client.json</span>
+                <strong>{configPaths.coreConfigPath}</strong>
+              </div>
+              <div>
+                <span>xray-client.json</span>
+                <strong>{configPaths.xrayConfigPath}</strong>
+              </div>
+            </div>
+          ) : null}
           <div className="config-grid">
             <label>
               <span>Xray</span>

@@ -19,6 +19,8 @@ capture, routing, Xray subprocess control, and TGP transport.
 - Local node list with selected-node persistence.
 - Xray client JSON draft generation from the selected node.
 - Tachyon Core client JSON draft generation that points to `xray-client.json`.
+- One-click saving of generated `client.json` and `xray-client.json` to the
+  Tauri app config directory.
 
 ## Subscription Boundary
 
@@ -61,6 +63,10 @@ The Config panel generates two JSON drafts from the selected node:
 For complete Xray feature support, Prism prefers the preserved outbound object
 from the subscription or full Xray JSON input instead of rebuilding fields from
 scratch.
+
+The Save action writes the generated files into the Tauri app config directory
+and shows the exact paths in the Config panel. Core still remains pure and only
+needs to be started with the generated `client.json`.
 
 ## Development Environment
 

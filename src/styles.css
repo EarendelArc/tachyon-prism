@@ -198,6 +198,35 @@ textarea {
   margin-top: 2px;
 }
 
+.path-list {
+  background: #f7fafc;
+  border: 1px solid #dbe6f1;
+  border-radius: 6px;
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+}
+
+.path-list div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.path-list span {
+  color: #627187;
+  font-size: 12px;
+}
+
+.path-list strong {
+  font-family:
+    "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
 .suggestion-list {
   display: grid;
   gap: 8px;
