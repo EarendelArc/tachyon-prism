@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,6 +19,14 @@ struct ConfigDraftPaths {
 #[serde(rename_all = "camelCase")]
 struct RuntimePaths {
     bin_dir: String,
+    tachyon_core_binary_path: String,
+    xray_binary_path: String,
+    runtime_settings_path: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeSettings {
     tachyon_core_binary_path: String,
     xray_binary_path: String,
 }
@@ -100,6 +108,29 @@ fn save_config_drafts(
 #[tauri::command]
 fn runtime_paths(app: tauri::AppHandle) -> Result<RuntimePaths, String> {
     default_runtime_paths(&app)
+}
+
+#[tauri::command]
+fn runtime_settings(app: tauri::AppHandle) -> Result<RuntimeSettings, String> {
+    load_runtime_settings(&app)
+}
+
+#[tauri::command]
+fn save_runtime_settings(
+    app: tauri::AppHandle,
+    settings: RuntimeSettings,
+) -> Result<RuntimeSettings, String> {
+    let settings = normalize_runtime_settings(&app, settings)?;
+    let settings_path = runtime_settings_path(&app)?;
+    let config_dir = settings_path
+        .parent()
+        .ok_or_else(|| "runtime settings path has no parent".to_string())?;
+    fs::create_dir_all(config_dir)
+        .map_err(|err| format!("create config directory {}: {err}", config_dir.display()))?;
+    let data = serde_json::to_string_pretty(&settings)
+        .map_err(|err| format!("encode runtime settings: {err}"))?;
+    write_atomic(&settings_path, &(data + "\n"))?;
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -190,7 +221,59 @@ fn default_runtime_paths(app: &tauri::AppHandle) -> Result<RuntimePaths, String>
         bin_dir: path_string(&bin_dir),
         tachyon_core_binary_path: path_string(&bin_dir.join(binary_name("tachyon-core"))),
         xray_binary_path: path_string(&bin_dir.join(binary_name("xray"))),
+        runtime_settings_path: path_string(&config_dir.join("runtime-settings.json")),
     })
+}
+
+fn runtime_settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|err| format!("resolve app config directory: {err}"))?;
+    Ok(config_dir.join("runtime-settings.json"))
+}
+
+fn load_runtime_settings(app: &tauri::AppHandle) -> Result<RuntimeSettings, String> {
+    let settings_path = runtime_settings_path(app)?;
+    if !settings_path.exists() {
+        return default_runtime_settings(app);
+    }
+    let raw = fs::read_to_string(&settings_path)
+        .map_err(|err| format!("read {}: {err}", settings_path.display()))?;
+    let settings: RuntimeSettings =
+        serde_json::from_str(&raw).map_err(|err| format!("parse runtime settings: {err}"))?;
+    normalize_runtime_settings(app, settings)
+}
+
+fn normalize_runtime_settings(
+    app: &tauri::AppHandle,
+    settings: RuntimeSettings,
+) -> Result<RuntimeSettings, String> {
+    let defaults = default_runtime_settings(app)?;
+    Ok(RuntimeSettings {
+        tachyon_core_binary_path: non_empty_or(
+            settings.tachyon_core_binary_path,
+            defaults.tachyon_core_binary_path,
+        ),
+        xray_binary_path: non_empty_or(settings.xray_binary_path, defaults.xray_binary_path),
+    })
+}
+
+fn default_runtime_settings(app: &tauri::AppHandle) -> Result<RuntimeSettings, String> {
+    let paths = default_runtime_paths(app)?;
+    Ok(RuntimeSettings {
+        tachyon_core_binary_path: paths.tachyon_core_binary_path,
+        xray_binary_path: paths.xray_binary_path,
+    })
+}
+
+fn non_empty_or(value: String, fallback: String) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn binary_name(base: &str) -> String {
@@ -354,6 +437,8 @@ pub fn run() {
             config_paths,
             save_config_drafts,
             runtime_paths,
+            runtime_settings,
+            save_runtime_settings,
             runtime_status,
             start_xray,
             stop_xray,

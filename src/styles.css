@@ -169,7 +169,9 @@ textarea {
 .row-actions {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+  justify-content: flex-end;
 }
 
 .active-button {
@@ -306,6 +308,15 @@ textarea {
 @media (max-width: 840px) {
   .dashboard-grid {
     grid-template-columns: 1fr;
+  }
+
+  .panel header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .panel header .row-actions {
+    justify-content: flex-start;
   }
 
   .config-grid {

@@ -20,6 +20,7 @@ Prism 是完整的 Xray GUI 客户端，并额外支持 Tachyon Core。它负责
 - 根据选中节点生成 Xray 客户端 JSON 草稿。
 - 生成用于 TGP 游戏路径的 Tachyon Core 客户端 JSON 草稿。
 - 一键把生成的 `client.json` 与 `xray-client.json` 保存到 Tauri 应用配置目录。
+- 持久化 Xray Core 与 Tachyon Core 的运行二进制路径。
 - 作为独立子进程启动和停止 Xray Core 与 Tachyon Core。
 
 ## 订阅边界
@@ -62,8 +63,9 @@ outbound 对象，而不是重新猜测所有字段。
 Save 操作会把生成文件写入 Tauri 应用配置目录，并在 Config 面板显示确切路径。
 Core 仍然保持纯粹，只需要生成的 `client.json`；Xray 由 Prism 启动和配置。
 
-Runtime 面板会用 `xray-client.json` 启动 Xray，并用 `client.json` 启动 Tachyon
-Core。后续会继续补齐托管二进制下载、更新和权限提升流程。
+Runtime 面板会把二进制路径保存到 `runtime-settings.json`。`Start All` 会先写入最新生成的
+配置文件，再用 `xray-client.json` 启动 Xray，并用 `client.json` 启动 Tachyon Core。
+后续会继续补齐托管二进制下载、更新和权限提升流程。
 
 ## 开发环境
 

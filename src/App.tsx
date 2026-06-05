@@ -14,7 +14,9 @@ import type { GameProfile } from "./domain/gameProfiles";
 import { defaultGameProfiles } from "./domain/gameProfiles";
 import {
   getRuntimePaths,
+  getRuntimeSettings,
   getRuntimeStatus,
+  saveRuntimeSettings,
   startTachyonCore,
   startXray,
   stopTachyonCore,
@@ -241,28 +243,33 @@ export function App() {
     }
   }
 
-  async function saveDrafts() {
+  async function writeDrafts(): Promise<ConfigDraftPaths> {
     if (!drafts.core || !drafts.xray) {
-      setMessage("No config draft available");
-      return;
+      throw new Error("No config draft available");
     }
 
+    const paths = await saveConfigDrafts(drafts.core, drafts.xray);
+    setConfigPaths(paths);
+    return paths;
+  }
+
+  async function saveDrafts() {
     try {
-      const paths = await saveConfigDrafts(drafts.core, drafts.xray);
-      setConfigPaths(paths);
+      await writeDrafts();
       setMessage("Config files saved");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Save failed");
     }
   }
 
-  async function currentConfigPaths(): Promise<ConfigDraftPaths> {
-    if (configPaths) {
-      return configPaths;
+  async function saveRuntimeInputs() {
+    try {
+      const settings = await saveRuntimeSettings(runtimeInputs);
+      setRuntimeInputs(settings);
+      setMessage("Runtime paths saved");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Runtime settings save failed");
     }
-    const paths = await getConfigPaths();
-    setConfigPaths(paths);
-    return paths;
   }
 
   async function refreshRuntime() {
@@ -275,9 +282,11 @@ export function App() {
 
   async function startRuntime(kind: "tachyonCore" | "xray") {
     try {
-      const paths = await currentConfigPaths();
+      const paths = await writeDrafts();
+      const settings = await saveRuntimeSettings(runtimeInputs);
+      setRuntimeInputs(settings);
       if (kind === "xray") {
-        const binaryPath = runtimeInputs.xrayBinaryPath.trim();
+        const binaryPath = settings.xrayBinaryPath.trim();
         if (!binaryPath) {
           setMessage("Xray binary path required");
           return;
@@ -285,7 +294,7 @@ export function App() {
         await startXray(binaryPath, paths.xrayConfigPath);
         setMessage("Xray started");
       } else {
-        const binaryPath = runtimeInputs.tachyonCoreBinaryPath.trim();
+        const binaryPath = settings.tachyonCoreBinaryPath.trim();
         if (!binaryPath) {
           setMessage("Core binary path required");
           return;
@@ -296,6 +305,31 @@ export function App() {
       await refreshRuntime();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Start failed");
+    }
+  }
+
+  async function startAllRuntime() {
+    try {
+      const paths = await writeDrafts();
+      const settings = await saveRuntimeSettings(runtimeInputs);
+      setRuntimeInputs(settings);
+
+      if (!settings.xrayBinaryPath.trim()) {
+        setMessage("Xray binary path required");
+        return;
+      }
+      if (!settings.tachyonCoreBinaryPath.trim()) {
+        setMessage("Core binary path required");
+        return;
+      }
+
+      await startXray(settings.xrayBinaryPath, paths.xrayConfigPath);
+      await startTachyonCore(settings.tachyonCoreBinaryPath, paths.coreConfigPath);
+      setMessage("Xray and Tachyon Core started");
+      await refreshRuntime();
+    } catch (error) {
+      await refreshRuntime();
+      setMessage(error instanceof Error ? error.message : "Start all failed");
     }
   }
 
@@ -314,6 +348,18 @@ export function App() {
     }
   }
 
+  async function stopAllRuntime() {
+    try {
+      await stopTachyonCore();
+      await stopXray();
+      setMessage("Xray and Tachyon Core stopped");
+      await refreshRuntime();
+    } catch (error) {
+      await refreshRuntime();
+      setMessage(error instanceof Error ? error.message : "Stop all failed");
+    }
+  }
+
   useEffect(() => {
     void refreshProfiles();
     void getConfigPaths()
@@ -327,6 +373,9 @@ export function App() {
           xrayBinaryPath: paths.xrayBinaryPath,
         });
       })
+      .catch(() => undefined);
+    void getRuntimeSettings()
+      .then((settings) => setRuntimeInputs(settings))
       .catch(() => undefined);
     void refreshRuntime();
   }, []);
@@ -533,15 +582,30 @@ export function App() {
         <article className="panel runtime-panel">
           <header>
             <h2>Runtime</h2>
-            <button type="button" onClick={() => void refreshRuntime()}>
-              Refresh
-            </button>
+            <div className="row-actions">
+              <button type="button" onClick={() => void saveRuntimeInputs()}>
+                Save Paths
+              </button>
+              <button type="button" onClick={() => void startAllRuntime()}>
+                Start All
+              </button>
+              <button type="button" onClick={() => void stopAllRuntime()}>
+                Stop All
+              </button>
+              <button type="button" onClick={() => void refreshRuntime()}>
+                Refresh
+              </button>
+            </div>
           </header>
           {runtimePaths ? (
             <div className="path-list">
               <div>
                 <span>bin</span>
                 <strong>{runtimePaths.binDir}</strong>
+              </div>
+              <div>
+                <span>runtime-settings.json</span>
+                <strong>{runtimePaths.runtimeSettingsPath}</strong>
               </div>
             </div>
           ) : null}

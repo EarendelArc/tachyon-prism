@@ -6,6 +6,12 @@ export interface RuntimePaths {
   binDir: string;
   tachyonCoreBinaryPath: string;
   xrayBinaryPath: string;
+  runtimeSettingsPath: string;
+}
+
+export interface RuntimeSettings {
+  tachyonCoreBinaryPath: string;
+  xrayBinaryPath: string;
 }
 
 export interface ProcessStatus {
@@ -24,6 +30,16 @@ export interface RuntimeStatus {
 
 export async function getRuntimePaths(): Promise<RuntimePaths> {
   return invoke<RuntimePaths>("runtime_paths");
+}
+
+export async function getRuntimeSettings(): Promise<RuntimeSettings> {
+  return invoke<RuntimeSettings>("runtime_settings");
+}
+
+export async function saveRuntimeSettings(
+  settings: RuntimeSettings,
+): Promise<RuntimeSettings> {
+  return invoke<RuntimeSettings>("save_runtime_settings", { settings });
 }
 
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {

@@ -22,6 +22,7 @@ sent through Tachyon Core for low-latency acceleration.
 - Tachyon Core client JSON draft generation for the TGP game path.
 - One-click saving of generated `client.json` and `xray-client.json` to the
   Tauri app config directory.
+- Persistent runtime binary path settings for Xray Core and Tachyon Core.
 - Runtime controls for launching and stopping Xray Core and Tachyon Core as
   separate subprocesses.
 
@@ -69,9 +70,10 @@ The Save action writes the generated files into the Tauri app config directory
 and shows the exact paths in the Config panel. Core still remains pure and only
 needs the generated `client.json`; Xray is launched and configured by Prism.
 
-The Runtime panel starts Xray with `xray-client.json` and Tachyon Core with
-`client.json`. Future releases will add managed binary download, update, and
-privilege-elevation flows.
+The Runtime panel stores binary paths in `runtime-settings.json`. `Start All`
+first writes the latest generated config files, then launches Xray with
+`xray-client.json` and Tachyon Core with `client.json`. Future releases will
+add managed binary download, update, and privilege-elevation flows.
 
 ## Development Environment
 
