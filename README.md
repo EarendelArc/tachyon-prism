@@ -17,6 +17,8 @@ capture, routing, Xray subprocess control, and TGP transport.
 - Per-program UDP/TCP routing policy controls.
 - Basic subscription import from URL or pasted payload.
 - Local node list with selected-node persistence.
+- Xray client JSON draft generation from the selected node.
+- Tachyon Core client JSON draft generation that points to `xray-client.json`.
 
 ## Subscription Boundary
 
@@ -47,6 +49,18 @@ TLS, REALITY, mux, proxy settings, and future fields.
 VLESS nodes preserve the user UUID and can be converted into a Core `proxy`
 JSON draft. Complete Xray outbound drafts are also preserved per node. Applying
 that generated config to a running Core process is a later control-plane step.
+
+## Config Drafts
+
+The Config panel generates two JSON drafts from the selected node:
+
+- `xray-client.json`: a local SOCKS inbound plus the selected Xray outbound.
+- `client.json`: a Tachyon Core client config whose `xray.config_file` points at
+  `xray-client.json`.
+
+For complete Xray feature support, Prism prefers the preserved outbound object
+from the subscription or full Xray JSON input instead of rebuilding fields from
+scratch.
 
 ## Development Environment
 

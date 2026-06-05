@@ -204,8 +204,49 @@ textarea {
   margin-top: 12px;
 }
 
+.config-panel {
+  grid-column: 1 / -1;
+}
+
+.config-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.config-grid label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.config-grid label > span {
+  color: #627187;
+  font-size: 13px;
+}
+
+.config-grid textarea {
+  font-family:
+    "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  min-height: 320px;
+  white-space: pre;
+}
+
+.inline-error {
+  background: #fff6f4;
+  border: 1px solid #f1c7bd;
+  border-radius: 6px;
+  color: #8d2f1d;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+}
+
 @media (max-width: 840px) {
   .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .config-grid {
     grid-template-columns: 1fr;
   }
 }

@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { coreApi } from "./domain/coreApi";
+import {
+  buildCoreClientConfigDraft,
+  buildXrayClientConfigDraft,
+  stringifyDraft,
+} from "./domain/configDrafts";
 import type { GameProfile } from "./domain/gameProfiles";
 import { defaultGameProfiles } from "./domain/gameProfiles";
 import {
@@ -28,6 +33,30 @@ function nodeEndpoint(node: ProxyNode): string {
   return node.port > 0 ? `${node.address}:${node.port}` : node.address;
 }
 
+function draftText(activeNode: ProxyNode | undefined): {
+  core: string;
+  error: string;
+  xray: string;
+} {
+  if (!activeNode) {
+    return { core: "", error: "", xray: "" };
+  }
+
+  try {
+    return {
+      core: stringifyDraft(buildCoreClientConfigDraft(activeNode)),
+      error: "",
+      xray: stringifyDraft(buildXrayClientConfigDraft(activeNode)),
+    };
+  } catch (error) {
+    return {
+      core: "",
+      error: error instanceof Error ? error.message : "Config generation failed",
+      xray: "",
+    };
+  }
+}
+
 export function App() {
   const [connection, setConnection] = useState<ConnectionState>("checking");
   const [profiles, setProfiles] = useState<GameProfile[]>(defaultGameProfiles);
@@ -44,6 +73,7 @@ export function App() {
     [profiles],
   );
   const activeNode = useMemo(() => selectedNode(subscription), [subscription]);
+  const drafts = useMemo(() => draftText(activeNode), [activeNode]);
 
   async function refreshProfiles() {
     try {
@@ -163,6 +193,19 @@ export function App() {
       setMessage("Node selected");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Node selection failed");
+    }
+  }
+
+  async function copyDraft(label: string, value: string) {
+    if (!value) {
+      setMessage("No config draft available");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(value);
+      setMessage(`${label} copied`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Copy failed");
     }
   }
 
@@ -326,6 +369,31 @@ export function App() {
                 </button>
               </div>
             ))}
+          </div>
+        </article>
+
+        <article className="panel config-panel">
+          <header>
+            <h2>Config</h2>
+            <div className="row-actions">
+              <button type="button" onClick={() => void copyDraft("Xray config", drafts.xray)}>
+                Copy Xray
+              </button>
+              <button type="button" onClick={() => void copyDraft("Core config", drafts.core)}>
+                Copy Core
+              </button>
+            </div>
+          </header>
+          {drafts.error ? <div className="inline-error">{drafts.error}</div> : null}
+          <div className="config-grid">
+            <label>
+              <span>Xray</span>
+              <textarea readOnly value={drafts.xray} />
+            </label>
+            <label>
+              <span>Core</span>
+              <textarea readOnly value={drafts.core} />
+            </label>
           </div>
         </article>
 
