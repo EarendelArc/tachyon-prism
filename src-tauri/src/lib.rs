@@ -1941,6 +1941,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn push_unique_path_adds_when_empty() {
+        let mut paths = Vec::new();
+        push_unique_path(&mut paths, PathBuf::from("/tmp/a"));
+        assert_eq!(paths.len(), 1);
+    }
+
+    #[test]
+    fn push_unique_path_deduplicates_by_lossy_compare() {
+        let mut paths = Vec::new();
+        push_unique_path(&mut paths, PathBuf::from("/tmp/a"));
+        push_unique_path(&mut paths, PathBuf::from("/tmp/a"));
+        assert_eq!(paths.len(), 1);
+    }
+
+    #[test]
+    fn push_unique_path_normalizes_components() {
+        let mut paths = Vec::new();
+        push_unique_path(&mut paths, PathBuf::from("/tmp/./a/b/.."));
+        let got = path_string(&paths[0]);
+        assert!(!got.contains("./"));
+    }
+
+    #[test]
+    fn clean_path_input_trims_whitespace() {
+        assert_eq!(clean_path_input("  /usr/bin  "), "/usr/bin");
+        assert_eq!(clean_path_input("\tpath\t"), "path");
+    }
+
+    #[test]
+    fn clean_path_input_returns_empty_for_whitespace_only() {
+        assert_eq!(clean_path_input("   "), "");
+        assert_eq!(clean_path_input(""), "");
+    }
+
+    #[test]
+    fn non_empty_or_falls_back_when_empty() {
+        assert_eq!(non_empty_or("".to_string(), "default".to_string()), "default");
+        assert_eq!(non_empty_or("  ".to_string(), "default".to_string()), "default");
+    }
+
+    #[test]
+    fn non_empty_or_keeps_non_empty_value() {
+        assert_eq!(non_empty_or("value".to_string(), "default".to_string()), "value");
+    }
+
+    #[test]
+    fn path_string_round_trips() {
+        let path = Path::new(if cfg!(target_os = "windows") { "C:\\test" } else { "/test" });
+        let s = path_string(path);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn same_file_detects_identity() {
+        let dir = std::env::temp_dir().join("tachyon-test-same");
+        let _ = std::fs::create_dir_all(&dir);
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&a, b"test").unwrap();
+        std::fs::write(&b, b"test").unwrap();
+        assert!(same_file(&a, &a));
+        assert!(!same_file(&a, &b));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn epoch_seconds_converts_system_time() {
+        let now = std::time::SystemTime::now();
+        let seconds = epoch_seconds(now);
+        assert!(seconds.is_some());
+        assert!(seconds.unwrap() > 1_700_000_000); // after 2023
+    }
+
     fn asset(name: &str, size: u64) -> GithubAsset {
         GithubAsset {
             name: name.to_string(),
