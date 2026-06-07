@@ -111,10 +111,13 @@ This repository uses `mise` for Node and Rust version management.
 ```bash
 mise install
 npm install
-npm run typecheck
-npm run web:build
-cd src-tauri && cargo check
+npm run typecheck      # TypeScript typecheck
+npm test               # Frontend unit tests (Vitest)
+npm run web:build      # Vite production build
+cd src-tauri && cargo check   # Rust compile check
+cd src-tauri && cargo test    # Rust backend tests
 ```
 
+CI runs typecheck + frontend tests + Rust tests (check + test) on every push.
 Cargo dependencies are fetched through the project-local mirror configuration in
 `.cargo/config.toml`.
