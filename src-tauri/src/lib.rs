@@ -204,7 +204,7 @@ fn core_status() -> String {
 }
 
 fn core_health_check() -> Result<String, String> {
-    let response = http_agent()
+    let response = health_agent()
         .get("http://127.0.0.1:55123/v1/health")
         .header("User-Agent", "Tachyon-Prism/0.1")
         .call()
@@ -1181,6 +1181,13 @@ fn download_to_file(url: &str, path: &Path) -> Result<(), String> {
         fs::remove_file(path).map_err(|err| format!("replace {}: {err}", path.display()))?;
     }
     fs::rename(&temp_path, path).map_err(|err| format!("move {}: {err}", path.display()))
+}
+
+fn health_agent() -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(3)))
+        .build();
+    config.into()
 }
 
 fn http_agent() -> ureq::Agent {
