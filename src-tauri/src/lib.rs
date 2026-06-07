@@ -197,7 +197,30 @@ struct ManagedProcess {
 
 #[tauri::command]
 fn core_status() -> String {
-    "disconnected".to_string()
+    match core_health_check() {
+        Ok(status) => status,
+        Err(_) => "disconnected".to_string(),
+    }
+}
+
+fn core_health_check() -> Result<String, String> {
+    let response = http_agent()
+        .get("http://127.0.0.1:55123/v1/health")
+        .header("User-Agent", "Tachyon-Prism/0.1")
+        .call()
+        .map_err(|err| format!("core health check: {err}"))?;
+
+    let body: serde_json::Value = response
+        .body_mut()
+        .read_json()
+        .map_err(|err| format!("decode health response: {err}"))?;
+
+    let status = body
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    Ok(status.to_string())
 }
 
 #[tauri::command]
@@ -1599,6 +1622,323 @@ mod tests {
         assert_eq!(app.name, "Counter-Strike 2");
         assert_eq!(app.install_dir, "Counter-Strike Global Offensive");
         assert_eq!(app.state_flags, 4);
+    }
+
+    #[test]
+    fn validates_game_profile_rejects_empty_id() {
+        let profile = GameProfile {
+            id: "".to_string(),
+            display_name: "Test".to_string(),
+            enabled: true,
+            manual: true,
+            priority: 100,
+            match_rule: MatchRule {
+                process_names: vec!["test.exe".to_string()],
+                paths: Vec::new(),
+                path_prefixes: Vec::new(),
+                sha256: Vec::new(),
+                steam_app_ids: Vec::new(),
+            },
+            udp_policy: "tgp".to_string(),
+            tcp_policy: "auto".to_string(),
+        };
+        assert!(validate_game_profile(&profile).is_err());
+    }
+
+    #[test]
+    fn validates_game_profile_rejects_empty_display_name() {
+        let profile = GameProfile {
+            id: "test".to_string(),
+            display_name: "  ".to_string(),
+            enabled: true,
+            manual: true,
+            priority: 100,
+            match_rule: MatchRule {
+                process_names: vec!["test.exe".to_string()],
+                paths: Vec::new(),
+                path_prefixes: Vec::new(),
+                sha256: Vec::new(),
+                steam_app_ids: Vec::new(),
+            },
+            udp_policy: "tgp".to_string(),
+            tcp_policy: "auto".to_string(),
+        };
+        assert!(validate_game_profile(&profile).is_err());
+    }
+
+    #[test]
+    fn validates_game_profile_rejects_no_match_rules() {
+        let profile = GameProfile {
+            id: "test".to_string(),
+            display_name: "Test".to_string(),
+            enabled: true,
+            manual: true,
+            priority: 100,
+            match_rule: MatchRule {
+                process_names: Vec::new(),
+                paths: Vec::new(),
+                path_prefixes: Vec::new(),
+                sha256: Vec::new(),
+                steam_app_ids: Vec::new(),
+            },
+            udp_policy: "tgp".to_string(),
+            tcp_policy: "auto".to_string(),
+        };
+        assert!(validate_game_profile(&profile).is_err());
+    }
+
+    #[test]
+    fn validates_game_profile_accepts_any_single_match_rule() {
+        let profile = GameProfile {
+            id: "test".to_string(),
+            display_name: "Test".to_string(),
+            enabled: true,
+            manual: true,
+            priority: 100,
+            match_rule: MatchRule {
+                process_names: vec!["test.exe".to_string()],
+                paths: Vec::new(),
+                path_prefixes: Vec::new(),
+                sha256: Vec::new(),
+                steam_app_ids: Vec::new(),
+            },
+            udp_policy: "tgp".to_string(),
+            tcp_policy: "auto".to_string(),
+        };
+        assert!(validate_game_profile(&profile).is_ok());
+    }
+
+    #[test]
+    fn sorts_game_profiles_by_priority_desc_then_name_asc() {
+        let mut profiles = vec![
+            GameProfile {
+                id: "b".to_string(),
+                display_name: "B Game".to_string(),
+                enabled: true,
+                manual: true,
+                priority: 50,
+                match_rule: MatchRule {
+                    process_names: vec!["b.exe".to_string()],
+                    paths: Vec::new(),
+                    path_prefixes: Vec::new(),
+                    sha256: Vec::new(),
+                    steam_app_ids: Vec::new(),
+                },
+                udp_policy: "tgp".to_string(),
+                tcp_policy: "auto".to_string(),
+            },
+            GameProfile {
+                id: "a".to_string(),
+                display_name: "A Game".to_string(),
+                enabled: true,
+                manual: true,
+                priority: 100,
+                match_rule: MatchRule {
+                    process_names: vec!["a.exe".to_string()],
+                    paths: Vec::new(),
+                    path_prefixes: Vec::new(),
+                    sha256: Vec::new(),
+                    steam_app_ids: Vec::new(),
+                },
+                udp_policy: "tgp".to_string(),
+                tcp_policy: "auto".to_string(),
+            },
+            GameProfile {
+                id: "c".to_string(),
+                display_name: "A Game 2".to_string(),
+                enabled: true,
+                manual: true,
+                priority: 50,
+                match_rule: MatchRule {
+                    process_names: vec!["c.exe".to_string()],
+                    paths: Vec::new(),
+                    path_prefixes: Vec::new(),
+                    sha256: Vec::new(),
+                    steam_app_ids: Vec::new(),
+                },
+                udp_policy: "tgp".to_string(),
+                tcp_policy: "auto".to_string(),
+            },
+        ];
+        sort_game_profiles(&mut profiles);
+        assert_eq!(profiles[0].id, "a");
+        assert_eq!(profiles[0].priority, 100);
+        assert_eq!(profiles[1].id, "c");
+        assert_eq!(profiles[2].id, "b");
+    }
+
+    #[test]
+    fn sanitize_replaces_special_characters() {
+        assert_eq!(sanitize_file_component("v1.0.0"), "v1.0.0");
+        assert_eq!(sanitize_file_component("hello world!"), "hello_world_");
+        assert_eq!(sanitize_file_component(""), "release");
+        assert_eq!(sanitize_file_component("abc/def\\ghi"), "abc_def_ghi");
+    }
+
+    #[test]
+    fn vdf_parses_empty_input() {
+        let values = vdf_values_for_key("", "path");
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn vdf_parses_multiple_values_for_same_key() {
+        let raw = r#""key" "first" "key" "second" "other" "skip""#;
+        let values: Vec<_> = vdf_values_for_key(raw, "key");
+        assert_eq!(values, vec!["first".to_string(), "second".to_string()]);
+    }
+
+    #[test]
+    fn vdf_handles_case_insensitive_key_matching() {
+        let raw = r#""AppId" "730" "appid" "440""#;
+        assert_eq!(first_vdf_value(raw, "appid").unwrap(), "730");
+        assert_eq!(first_vdf_value(raw, "APPID").unwrap(), "730");
+    }
+
+    #[test]
+    fn steam_app_manifest_skips_non_manifest_files() {
+        assert!(parse_steam_app_manifest("no appid here", Path::new("C:\\Steam")).is_none());
+    }
+
+    #[test]
+    fn steam_profile_from_app_sets_steam_prefix_id() {
+        let app = SteamAppManifest {
+            app_id: 570,
+            name: "Dota 2".to_string(),
+            install_dir: "dota 2 beta".to_string(),
+            universe: "1".to_string(),
+            state_flags: 4,
+            library_path: "D:\\SteamLibrary".to_string(),
+        };
+        let profile = steam_profile_from_app(&app);
+        assert_eq!(profile.id, "steam-570");
+        assert_eq!(profile.display_name, "Dota 2");
+        assert!(!profile.manual);
+        assert!(profile.match_rule.steam_app_ids.contains(&570));
+        assert!(profile.match_rule.path_prefixes.iter().any(|p| p.contains("dota 2 beta")));
+    }
+
+    #[test]
+    fn checksum_find_handles_various_formats() {
+        let hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let checksum = find_checksum_for_asset(
+            &format!("{hash} *binary.zip"),
+            "binary.zip",
+        )
+        .expect("checksum with star");
+        assert_eq!(checksum, hash);
+    }
+
+    #[test]
+    fn checksum_find_handles_equals_separator() {
+        let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let checksum = find_checksum_for_asset(
+            &format!("SHA256 (binary.zip) = {hash}"),
+            "binary.zip",
+        )
+        .expect("checksum with equals");
+        assert_eq!(checksum, hash);
+    }
+
+    #[test]
+    fn sha256_computes_deterministic_hash() {
+        let dir = std::env::temp_dir().join("tachyon-test-sha256");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("test.bin");
+        std::fs::write(&file, b"hello tachyon").unwrap();
+        let hash1 = sha256_file(&file).expect("hash1");
+        let hash2 = sha256_file(&file).expect("hash2");
+        assert_eq!(hash1, hash2);
+        assert_eq!(hash1.len(), 64);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn managed_binary_kind_parse_rejects_unknown() {
+        assert!(ManagedBinaryKind::parse("unknown").is_err());
+        assert!(ManagedBinaryKind::parse("").is_err());
+    }
+
+    #[test]
+    fn managed_binary_kind_parses_valid_kinds() {
+        assert!(ManagedBinaryKind::parse("tachyonCore").is_ok());
+        assert!(ManagedBinaryKind::parse("xray").is_ok());
+    }
+
+    #[test]
+    fn xray_asset_marker_is_valid_on_any_platform() {
+        let result = xray_platform_asset_marker();
+        assert!(
+            result.is_ok(),
+            "xray asset marker failed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn tachyon_core_asset_marker_is_valid_on_any_platform() {
+        let result = tachyon_core_platform_asset_marker();
+        assert!(
+            result.is_ok(),
+            "tachyon core asset marker failed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn tachyon_core_release_info_errors_on_empty_assets() {
+        let release = GithubRelease {
+            tag_name: "v0.1.0".to_string(),
+            published_at: None,
+            assets: vec![],
+        };
+        assert!(tachyon_core_release_info(release).is_err());
+    }
+
+    #[test]
+    fn xray_release_info_errors_on_empty_assets() {
+        let release = GithubRelease {
+            tag_name: "v0.1.0".to_string(),
+            published_at: None,
+            assets: vec![],
+        };
+        assert!(xray_release_info(release).is_err());
+    }
+
+    #[test]
+    fn ensure_json_object_rejects_arrays() {
+        assert!(ensure_json_object("test", "[]").is_err());
+        assert!(ensure_json_object("test", "[1, 2]").is_err());
+    }
+
+    #[test]
+    fn ensure_json_object_rejects_non_json() {
+        assert!(ensure_json_object("test", "not json").is_err());
+    }
+
+    #[test]
+    fn ensure_json_object_accepts_objects() {
+        assert!(ensure_json_object("test", "{}").is_ok());
+        assert!(ensure_json_object("test", "{\"key\": \"value\"}").is_ok());
+    }
+
+    #[test]
+    fn binary_metadata_reports_missing_file() {
+        let path = std::env::temp_dir().join("tachyon-test-nonexistent.exe");
+        let meta = binary_metadata(&path);
+        assert!(!meta.exists);
+        assert!(meta.size_bytes.is_none());
+        assert!(meta.modified_at.is_none());
+    }
+
+    #[test]
+    fn binary_metadata_reports_existing_file() {
+        let dir = std::env::temp_dir().join("tachyon-test-meta");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("real.exe");
+        std::fs::write(&file, b"binary content").unwrap();
+        let meta = binary_metadata(&file);
+        assert!(meta.exists);
+        assert!(meta.size_bytes.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn asset(name: &str, size: u64) -> GithubAsset {
