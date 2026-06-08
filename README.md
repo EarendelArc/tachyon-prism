@@ -121,3 +121,10 @@ cd src-tauri && cargo test    # Rust backend tests
 CI runs typecheck + frontend tests + Rust tests (check + test) on every push.
 Cargo dependencies are fetched through the project-local mirror configuration in
 `.cargo/config.toml`.
+
+## Documentation
+
+- [Getting Started](docs/getting-started.md) / [快速上手](docs/getting-started.zh-CN.md)
+- [Architecture](docs/architecture.md) / [架构](docs/architecture.zh-CN.md)
+- [IPC Design](docs/ipc.md) / [IPC 设计](docs/ipc.zh-CN.md)
+- [Development](docs/development.md) / [开发](docs/development.zh-CN.md)
