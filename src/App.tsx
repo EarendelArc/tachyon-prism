@@ -51,6 +51,8 @@ import {
   selectSubscriptionNode,
 } from "./domain/subscriptions";
 import type { ProxyNode, SubscriptionSnapshot } from "./domain/subscriptions";
+import { TelemetryClient } from "./domain/telemetry";
+import type { TelemetryState, TelemetryData, RouteEventData } from "./domain/telemetry";
 
 type ConnectionState = "checking" | "connected" | "disconnected";
 type PrismView = "overview" | "nodes" | "game" | "launchers" | "runtime" | "config";
@@ -214,6 +216,37 @@ function draftText(
   }
 }
 
+function TelemetryMetrics({ data }: { data: TelemetryData }) {
+  return (
+    <div className="runtime-status-list">
+      <div>
+        <span>Packets</span>
+        <strong>{data.packets_read.toLocaleString()}</strong>
+      </div>
+      <div>
+        <span>TGP</span>
+        <strong>{data.decided_tgp.toLocaleString()}</strong>
+      </div>
+      <div>
+        <span>Direct</span>
+        <strong>{data.decided_direct.toLocaleString()}</strong>
+      </div>
+      <div>
+        <span>Drop</span>
+        <strong>{data.decided_drop.toLocaleString()}</strong>
+      </div>
+      <div>
+        <span>Sessions</span>
+        <strong>{data.tgp_sessions}</strong>
+      </div>
+      <div>
+        <span>Goroutines</span>
+        <strong>{data.goroutines}</strong>
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const [activeView, setActiveView] = useState<PrismView>("overview");
   const [connection, setConnection] = useState<ConnectionState>("checking");
@@ -236,6 +269,14 @@ export function App() {
   >({});
   const [binaryBusy, setBinaryBusy] = useState(false);
   const [message, setMessage] = useState("Ready");
+  const [telemetry, setTelemetry] = useState<TelemetryState>(() => ({
+    connection: "disconnected" as const,
+    hello: null,
+    latestTelemetry: null,
+    recentRoutes: [],
+    recentErrors: [],
+  }));
+  const telemetryClient = useMemo(() => new TelemetryClient(), []);
 
   const activeProfiles = useMemo(
     () => profiles.filter((profile) => profile.enabled).length,
@@ -778,6 +819,15 @@ export function App() {
     setSubscriptionUrl(subscription.sourceUrl === "manual" ? "" : subscription.sourceUrl);
   }, [subscription.sourceUrl]);
 
+  useEffect(() => {
+    const unsub = telemetryClient.subscribe(setTelemetry);
+    telemetryClient.connect();
+    return () => {
+      unsub();
+      telemetryClient.disconnect();
+    };
+  }, [telemetryClient]);
+
   const viewMeta: Record<
     PrismView,
     { eyebrow: string; label: string; subtitle: string; title: string }
@@ -921,7 +971,32 @@ export function App() {
                 </div>
                 <div className="waveform" aria-label="latency waveform" />
               </article>
+              </article>
 
+              <article className="panel compact-panel">
+                <header>
+                  <h2>Live Telemetry</h2>
+                  <span className={`status-chip ${telemetry.connection === "connected" ? "connected" : "disconnected"}`}>
+                    {telemetry.connection}
+                  </span>
+                </header>
+                {telemetry.latestTelemetry ? (
+                  <TelemetryMetrics data={telemetry.latestTelemetry} />
+                ) : (
+                  <p className="muted">Waiting for telemetry stream...</p>
+                )}
+                {telemetry.recentRoutes.length > 0 ? (
+                  <div className="route-list">
+                    {telemetry.recentRoutes.slice(0, 5).map((route: RouteEventData, index: number) => (
+                      <div className="route-row" key={index}>
+                        <span className="route-decision">{route.decision}</span>
+                        <span>{route.process_name}</span>
+                        <span className="route-flow">{route.dst}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </article>
               <div className="overview-side">
                 <article className="panel compact-panel">
                   <header>
@@ -1427,3 +1502,5 @@ export function App() {
     </main>
   );
 }
+
+
