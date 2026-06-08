@@ -100,6 +100,9 @@ export class TelemetryClient {
   };
   private listeners: Set<TelemetryListener> = new Set();
   private baseUrl: string;
+  private closed = false;
+  private reconnectAttempt = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(baseUrl = "http://127.0.0.1:55123") {
     this.baseUrl = baseUrl;
@@ -115,6 +118,11 @@ export class TelemetryClient {
   }
 
   connect(): void {
+    this.closed = false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.source) {
       return;
     }
@@ -124,6 +132,7 @@ export class TelemetryClient {
 
     source.addEventListener("hello", (event) => {
       const data = JSON.parse((event as MessageEvent).data) as TelemetryEvent;
+      this.reconnectAttempt = 0;
       this.updateState({
         connection: "connected",
         hello: data.data as HelloData,
@@ -154,19 +163,31 @@ export class TelemetryClient {
     });
 
     source.onerror = () => {
-      this.updateState({ connection: "disconnected" });
       source.close();
       this.source = null;
+      this.updateState({ connection: "disconnected" });
+      // Auto-reconnect with exponential backoff (1s, 2s, 4s, max 30s)
+      if (!this.closed) {
+        const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempt), 30000);
+        this.reconnectAttempt++;
+        this.reconnectTimer = setTimeout(() => this.connect(), delay);
+      }
     };
 
     this.source = source;
   }
 
   disconnect(): void {
+    this.closed = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.source) {
       this.source.close();
       this.source = null;
     }
+    this.reconnectAttempt = 0;
     this.updateState({ connection: "disconnected" });
   }
 
@@ -181,3 +202,4 @@ export class TelemetryClient {
     }
   }
 }
+
