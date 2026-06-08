@@ -675,3 +675,53 @@ textarea {
     justify-content: flex-start;
   }
 }
+
+/* Telemetry route list */
+.route-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.route-row {
+  display: grid;
+  grid-template-columns: 56px 1fr 1fr;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,0.06));
+}
+
+.route-row:last-child {
+  border-bottom: none;
+}
+
+.route-decision {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.route-decision[data-decision="tgp"],
+.route-row:has(.route-decision:contains("tgp")) .route-decision {
+  color: #4ade80;
+}
+
+.route-flow {
+  font-family: monospace;
+  font-size: 11px;
+  opacity: 0.7;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.muted {
+  opacity: 0.5;
+  font-size: 13px;
+  margin: 4px 0;
+}
