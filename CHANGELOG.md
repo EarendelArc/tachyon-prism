@@ -5,6 +5,10 @@ All notable changes to Tachyon Prism will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Real-time telemetry client consuming Core SSE stream (`src/domain/telemetry.ts`).
+- Live Telemetry panel in overview showing packet counters, TGP sessions, goroutines, and recent routing decisions.
+- Telemetry auto-reconnect with exponential backoff (1s to 30s).
+- Route list CSS styling.
 - Architecture documentation (`docs/architecture.md`, EN + ZH).
 - Getting-started guide (`docs/getting-started.md`, EN + ZH).
 - Documentation section in README with links to all docs.
@@ -28,3 +32,4 @@ All notable changes to Tachyon Prism will be documented in this file.
 - GitHub Actions CI: TypeScript typecheck + Vitest tests + Rust check + Rust tests (ubuntu, windows, macos).
 - 40 Rust backend tests, 3 Vitest frontend test suites (configDrafts, subscriptions, gameProfiles).
 - Comprehensive README (EN + ZH) with architecture overview and development guide.
+
