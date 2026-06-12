@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { beforeEach, describe, it, expect } from "vitest";
 import type {
   HelloData,
   TelemetryData,
@@ -7,6 +7,27 @@ import type {
   TelemetryState,
 } from "../telemetry";
 import { TelemetryClient } from "../telemetry";
+
+class MockEventSource {
+  onerror: (() => void) | null = null;
+
+  constructor(public readonly url: string) {}
+
+  addEventListener(): void {
+    // Tests in this file assert connection state transitions only.
+  }
+
+  close(): void {
+    // no-op
+  }
+}
+
+beforeEach(() => {
+  Object.defineProperty(globalThis, "EventSource", {
+    configurable: true,
+    value: MockEventSource,
+  });
+});
 
 describe("TelemetryClient", () => {
   it("starts in disconnected state", () => {

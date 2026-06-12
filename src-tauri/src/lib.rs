@@ -204,7 +204,7 @@ fn core_status() -> String {
 }
 
 fn core_health_check() -> Result<String, String> {
-    let response = health_agent()
+    let mut response = health_agent()
         .get("http://127.0.0.1:55123/v1/health")
         .header("User-Agent", "Tachyon-Prism/0.1")
         .call()
@@ -680,14 +680,15 @@ fn first_vdf_value(input: &str, key: &str) -> Option<String> {
 fn vdf_values_for_key(input: &str, key: &str) -> Vec<String> {
     input
         .lines()
-        .filter_map(|line| {
-            let values = quoted_vdf_values(line);
-            match values.as_slice() {
-                [candidate, value, ..] if candidate.eq_ignore_ascii_case(key) => {
-                    Some(value.clone())
-                }
-                _ => None,
-            }
+        .flat_map(|line| {
+            quoted_vdf_values(line)
+                .chunks_exact(2)
+                .filter_map(|pair| {
+                    let candidate = &pair[0];
+                    let value = &pair[1];
+                    candidate.eq_ignore_ascii_case(key).then(|| value.clone())
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -1822,28 +1823,27 @@ mod tests {
         assert_eq!(profile.display_name, "Dota 2");
         assert!(!profile.manual);
         assert!(profile.match_rule.steam_app_ids.contains(&570));
-        assert!(profile.match_rule.path_prefixes.iter().any(|p| p.contains("dota 2 beta")));
+        assert!(profile
+            .match_rule
+            .path_prefixes
+            .iter()
+            .any(|p| p.contains("dota 2 beta")));
     }
 
     #[test]
     fn checksum_find_handles_various_formats() {
         let hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let checksum = find_checksum_for_asset(
-            &format!("{hash} *binary.zip"),
-            "binary.zip",
-        )
-        .expect("checksum with star");
+        let checksum = find_checksum_for_asset(&format!("{hash} *binary.zip"), "binary.zip")
+            .expect("checksum with star");
         assert_eq!(checksum, hash);
     }
 
     #[test]
     fn checksum_find_handles_equals_separator() {
         let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-        let checksum = find_checksum_for_asset(
-            &format!("SHA256 (binary.zip) = {hash}"),
-            "binary.zip",
-        )
-        .expect("checksum with equals");
+        let checksum =
+            find_checksum_for_asset(&format!("SHA256 (binary.zip) = {hash}"), "binary.zip")
+                .expect("checksum with equals");
         assert_eq!(checksum, hash);
     }
 
@@ -1875,10 +1875,7 @@ mod tests {
     #[test]
     fn xray_asset_marker_is_valid_on_any_platform() {
         let result = xray_platform_asset_marker();
-        assert!(
-            result.is_ok(),
-            "xray asset marker failed: {result:?}"
-        );
+        assert!(result.is_ok(), "xray asset marker failed: {result:?}");
     }
 
     #[test]
@@ -1985,18 +1982,31 @@ mod tests {
 
     #[test]
     fn non_empty_or_falls_back_when_empty() {
-        assert_eq!(non_empty_or("".to_string(), "default".to_string()), "default");
-        assert_eq!(non_empty_or("  ".to_string(), "default".to_string()), "default");
+        assert_eq!(
+            non_empty_or("".to_string(), "default".to_string()),
+            "default"
+        );
+        assert_eq!(
+            non_empty_or("  ".to_string(), "default".to_string()),
+            "default"
+        );
     }
 
     #[test]
     fn non_empty_or_keeps_non_empty_value() {
-        assert_eq!(non_empty_or("value".to_string(), "default".to_string()), "value");
+        assert_eq!(
+            non_empty_or("value".to_string(), "default".to_string()),
+            "value"
+        );
     }
 
     #[test]
     fn path_string_round_trips() {
-        let path = Path::new(if cfg!(target_os = "windows") { "C:\\test" } else { "/test" });
+        let path = Path::new(if cfg!(target_os = "windows") {
+            "C:\\test"
+        } else {
+            "/test"
+        });
         let s = path_string(path);
         assert!(!s.is_empty());
     }

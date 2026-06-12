@@ -705,8 +705,7 @@ textarea {
   letter-spacing: 0.04em;
 }
 
-.route-decision[data-decision="tgp"],
-.route-row:has(.route-decision:contains("tgp")) .route-decision {
+.route-decision[data-decision="tgp"] {
   color: #4ade80;
 }
 

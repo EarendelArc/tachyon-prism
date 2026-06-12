@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   defaultGameProfiles,
   defaultLauncherSettings,
@@ -6,6 +6,33 @@ import {
   saveLauncherSettings,
 } from "../gameProfiles";
 import type { GameProfile, LauncherSettings } from "../gameProfiles";
+
+class MemoryStorage {
+  private values = new Map<string, string>();
+
+  getItem(key: string): string | null {
+    return this.values.get(key) ?? null;
+  }
+
+  setItem(key: string, value: string): void {
+    this.values.set(key, value);
+  }
+
+  removeItem(key: string): void {
+    this.values.delete(key);
+  }
+
+  clear(): void {
+    this.values.clear();
+  }
+}
+
+beforeEach(() => {
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: new MemoryStorage(),
+  });
+});
 
 describe("defaultGameProfiles", () => {
   it("includes Counter-Strike 2 as the default profile", () => {

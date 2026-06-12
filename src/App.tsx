@@ -971,7 +971,6 @@ export function App() {
                 </div>
                 <div className="waveform" aria-label="latency waveform" />
               </article>
-              </article>
 
               <article className="panel compact-panel">
                 <header>
@@ -989,7 +988,9 @@ export function App() {
                   <div className="route-list">
                     {telemetry.recentRoutes.slice(0, 5).map((route: RouteEventData, index: number) => (
                       <div className="route-row" key={index}>
-                        <span className="route-decision">{route.decision}</span>
+                        <span className="route-decision" data-decision={route.decision}>
+                          {route.decision}
+                        </span>
                         <span>{route.process_name}</span>
                         <span className="route-flow">{route.dst}</span>
                       </div>
