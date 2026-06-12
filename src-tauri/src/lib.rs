@@ -29,8 +29,14 @@ struct RuntimePaths {
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeSettings {
+    #[serde(default)]
     tachyon_core_binary_path: String,
+    #[serde(default)]
     xray_binary_path: String,
+    #[serde(default)]
+    tachyon_core_release_channel: String,
+    #[serde(default)]
+    xray_release_channel: String,
 }
 
 #[derive(Serialize)]
@@ -92,6 +98,8 @@ struct RuntimeInstallResult {
 struct GithubRelease {
     tag_name: String,
     published_at: Option<String>,
+    #[serde(default)]
+    prerelease: bool,
     assets: Vec<GithubAsset>,
 }
 
@@ -333,8 +341,9 @@ fn install_managed_binary(
 }
 
 #[tauri::command]
-fn latest_xray_release() -> Result<RuntimeReleaseInfo, String> {
-    fetch_latest_xray_release()
+fn latest_xray_release(app: tauri::AppHandle) -> Result<RuntimeReleaseInfo, String> {
+    let settings = load_runtime_settings(&app)?;
+    fetch_latest_xray_release(&settings.xray_release_channel)
 }
 
 #[tauri::command]
@@ -343,8 +352,9 @@ fn install_latest_xray(app: tauri::AppHandle) -> Result<RuntimeInstallResult, St
 }
 
 #[tauri::command]
-fn latest_tachyon_core_release() -> Result<RuntimeReleaseInfo, String> {
-    fetch_latest_tachyon_core_release()
+fn latest_tachyon_core_release(app: tauri::AppHandle) -> Result<RuntimeReleaseInfo, String> {
+    let settings = load_runtime_settings(&app)?;
+    fetch_latest_tachyon_core_release(&settings.tachyon_core_release_channel)
 }
 
 #[tauri::command]
@@ -810,6 +820,14 @@ fn normalize_runtime_settings(
             defaults.tachyon_core_binary_path,
         ),
         xray_binary_path: non_empty_or(settings.xray_binary_path, defaults.xray_binary_path),
+        tachyon_core_release_channel: normalize_release_channel(
+            settings.tachyon_core_release_channel,
+            defaults.tachyon_core_release_channel,
+        ),
+        xray_release_channel: normalize_release_channel(
+            settings.xray_release_channel,
+            defaults.xray_release_channel,
+        ),
     })
 }
 
@@ -818,7 +836,17 @@ fn default_runtime_settings(app: &tauri::AppHandle) -> Result<RuntimeSettings, S
     Ok(RuntimeSettings {
         tachyon_core_binary_path: paths.tachyon_core_binary_path,
         xray_binary_path: paths.xray_binary_path,
+        tachyon_core_release_channel: "preview".to_string(),
+        xray_release_channel: "stable".to_string(),
     })
+}
+
+fn normalize_release_channel(value: String, fallback: String) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "stable" => "stable".to_string(),
+        "preview" | "pre" | "prerelease" => "preview".to_string(),
+        _ => fallback,
+    }
 }
 
 fn non_empty_or(value: String, fallback: String) -> String {
@@ -954,27 +982,30 @@ fn managed_binary_target(
     Ok(config_dir.join("bin").join(binary_name(kind.binary_base())))
 }
 
-fn fetch_latest_xray_release() -> Result<RuntimeReleaseInfo, String> {
-    let release: GithubRelease =
-        http_get_json("https://api.github.com/repos/XTLS/Xray-core/releases/latest")?;
-    xray_release_info(release)
+fn fetch_latest_xray_release(channel: &str) -> Result<RuntimeReleaseInfo, String> {
+    let releases: Vec<GithubRelease> =
+        http_get_json("https://api.github.com/repos/XTLS/Xray-core/releases?per_page=20")?;
+    latest_xray_release_info(releases, channel)
 }
 
 fn install_latest_xray_release(app: &tauri::AppHandle) -> Result<RuntimeInstallResult, String> {
-    let release = fetch_latest_xray_release()?;
+    let settings = load_runtime_settings(app)?;
+    let release = fetch_latest_xray_release(&settings.xray_release_channel)?;
     install_release_archive(app, ManagedBinaryKind::Xray, release)
 }
 
-fn fetch_latest_tachyon_core_release() -> Result<RuntimeReleaseInfo, String> {
-    let release: GithubRelease =
-        http_get_json("https://api.github.com/repos/EarendelArc/tachyon-core/releases/latest")?;
-    tachyon_core_release_info(release)
+fn fetch_latest_tachyon_core_release(channel: &str) -> Result<RuntimeReleaseInfo, String> {
+    let releases: Vec<GithubRelease> = http_get_json(
+        "https://api.github.com/repos/EarendelArc/tachyon-core/releases?per_page=20",
+    )?;
+    latest_tachyon_core_release_info(releases, channel)
 }
 
 fn install_latest_tachyon_core_release(
     app: &tauri::AppHandle,
 ) -> Result<RuntimeInstallResult, String> {
-    let release = fetch_latest_tachyon_core_release()?;
+    let settings = load_runtime_settings(app)?;
+    let release = fetch_latest_tachyon_core_release(&settings.tachyon_core_release_channel)?;
     install_release_archive(app, ManagedBinaryKind::TachyonCore, release)
 }
 
@@ -1119,6 +1150,47 @@ fn tachyon_core_release_info(release: GithubRelease) -> Result<RuntimeReleaseInf
         checksum_url: checksum_asset.browser_download_url,
         published_at: release.published_at,
     })
+}
+
+fn latest_xray_release_info(
+    releases: Vec<GithubRelease>,
+    channel: &str,
+) -> Result<RuntimeReleaseInfo, String> {
+    for release in releases {
+        if !release_channel_allows(&release, channel) {
+            continue;
+        }
+        if let Ok(info) = xray_release_info(release) {
+            return Ok(info);
+        }
+    }
+    Err(format!(
+        "no compatible Xray release found for channel {channel}"
+    ))
+}
+
+fn latest_tachyon_core_release_info(
+    releases: Vec<GithubRelease>,
+    channel: &str,
+) -> Result<RuntimeReleaseInfo, String> {
+    for release in releases {
+        if !release_channel_allows(&release, channel) {
+            continue;
+        }
+        if let Ok(info) = tachyon_core_release_info(release) {
+            return Ok(info);
+        }
+    }
+    Err(format!(
+        "no compatible Tachyon Core release found for channel {channel}"
+    ))
+}
+
+fn release_channel_allows(release: &GithubRelease, channel: &str) -> bool {
+    match channel.trim().to_ascii_lowercase().as_str() {
+        "preview" | "pre" | "prerelease" => true,
+        _ => !release.prerelease,
+    }
 }
 
 fn xray_platform_asset_marker() -> Result<&'static str, String> {
@@ -1532,6 +1604,7 @@ mod tests {
         let release = GithubRelease {
             tag_name: "v0.1.0-alpha.1".to_string(),
             published_at: Some("2026-06-05T00:00:00Z".to_string()),
+            prerelease: true,
             assets: vec![
                 asset("tachyon-core_v0.1.0-alpha.1_windows_386.zip", 101),
                 asset("tachyon-core_v0.1.0-alpha.1_windows_amd64.zip", 102),
@@ -1892,9 +1965,64 @@ mod tests {
         let release = GithubRelease {
             tag_name: "v0.1.0".to_string(),
             published_at: None,
+            prerelease: false,
             assets: vec![],
         };
         assert!(tachyon_core_release_info(release).is_err());
+    }
+
+    #[test]
+    fn latest_tachyon_core_release_skips_incompatible_releases() {
+        let marker = tachyon_core_platform_asset_marker().expect("supported test platform");
+        let incompatible = GithubRelease {
+            tag_name: "v0.1.0-alpha.4".to_string(),
+            published_at: Some("2026-06-12T00:00:00Z".to_string()),
+            prerelease: true,
+            assets: vec![asset("notes.txt", 10)],
+        };
+        let compatible = GithubRelease {
+            tag_name: "v0.1.0-alpha.3".to_string(),
+            published_at: Some("2026-06-11T00:00:00Z".to_string()),
+            prerelease: true,
+            assets: vec![
+                asset(&format!("tachyon-core_v0.1.0-alpha.3_{marker}.zip"), 123),
+                asset("SHA256SUMS.txt", 512),
+            ],
+        };
+
+        let info = latest_tachyon_core_release_info(vec![incompatible, compatible], "preview")
+            .expect("compatible release");
+
+        assert_eq!(info.tag_name, "v0.1.0-alpha.3");
+        assert!(info.asset_name.contains(marker));
+    }
+
+    #[test]
+    fn stable_release_channel_skips_prereleases() {
+        let marker = tachyon_core_platform_asset_marker().expect("supported test platform");
+        let preview = GithubRelease {
+            tag_name: "v0.2.0-alpha.1".to_string(),
+            published_at: Some("2026-06-12T00:00:00Z".to_string()),
+            prerelease: true,
+            assets: vec![
+                asset(&format!("tachyon-core_v0.2.0-alpha.1_{marker}.zip"), 123),
+                asset("SHA256SUMS.txt", 512),
+            ],
+        };
+        let stable = GithubRelease {
+            tag_name: "v0.1.0".to_string(),
+            published_at: Some("2026-06-01T00:00:00Z".to_string()),
+            prerelease: false,
+            assets: vec![
+                asset(&format!("tachyon-core_v0.1.0_{marker}.zip"), 123),
+                asset("SHA256SUMS.txt", 512),
+            ],
+        };
+
+        let info = latest_tachyon_core_release_info(vec![preview, stable], "stable")
+            .expect("stable release");
+
+        assert_eq!(info.tag_name, "v0.1.0");
     }
 
     #[test]
@@ -1902,6 +2030,7 @@ mod tests {
         let release = GithubRelease {
             tag_name: "v0.1.0".to_string(),
             published_at: None,
+            prerelease: false,
             assets: vec![],
         };
         assert!(xray_release_info(release).is_err());

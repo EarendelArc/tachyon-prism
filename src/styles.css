@@ -16,6 +16,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -43,6 +44,7 @@ button:disabled {
 }
 
 input,
+select,
 textarea {
   background: #ffffff;
   border: 1px solid #cdd7d4;
@@ -545,6 +547,24 @@ textarea {
 }
 
 .binary-row input {
+  width: 100%;
+}
+
+.inline-select {
+  align-items: center;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(120px, auto) minmax(160px, 220px);
+  min-width: 0;
+}
+
+.inline-select span {
+  color: #687672;
+  font-size: 12px;
+}
+
+.inline-select select {
+  min-width: 0;
   width: 100%;
 }
 

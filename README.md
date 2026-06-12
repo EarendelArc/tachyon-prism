@@ -28,6 +28,8 @@ sent through Tachyon Core for low-latency acceleration.
 - Managed local binary installation into Prism's app config `bin` directory.
 - Online Xray Core and Tachyon Core latest-release discovery, download,
   SHA-256 verification, and managed install from GitHub release channels.
+- Independent `stable` / `preview` release-channel selection for Xray Core and
+  Tachyon Core managed downloads.
 - Runtime controls for launching and stopping Xray Core and Tachyon Core as
   separate subprocesses.
 - Windows runtime readiness detects Tachyon Core's required `wintun.dll`
@@ -93,6 +95,11 @@ GitHub releases, choose the current platform archive, download the matching
 `xray`/`xray.exe` or `tachyon-core`/`tachyon-core.exe`, and atomically install
 the executable into the managed `bin` directory.
 
+Each managed core has an independent release channel selector. `stable` ignores
+GitHub prereleases, while `preview` accepts prerelease builds. Xray Core defaults
+to `stable`; Tachyon Core defaults to `preview` while Tachyon releases are still
+alpha-stage.
+
 The Runtime panel stores binary paths in `runtime-settings.json`. `Start All`
 first writes the latest generated config files, then launches Xray with
 `xray-client.json` and Tachyon Core with `client.json`.
@@ -124,7 +131,7 @@ Cargo dependencies are fetched through the project-local mirror configuration in
 
 ## Documentation
 
-- [Getting Started](docs/getting-started.md) / [快速上手](docs/getting-started.zh-CN.md)
-- [Architecture](docs/architecture.md) / [架构](docs/architecture.zh-CN.md)
-- [IPC Design](docs/ipc.md) / [IPC 设计](docs/ipc.zh-CN.md)
-- [Development](docs/development.md) / [开发](docs/development.zh-CN.md)
+- [Getting Started](docs/getting-started.md) / [蹇�熶笂鎵媇(docs/getting-started.zh-CN.md)
+- [Architecture](docs/architecture.md) / [鏋舵瀯](docs/architecture.zh-CN.md)
+- [IPC Design](docs/ipc.md) / [IPC 璁捐](docs/ipc.zh-CN.md)
+- [Development](docs/development.md) / [寮�鍙慮(docs/development.zh-CN.md)

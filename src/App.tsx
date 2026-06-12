@@ -38,8 +38,10 @@ import {
   type ManagedBinaryInventory,
   type ManagedBinaryKind,
   type ProcessStatus,
+  type ReleaseChannel,
   type RuntimePaths,
   type RuntimeReleaseInfo,
+  type RuntimeSettings,
   type RuntimeStatus,
 } from "./domain/runtime";
 import {
@@ -72,7 +74,9 @@ const emptyProfile = {
 
 const emptyRuntimeInputs = {
   tachyonCoreBinaryPath: "",
+  tachyonCoreReleaseChannel: "preview" as ReleaseChannel,
   xrayBinaryPath: "",
+  xrayReleaseChannel: "stable" as ReleaseChannel,
 };
 
 const emptyBinarySourceInputs = {
@@ -129,6 +133,23 @@ function profileMatchLabel(profile: GameProfile): string {
 
 function managedBinaryDisplayName(kind: ManagedBinaryKind): string {
   return kind === "xray" ? "Xray Core" : "Tachyon Core";
+}
+
+function releaseChannelForKind(
+  settings: RuntimeSettings,
+  kind: ManagedBinaryKind,
+): ReleaseChannel {
+  return kind === "xray" ? settings.xrayReleaseChannel : settings.tachyonCoreReleaseChannel;
+}
+
+function setReleaseChannelForKind(
+  settings: RuntimeSettings,
+  kind: ManagedBinaryKind,
+  channel: ReleaseChannel,
+): RuntimeSettings {
+  return kind === "xray"
+    ? { ...settings, xrayReleaseChannel: channel }
+    : { ...settings, tachyonCoreReleaseChannel: channel };
 }
 
 function readinessText(state: ReadinessState): string {
@@ -605,13 +626,17 @@ export function App() {
   async function checkLatestRelease(kind: ManagedBinaryKind) {
     try {
       setBinaryBusy(true);
+      const settings = await saveRuntimeSettings(runtimeInputs);
+      setRuntimeInputs(settings);
       const release =
         kind === "xray" ? await getLatestXrayRelease() : await getLatestTachyonCoreRelease();
       setBinaryReleases((current) => ({
         ...current,
         [kind]: release,
       }));
-      setMessage(`Latest ${managedBinaryDisplayName(kind)} ${release.tagName}`);
+      setMessage(
+        `${releaseChannelForKind(settings, kind)} ${managedBinaryDisplayName(kind)} ${release.tagName}`,
+      );
     } catch (error) {
       setMessage(
         error instanceof Error
@@ -626,6 +651,8 @@ export function App() {
   async function downloadLatestRelease(kind: ManagedBinaryKind) {
     try {
       setBinaryBusy(true);
+      const settings = await saveRuntimeSettings(runtimeInputs);
+      setRuntimeInputs(settings);
       const result =
         kind === "xray" ? await installLatestXray() : await installLatestTachyonCore();
       setBinaryReleases((current) => ({
@@ -804,7 +831,9 @@ export function App() {
         setRuntimePaths(paths);
         setRuntimeInputs({
           tachyonCoreBinaryPath: paths.tachyonCoreBinaryPath,
+          tachyonCoreReleaseChannel: "preview",
           xrayBinaryPath: paths.xrayBinaryPath,
+          xrayReleaseChannel: "stable",
         });
       })
       .catch(() => undefined);
@@ -1345,6 +1374,24 @@ export function App() {
                             }))
                           }
                         />
+                        <label className="inline-select">
+                          <span>Release channel</span>
+                          <select
+                            value={releaseChannelForKind(runtimeInputs, kind)}
+                            onChange={(event) =>
+                              setRuntimeInputs((current) =>
+                                setReleaseChannelForKind(
+                                  current,
+                                  kind,
+                                  event.target.value as ReleaseChannel,
+                                ),
+                              )
+                            }
+                          >
+                            <option value="stable">Stable</option>
+                            <option value="preview">Preview</option>
+                          </select>
+                        </label>
                         <div className="row-actions">
                           <button type="button" onClick={() => void installBinary(kind)}>
                             Install

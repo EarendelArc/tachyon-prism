@@ -12,9 +12,12 @@ export interface RuntimePaths {
 export interface RuntimeSettings {
   tachyonCoreBinaryPath: string;
   xrayBinaryPath: string;
+  tachyonCoreReleaseChannel: ReleaseChannel;
+  xrayReleaseChannel: ReleaseChannel;
 }
 
 export type ManagedBinaryKind = "tachyonCore" | "xray";
+export type ReleaseChannel = "stable" | "preview";
 
 export interface SidecarDependencyInfo {
   name: string;
