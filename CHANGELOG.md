@@ -9,6 +9,8 @@ All notable changes to Tachyon Prism will be documented in this file.
   Tachyon Core managed downloads.
 - Tachyon Core release discovery can consume prerelease alpha builds when the
   `preview` channel is selected.
+- GitHub Actions release workflow for unsigned Prism desktop bundles on Windows
+  x64, Windows ARM64, macOS x64, macOS ARM64, Linux x64, and Linux ARM64.
 - Real-time telemetry client consuming Core SSE stream (`src/domain/telemetry.ts`).
 - Live Telemetry panel in overview showing packet counters, TGP sessions, goroutines, and recent routing decisions.
 - Telemetry auto-reconnect with exponential backoff (1s to 30s).

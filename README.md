@@ -129,6 +129,16 @@ CI runs typecheck + frontend tests + Rust tests (check + test) on every push.
 Cargo dependencies are fetched through the project-local mirror configuration in
 `.cargo/config.toml`.
 
+## Release Builds
+
+GitHub Actions builds Prism on release tags and manual workflow dispatches. The
+release workflow produces Windows x64, Windows ARM64, macOS Intel, macOS Apple
+Silicon, Linux x64, and Linux ARM64 bundles, then publishes them with
+`SHA256SUMS.txt`.
+
+Current release artifacts are unsigned. Windows SmartScreen and macOS Gatekeeper
+may warn until Authenticode signing and Apple notarization are added.
+
 ## Documentation
 
 - [Getting Started](docs/getting-started.md) / [快速上手](docs/getting-started.zh-CN.md)

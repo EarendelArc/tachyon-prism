@@ -26,3 +26,15 @@ Node and Rust versions should track the latest official stable releases after
 checking the Node.js and Rust release pages. Direct npm and Cargo dependencies
 should be refreshed from their registry `latest` stable versions before release
 builds.
+
+## Release Builds
+
+Prism release artifacts are built by `.github/workflows/release.yml` on `v*`
+tags or manual workflow dispatch. The workflow runs frontend and Rust tests
+first, then builds Tauri bundles for Windows x64, Windows ARM64, macOS x64,
+macOS ARM64, Linux x64, and Linux ARM64.
+
+The generated artifacts are uploaded to the GitHub release together with
+`SHA256SUMS.txt`. These packages are unsigned for now; production distribution
+still needs Windows Authenticode signing, Apple Developer ID signing, and macOS
+notarization.

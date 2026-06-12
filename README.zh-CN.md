@@ -82,3 +82,9 @@ cd src-tauri && cargo test    # Rust 后端测试
 ```
 
 CI 会在每次推送时运行 typecheck、前端测试、Rust check 和 Rust tests。Cargo 依赖会通过 `.cargo/config.toml` 中的项目本地镜像配置获取。
+
+## Release 构建
+
+GitHub Actions 会在 release tag 或手动 workflow dispatch 时构建 Prism。Release 工作流会产出 Windows x64、Windows ARM64、macOS Intel、macOS Apple Silicon、Linux x64 和 Linux ARM64 包，并随包发布 `SHA256SUMS.txt`。
+
+当前产物还没有代码签名。加入 Authenticode 签名和 Apple notarization 之前，Windows SmartScreen 与 macOS Gatekeeper 可能会提示风险。
