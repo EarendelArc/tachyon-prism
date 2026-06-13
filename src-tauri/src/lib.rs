@@ -363,6 +363,18 @@ fn install_latest_tachyon_core(app: tauri::AppHandle) -> Result<RuntimeInstallRe
 }
 
 #[tauri::command]
+fn fetch_subscription_text(source_url: String) -> Result<String, String> {
+    let url = clean_url_input(&source_url);
+    if url.is_empty() {
+        return Err("subscription URL is required".to_string());
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("subscription URL must start with http:// or https://".to_string());
+    }
+    http_get_text(&url)
+}
+
+#[tauri::command]
 fn runtime_status(state: tauri::State<RuntimeState>) -> Result<RuntimeStatus, String> {
     let mut processes = state
         .processes
@@ -870,6 +882,10 @@ fn clean_path_input(input: &str) -> String {
     trimmed.to_string()
 }
 
+fn clean_url_input(input: &str) -> String {
+    clean_path_input(input)
+}
+
 fn binary_name(base: &str) -> String {
     if cfg!(target_os = "windows") {
         format!("{base}.exe")
@@ -1230,6 +1246,23 @@ fn http_get_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
         .body_mut()
         .read_json::<T>()
         .map_err(|err| format!("decode JSON from {url}: {err}"))
+}
+
+fn http_get_text(url: &str) -> Result<String, String> {
+    let agent = http_agent();
+    let mut response = agent
+        .get(url)
+        .header("User-Agent", "Tachyon-Prism/0.1")
+        .header(
+            "Accept",
+            "text/plain, application/json, application/octet-stream, */*",
+        )
+        .call()
+        .map_err(|err| format!("request {url}: {err}"))?;
+    response
+        .body_mut()
+        .read_to_string()
+        .map_err(|err| format!("read {url}: {err}"))
 }
 
 fn download_to_file(url: &str, path: &Path) -> Result<(), String> {
@@ -2110,6 +2143,21 @@ mod tests {
     }
 
     #[test]
+    fn clean_url_input_strips_quotes() {
+        assert_eq!(
+            clean_url_input("  \"https://example.com/sub\"  "),
+            "https://example.com/sub"
+        );
+    }
+
+    #[test]
+    fn fetch_subscription_text_rejects_non_http_urls() {
+        let error = fetch_subscription_text("file:///tmp/sub.txt".to_string())
+            .expect_err("non-http subscription should fail before network");
+        assert!(error.contains("http:// or https://"));
+    }
+
+    #[test]
     fn non_empty_or_falls_back_when_empty() {
         assert_eq!(
             non_empty_or("".to_string(), "default".to_string()),
@@ -2190,6 +2238,7 @@ pub fn run() {
             install_latest_xray,
             latest_tachyon_core_release,
             install_latest_tachyon_core,
+            fetch_subscription_text,
             runtime_status,
             start_xray,
             stop_xray,

@@ -45,19 +45,37 @@ import {
   type RuntimeStatus,
 } from "./domain/runtime";
 import {
+  activeSubscription,
   createSubscriptionSnapshot,
   fetchSubscriptionNodes,
   loadSubscriptionSnapshot,
   parseSubscription,
+  removeSubscription,
   saveSubscriptionSnapshot,
+  selectSubscription,
   selectSubscriptionNode,
+  totalSubscriptionNodes,
 } from "./domain/subscriptions";
 import type { ProxyNode, SubscriptionSnapshot } from "./domain/subscriptions";
+import {
+  createTranslator,
+  loadLanguage,
+  saveLanguage,
+  type Language,
+} from "./domain/i18n";
 import { TelemetryClient } from "./domain/telemetry";
 import type { TelemetryState, TelemetryData, RouteEventData } from "./domain/telemetry";
 
 type ConnectionState = "checking" | "connected" | "disconnected";
-type PrismView = "overview" | "nodes" | "game" | "launchers" | "runtime" | "config";
+type PrismView =
+  | "overview"
+  | "nodes"
+  | "game"
+  | "launchers"
+  | "runtime"
+  | "config"
+  | "plugins"
+  | "settings";
 type ReadinessState = "error" | "ok" | "warning";
 
 interface ReadinessItem {
@@ -277,8 +295,10 @@ export function App() {
   const [steamRoot, setSteamRoot] = useState("");
   const [manualProfile, setManualProfile] = useState(emptyProfile);
   const [subscription, setSubscription] = useState(loadSubscriptionSnapshot);
+  const [subscriptionName, setSubscriptionName] = useState("");
   const [subscriptionUrl, setSubscriptionUrl] = useState("");
   const [subscriptionText, setSubscriptionText] = useState("");
+  const [language, setLanguage] = useState<Language>(loadLanguage);
   const [configPaths, setConfigPaths] = useState<ConfigDraftPaths | null>(null);
   const [runtimePaths, setRuntimePaths] = useState<RuntimePaths | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
@@ -298,6 +318,15 @@ export function App() {
     recentErrors: [],
   }));
   const telemetryClient = useMemo(() => new TelemetryClient(), []);
+  const t = useMemo(() => createTranslator(language), [language]);
+  const currentSubscription = useMemo(
+    () => activeSubscription(subscription),
+    [subscription],
+  );
+  const subscriptionNodeCount = useMemo(
+    () => totalSubscriptionNodes(subscription),
+    [subscription],
+  );
 
   const activeProfiles = useMemo(
     () => profiles.filter((profile) => profile.enabled).length,
@@ -488,7 +517,12 @@ export function App() {
   async function updateSubscriptionFromUrl() {
     try {
       const nodes = await fetchSubscriptionNodes(subscriptionUrl);
-      const snapshot = createSubscriptionSnapshot(subscriptionUrl, nodes, subscription);
+      const snapshot = createSubscriptionSnapshot(
+        subscriptionUrl,
+        nodes,
+        subscription,
+        subscriptionName,
+      );
       saveSubscriptionSnapshot(snapshot);
       setSubscription(snapshot);
       setMessage(`${nodes.length} nodes imported`);
@@ -500,7 +534,12 @@ export function App() {
   function importSubscriptionText() {
     try {
       const nodes = parseSubscription(subscriptionText);
-      const snapshot = createSubscriptionSnapshot("manual", nodes, subscription);
+      const snapshot = createSubscriptionSnapshot(
+        "manual",
+        nodes,
+        subscription,
+        subscriptionName || "Manual",
+      );
       saveSubscriptionSnapshot(snapshot);
       setSubscription(snapshot);
       setSubscriptionText("");
@@ -519,6 +558,34 @@ export function App() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Node selection failed");
     }
+  }
+
+  function chooseSubscription(subscriptionId: string) {
+    try {
+      const snapshot = selectSubscription(subscription, subscriptionId);
+      saveSubscriptionSnapshot(snapshot);
+      setSubscription(snapshot);
+      setMessage("Subscription selected");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Subscription selection failed");
+    }
+  }
+
+  function deleteSubscription(subscriptionId: string) {
+    try {
+      const snapshot = removeSubscription(subscription, subscriptionId);
+      saveSubscriptionSnapshot(snapshot);
+      setSubscription(snapshot);
+      setMessage("Subscription removed");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Subscription removal failed");
+    }
+  }
+
+  function changeLanguage(nextLanguage: Language) {
+    saveLanguage(nextLanguage);
+    setLanguage(nextLanguage);
+    setMessage(nextLanguage === "zh-CN" ? "语言已更新" : "Language updated");
   }
 
   async function copyDraft(label: string, value: string) {
@@ -845,8 +912,13 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    setSubscriptionUrl(subscription.sourceUrl === "manual" ? "" : subscription.sourceUrl);
-  }, [subscription.sourceUrl]);
+    setSubscriptionName(currentSubscription?.name ?? "");
+    setSubscriptionUrl(
+      currentSubscription && currentSubscription.sourceUrl !== "manual"
+        ? currentSubscription.sourceUrl
+        : "",
+    );
+  }, [currentSubscription]);
 
   useEffect(() => {
     const unsub = telemetryClient.subscribe(setTelemetry);
@@ -863,57 +935,71 @@ export function App() {
   > = {
     overview: {
       eyebrow: "Dashboard",
-      label: "Overview",
-      subtitle: "Runtime health, selected egress, game acceleration and profile state.",
-      title: "Overview",
+      label: t("nav.overview"),
+      subtitle: t("view.overview.subtitle"),
+      title: t("view.overview.title"),
     },
     nodes: {
       eyebrow: "Profiles",
-      label: "Nodes",
-      subtitle: "Import subscriptions, inspect parsed Xray nodes and choose the active route.",
-      title: "Node Library",
+      label: t("nav.nodes"),
+      subtitle: t("view.nodes.subtitle"),
+      title: t("view.nodes.title"),
     },
     game: {
       eyebrow: "Rules",
-      label: "Game Mode",
-      subtitle: "Manage manual game profiles and process-aware UDP acceleration rules.",
-      title: "Game Mode",
+      label: t("nav.game"),
+      subtitle: t("view.game.subtitle"),
+      title: t("view.game.title"),
     },
     launchers: {
       eyebrow: "Discovery",
-      label: "Launchers",
-      subtitle: "Scan Steam libraries and add detected games to Tachyon acceleration.",
-      title: "Launchers",
+      label: t("nav.launchers"),
+      subtitle: t("view.launchers.subtitle"),
+      title: t("view.launchers.title"),
     },
     runtime: {
       eyebrow: "Cores",
-      label: "Runtime",
-      subtitle: "Install, select and supervise Xray Core and Tachyon Core binaries.",
-      title: "Runtime",
+      label: t("nav.runtime"),
+      subtitle: t("view.runtime.subtitle"),
+      title: t("view.runtime.title"),
     },
     config: {
       eyebrow: "Generated",
-      label: "Config",
-      subtitle: "Review and save generated JSON config files for both managed cores.",
-      title: "Config Drafts",
+      label: t("nav.config"),
+      subtitle: t("view.config.subtitle"),
+      title: t("view.config.title"),
+    },
+    plugins: {
+      eyebrow: "Extensions",
+      label: t("nav.plugins"),
+      subtitle: t("view.plugins.subtitle"),
+      title: t("view.plugins.title"),
+    },
+    settings: {
+      eyebrow: "Preferences",
+      label: t("nav.settings"),
+      subtitle: t("view.settings.subtitle"),
+      title: t("view.settings.title"),
     },
   };
 
   const navItems: Array<{ badge?: number; id: PrismView }> = [
     { id: "overview" },
-    { badge: subscription.nodes.length, id: "nodes" },
+    { badge: subscriptionNodeCount, id: "nodes" },
     { badge: activeProfiles, id: "game" },
     { badge: suggestions.length, id: "launchers" },
     { id: "runtime" },
     { id: "config" },
+    { id: "plugins" },
+    { id: "settings" },
   ];
   const currentView = viewMeta[activeView];
   const connectionLabel =
     connection === "connected"
-      ? "Connected"
+      ? t("common.connected")
       : connection === "checking"
-        ? "Checking"
-        : "Disconnected";
+        ? t("common.checking")
+        : t("common.disconnected");
   const runtimeRows = [
     { label: "Xray Core", value: processStatusLabel(runtimeStatus?.xray) },
     { label: "Tachyon Core", value: processStatusLabel(runtimeStatus?.tachyonCore) },
@@ -926,7 +1012,7 @@ export function App() {
           <span className="brand-mark">T</span>
           <div>
             <h1>Tachyon Prism</h1>
-            <p>Xray + Tachyon control plane</p>
+            <p>{t("app.subtitle")}</p>
           </div>
         </div>
         <nav className="side-nav" aria-label="Primary">
@@ -958,13 +1044,13 @@ export function App() {
           </div>
           <div className="header-actions">
             <button type="button" onClick={() => void refreshProfiles()}>
-              Refresh
+              {t("action.refresh")}
             </button>
             <button type="button" onClick={() => void startAllRuntime()}>
-              Start All
+              {t("action.startAll")}
             </button>
             <button type="button" onClick={() => void stopAllRuntime()}>
-              Stop All
+              {t("action.stopAll")}
             </button>
           </div>
         </header>
@@ -987,15 +1073,15 @@ export function App() {
                   </div>
                   <div>
                     <strong>{activeProfiles}</strong>
-                    <span>Active</span>
+                    <span>{t("common.active")}</span>
                   </div>
                   <div>
                     <strong>{suggestions.length}</strong>
                     <span>Suggestions</span>
                   </div>
                   <div>
-                    <strong>{subscription.nodes.length}</strong>
-                    <span>Nodes</span>
+                    <strong>{subscriptionNodeCount}</strong>
+                    <span>{t("common.nodes")}</span>
                   </div>
                 </div>
                 <div className="waveform" aria-label="latency waveform" />
@@ -1167,59 +1253,124 @@ export function App() {
           ) : null}
 
           {activeView === "nodes" ? (
-            <article className="panel">
-              <header>
-                <h2>Nodes</h2>
-                <button type="button" onClick={() => void updateSubscriptionFromUrl()}>
-                  Update
-                </button>
-              </header>
-              <div className="form-grid">
-                <input
-                  className="wide-input"
-                  placeholder="Subscription URL"
-                  value={subscriptionUrl}
-                  onChange={(event) => setSubscriptionUrl(event.target.value)}
-                />
-                <textarea
-                  className="wide-input"
-                  placeholder="Paste subscription payload"
-                  value={subscriptionText}
-                  onChange={(event) => setSubscriptionText(event.target.value)}
-                />
-                <button type="button" onClick={() => void importSubscriptionText()}>
-                  Import
-                </button>
-              </div>
-              {activeNode ? (
-                <div className="selected-node">
-                  <strong>{activeNode.name}</strong>
-                  <span>
-                    {activeNode.protocol.toUpperCase()} {nodeEndpoint(activeNode)}
-                  </span>
-                </div>
-              ) : null}
-              <div className="profile-list">
-                {subscription.nodes.map((node) => (
-                  <div className="profile-row" key={node.id}>
-                    <div>
-                      <strong>{node.name}</strong>
-                      <span>
-                        {node.protocol.toUpperCase()} {nodeEndpoint(node)}
-                        {node.transport ? ` / ${node.transport}` : ""}
-                      </span>
-                    </div>
-                    <button
-                      className={node.id === subscription.selectedNodeId ? "active-button" : ""}
-                      type="button"
-                      onClick={() => chooseNode(node.id)}
-                    >
-                      {node.id === subscription.selectedNodeId ? "Selected" : "Select"}
-                    </button>
+            <div className="node-layout">
+              <article className="panel subscription-panel">
+                <header>
+                  <div>
+                    <h2>{t("panel.subscriptions")}</h2>
+                    <p>
+                      {subscription.subscriptions.length} {t("common.subscriptions")} /{" "}
+                      {subscriptionNodeCount} {t("common.nodes")}
+                    </p>
                   </div>
-                ))}
-              </div>
-            </article>
+                  <button type="button" onClick={() => void updateSubscriptionFromUrl()}>
+                    {t("action.update")}
+                  </button>
+                </header>
+                <div className="form-grid">
+                  <input
+                    placeholder={t("field.subscriptionName")}
+                    value={subscriptionName}
+                    onChange={(event) => setSubscriptionName(event.target.value)}
+                  />
+                  <input
+                    placeholder={t("field.subscriptionUrl")}
+                    value={subscriptionUrl}
+                    onChange={(event) => setSubscriptionUrl(event.target.value)}
+                  />
+                  <textarea
+                    className="wide-input"
+                    placeholder={t("field.subscriptionPayload")}
+                    value={subscriptionText}
+                    onChange={(event) => setSubscriptionText(event.target.value)}
+                  />
+                  <button type="button" onClick={() => void importSubscriptionText()}>
+                    {t("action.import")}
+                  </button>
+                </div>
+                <div className="subscription-list">
+                  {subscription.subscriptions.length === 0 ? (
+                    <div className="empty-state">No subscriptions imported</div>
+                  ) : null}
+                  {subscription.subscriptions.map((item) => (
+                    <div
+                      className={
+                        item.id === subscription.selectedSubscriptionId
+                          ? "subscription-item active"
+                          : "subscription-item"
+                      }
+                      key={item.id}
+                    >
+                      <button type="button" onClick={() => chooseSubscription(item.id)}>
+                        <strong>{item.name}</strong>
+                        <span>
+                          {item.nodes.length} {t("common.nodes")}
+                        </span>
+                        <small>{item.sourceUrl}</small>
+                      </button>
+                      <button
+                        className="ghost-button danger-button"
+                        type="button"
+                        onClick={() => deleteSubscription(item.id)}
+                      >
+                        {t("action.delete")}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </article>
+
+              <article className="panel node-panel">
+                <header>
+                  <div>
+                    <h2>{currentSubscription?.name ?? t("panel.selectedNode")}</h2>
+                    <p>{currentSubscription?.sourceUrl ?? t("common.unavailable")}</p>
+                  </div>
+                  {activeNode ? (
+                    <span className="status-chip connected">{t("action.selected")}</span>
+                  ) : null}
+                </header>
+                {activeNode ? (
+                  <div className="selected-node">
+                    <strong>{activeNode.name}</strong>
+                    <span>
+                      {activeNode.protocol.toUpperCase()} {nodeEndpoint(activeNode)}
+                      {activeNode.transport ? ` / ${activeNode.transport}` : ""}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="empty-state">No node selected</div>
+                )}
+                <div className="node-list">
+                  {subscription.nodes.map((node) => (
+                    <div
+                      className={
+                        node.id === subscription.selectedNodeId ? "node-row active" : "node-row"
+                      }
+                      key={node.id}
+                    >
+                      <div>
+                        <strong>{node.name}</strong>
+                        <span>
+                          {node.protocol.toUpperCase()} {nodeEndpoint(node)}
+                          {node.transport ? ` / ${node.transport}` : ""}
+                          {node.security ? ` / ${node.security}` : ""}
+                        </span>
+                      </div>
+                      <button
+                        className={node.id === subscription.selectedNodeId ? "active-button" : ""}
+                        type="button"
+                        onClick={() => chooseNode(node.id)}
+                      >
+                        {node.id === subscription.selectedNodeId
+                          ? t("action.selected")
+                          : t("action.select")}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </article>
+            </div>
           ) : null}
 
           {activeView === "launchers" ? (
@@ -1541,6 +1692,60 @@ export function App() {
                 <label>
                   <span>Core</span>
                   <textarea readOnly value={drafts.core} />
+                </label>
+              </div>
+            </article>
+          ) : null}
+
+          {activeView === "plugins" ? (
+            <article className="panel plugin-panel">
+              <header>
+                <div>
+                  <h2>{t("panel.plugins")}</h2>
+                  <p>{t("view.plugins.subtitle")}</p>
+                </div>
+              </header>
+              <div className="plugin-grid">
+                <div className="plugin-card">
+                  <span>Rules</span>
+                  <strong>{t("plugin.rulePacks")}</strong>
+                  <p>{t("plugin.rulePacksDesc")}</p>
+                </div>
+                <div className="plugin-card">
+                  <span>Scripts</span>
+                  <strong>{t("plugin.scripts")}</strong>
+                  <p>{t("plugin.scriptsDesc")}</p>
+                </div>
+                <div className="plugin-card">
+                  <span>UI</span>
+                  <strong>{t("plugin.themes")}</strong>
+                  <p>{t("plugin.themesDesc")}</p>
+                </div>
+              </div>
+            </article>
+          ) : null}
+
+          {activeView === "settings" ? (
+            <article className="panel settings-panel">
+              <header>
+                <div>
+                  <h2>{t("nav.settings")}</h2>
+                  <p>{t("view.settings.subtitle")}</p>
+                </div>
+              </header>
+              <div className="settings-grid">
+                <label className="settings-row">
+                  <div>
+                    <strong>{t("field.language")}</strong>
+                    <span>{t("settings.languageDesc")}</span>
+                  </div>
+                  <select
+                    value={language}
+                    onChange={(event) => changeLanguage(event.target.value as Language)}
+                  >
+                    <option value="zh-CN">简体中文</option>
+                    <option value="en">English</option>
+                  </select>
                 </label>
               </div>
             </article>

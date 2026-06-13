@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+
 export type XrayOutboundProtocol =
   | "blackhole"
   | "dns"
@@ -42,11 +44,21 @@ export interface ProxyNode {
   rawUri: string;
 }
 
+export interface SubscriptionProfile {
+  id: string;
+  name: string;
+  sourceUrl: string;
+  updatedAt: string;
+  nodes: ProxyNode[];
+}
+
 export interface SubscriptionSnapshot {
   sourceUrl: string;
   updatedAt: string;
   nodes: ProxyNode[];
   selectedNodeId: string;
+  subscriptions: SubscriptionProfile[];
+  selectedSubscriptionId: string;
 }
 
 const storageKey = "tachyon.prism.subscription.v1";
@@ -71,6 +83,8 @@ export const emptySubscriptionSnapshot: SubscriptionSnapshot = {
   updatedAt: "",
   nodes: [],
   selectedNodeId: "",
+  subscriptions: [],
+  selectedSubscriptionId: "",
 };
 
 export async function fetchSubscriptionNodes(sourceUrl: string): Promise<ProxyNode[]> {
@@ -79,15 +93,28 @@ export async function fetchSubscriptionNodes(sourceUrl: string): Promise<ProxyNo
     throw new Error("Subscription URL is required");
   }
 
-  const response = await fetch(url, {
-    headers: {
-      accept: "text/plain, application/json, application/octet-stream, */*",
-    },
-  });
-  if (!response.ok) {
-    throw new Error(`Subscription fetch failed: ${response.status}`);
+  return parseSubscription(await fetchSubscriptionText(url));
+}
+
+export async function fetchSubscriptionText(sourceUrl: string): Promise<string> {
+  const url = sourceUrl.trim();
+  if (!url) {
+    throw new Error("Subscription URL is required");
   }
-  return parseSubscription(await response.text());
+
+  try {
+    return await invoke<string>("fetch_subscription_text", { sourceUrl: url });
+  } catch {
+    const response = await fetch(url, {
+      headers: {
+        accept: "text/plain, application/json, application/octet-stream, */*",
+      },
+    });
+    if (!response.ok) {
+      throw new Error(`Subscription fetch failed: ${response.status}`);
+    }
+    return response.text();
+  }
 }
 
 export function parseSubscription(input: string): ProxyNode[] {
@@ -111,34 +138,84 @@ export function createSubscriptionSnapshot(
   sourceUrl: string,
   nodes: ProxyNode[],
   previous: SubscriptionSnapshot = emptySubscriptionSnapshot,
+  name = "",
 ): SubscriptionSnapshot {
   if (nodes.length === 0) {
     throw new Error("No supported nodes found");
   }
 
+  const normalizedSource = sourceUrl.trim();
+  const profileName = normalizeSubscriptionName(name, normalizedSource);
+  const profileId = subscriptionProfileId(profileName, normalizedSource);
   const selectedNodeId = nodes.some((node) => node.id === previous.selectedNodeId)
     ? previous.selectedNodeId
     : nodes[0]?.id ?? "";
-
-  return {
-    sourceUrl: sourceUrl.trim(),
+  const existing = normalizeSubscriptionProfiles(previous.subscriptions);
+  const nextProfile: SubscriptionProfile = {
+    id: profileId,
+    name: profileName,
+    sourceUrl: normalizedSource,
     updatedAt: new Date().toISOString(),
     nodes,
-    selectedNodeId,
   };
+  const nextProfiles = [
+    ...existing.filter((profile) => profile.id !== profileId),
+    nextProfile,
+  ].sort((left, right) => left.name.localeCompare(right.name));
+
+  return snapshotFromProfiles(nextProfiles, profileId, selectedNodeId);
+}
+
+export function activeSubscription(
+  snapshot: SubscriptionSnapshot,
+): SubscriptionProfile | undefined {
+  return snapshot.subscriptions.find(
+    (subscription) => subscription.id === snapshot.selectedSubscriptionId,
+  );
+}
+
+export function totalSubscriptionNodes(snapshot: SubscriptionSnapshot): number {
+  return snapshot.subscriptions.reduce(
+    (total, subscription) => total + subscription.nodes.length,
+    0,
+  );
+}
+
+export function selectSubscription(
+  snapshot: SubscriptionSnapshot,
+  subscriptionId: string,
+): SubscriptionSnapshot {
+  const subscription = snapshot.subscriptions.find((item) => item.id === subscriptionId);
+  if (!subscription) {
+    throw new Error("Subscription no longer exists");
+  }
+  const selectedNodeId = subscription.nodes.some((node) => node.id === snapshot.selectedNodeId)
+    ? snapshot.selectedNodeId
+    : subscription.nodes[0]?.id ?? "";
+  return snapshotFromProfiles(snapshot.subscriptions, subscription.id, selectedNodeId);
+}
+
+export function removeSubscription(
+  snapshot: SubscriptionSnapshot,
+  subscriptionId: string,
+): SubscriptionSnapshot {
+  const subscriptions = snapshot.subscriptions.filter(
+    (subscription) => subscription.id !== subscriptionId,
+  );
+  return snapshotFromProfiles(subscriptions, subscriptions[0]?.id ?? "", "");
 }
 
 export function selectSubscriptionNode(
   snapshot: SubscriptionSnapshot,
   nodeId: string,
 ): SubscriptionSnapshot {
-  if (!snapshot.nodes.some((node) => node.id === nodeId)) {
+  const subscription = snapshot.subscriptions.find((item) =>
+    item.nodes.some((node) => node.id === nodeId),
+  );
+  if (!subscription) {
     throw new Error("Selected node no longer exists");
   }
-  return {
-    ...snapshot,
-    selectedNodeId: nodeId,
-  };
+  return snapshotFromProfiles(snapshot.subscriptions, subscription.id, nodeId);
 }
 
 export function buildXrayOutboundDraft(node: ProxyNode): XrayOutboundObject {
@@ -156,19 +233,30 @@ export function loadSubscriptionSnapshot(): SubscriptionSnapshot {
     }
 
     const snapshot = JSON.parse(raw) as Partial<SubscriptionSnapshot>;
+    const subscriptions = normalizeSubscriptionProfiles(snapshot.subscriptions);
+    if (subscriptions.length > 0) {
+      return snapshotFromProfiles(
+        subscriptions,
+        typeof snapshot.selectedSubscriptionId === "string"
+          ? snapshot.selectedSubscriptionId
+          : "",
+        typeof snapshot.selectedNodeId === "string" ? snapshot.selectedNodeId : "",
+      );
+    }
+
     const nodes = Array.isArray(snapshot.nodes)
       ? snapshot.nodes.map(normalizeStoredNode).filter((node): node is ProxyNode => node !== null)
       : [];
-    return {
-      sourceUrl: typeof snapshot.sourceUrl === "string" ? snapshot.sourceUrl : "",
-      updatedAt: typeof snapshot.updatedAt === "string" ? snapshot.updatedAt : "",
+    if (nodes.length === 0) {
+      return emptySubscriptionSnapshot;
+    }
+
+    return createSubscriptionSnapshot(
+      typeof snapshot.sourceUrl === "string" ? snapshot.sourceUrl : "manual",
       nodes,
-      selectedNodeId:
-        typeof snapshot.selectedNodeId === "string" &&
-        nodes.some((node) => node.id === snapshot.selectedNodeId)
-          ? snapshot.selectedNodeId
-          : nodes[0]?.id ?? "",
-    };
+      emptySubscriptionSnapshot,
+      normalizeSubscriptionName("", typeof snapshot.sourceUrl === "string" ? snapshot.sourceUrl : ""),
+    );
   } catch {
     return emptySubscriptionSnapshot;
   }
@@ -819,6 +907,82 @@ function normalizeStoredNode(value: unknown): ProxyNode | null {
     outbound: isRecord(value.outbound) ? (cloneRecord(value.outbound) as XrayOutboundObject) : undefined,
     rawUri,
   };
+}
+
+function normalizeSubscriptionProfiles(value: unknown): SubscriptionProfile[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const profiles: SubscriptionProfile[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (!isRecord(item)) {
+      continue;
+    }
+    const nodes = Array.isArray(item.nodes)
+      ? item.nodes.map(normalizeStoredNode).filter((node): node is ProxyNode => node !== null)
+      : [];
+    const sourceUrl = stringValue(item.sourceUrl);
+    const name = normalizeSubscriptionName(stringValue(item.name), sourceUrl);
+    const id = stringValue(item.id) || subscriptionProfileId(name, sourceUrl);
+    if (!id || nodes.length === 0 || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    profiles.push({
+      id,
+      name,
+      sourceUrl,
+      updatedAt: stringValue(item.updatedAt),
+      nodes,
+    });
+  }
+  return profiles.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function snapshotFromProfiles(
+  subscriptions: SubscriptionProfile[],
+  selectedSubscriptionId: string,
+  selectedNodeId: string,
+): SubscriptionSnapshot {
+  const profiles = normalizeSubscriptionProfiles(subscriptions);
+  const active =
+    profiles.find((profile) => profile.id === selectedSubscriptionId) ?? profiles[0];
+  if (!active) {
+    return emptySubscriptionSnapshot;
+  }
+  const nodeId = active.nodes.some((node) => node.id === selectedNodeId)
+    ? selectedNodeId
+    : active.nodes[0]?.id ?? "";
+  return {
+    sourceUrl: active.sourceUrl,
+    updatedAt: active.updatedAt,
+    nodes: active.nodes,
+    selectedNodeId: nodeId,
+    subscriptions: profiles,
+    selectedSubscriptionId: active.id,
+  };
+}
+
+function normalizeSubscriptionName(name: string, sourceUrl: string): string {
+  const cleaned = name.trim();
+  if (cleaned) {
+    return cleaned;
+  }
+  if (sourceUrl === "manual") {
+    return "Manual";
+  }
+  try {
+    const url = new URL(sourceUrl);
+    return url.hostname || "Subscription";
+  } catch {
+    return "Subscription";
+  }
+}
+
+function subscriptionProfileId(name: string, sourceUrl: string): string {
+  return `sub-${stableNodeId(`${name}\n${sourceUrl}`).replace(/^node-/, "")}`;
 }
 
 function normalizeProtocol(protocol: string): ProxyProtocol {

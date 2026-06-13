@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  activeSubscription,
   buildXrayOutboundDraft,
   createSubscriptionSnapshot,
   parseSubscription,
+  removeSubscription,
+  selectSubscription,
   selectSubscriptionNode,
+  totalSubscriptionNodes,
 } from "../subscriptions";
 import type { ProxyNode } from "../subscriptions";
 
@@ -87,6 +91,21 @@ describe("parseSubscription", () => {
     expect(nodes[0].name).toBe("Encoded");
   });
 
+  it("parses mixed Xray subscription payloads", () => {
+    const payload = [
+      "trojan://password@example.com:443?security=reality&sni=www.microsoft.com&fp=chrome#Reality Trojan",
+      "vless://test-uuid@example.com:443?encryption=none&security=reality&type=tcp&sni=www.cloudflare.com&fp=chrome&pbk=public-key&sid=01#Reality VLESS",
+      "hysteria2://secret@example.com:443?sni=game.example.com&insecure=1#Game Hysteria",
+    ].join("\n");
+    const nodes = parseSubscription(Buffer.from(payload).toString("base64"));
+
+    expect(nodes).toHaveLength(3);
+    expect(nodes.map((node) => node.protocol)).toEqual(["trojan", "vless", "hysteria"]);
+    expect(nodes[0].security).toBe("reality");
+    expect(nodes[1].transport).toBe("raw");
+    expect(nodes[2].name).toBe("Game Hysteria");
+  });
+
   it("deduplicates nodes with the same ID", () => {
     const uri = "vless://uuid@10.0.0.1:443\nvless://uuid@10.0.0.1:443";
     const nodes = parseSubscription(uri);
@@ -128,9 +147,11 @@ describe("createSubscriptionSnapshot", () => {
   ];
 
   it("creates a snapshot with the first node selected", () => {
-    const snapshot = createSubscriptionSnapshot("https://example.com/sub", nodes);
+    const snapshot = createSubscriptionSnapshot("https://example.com/sub", nodes, undefined, "Main");
     expect(snapshot.sourceUrl).toBe("https://example.com/sub");
     expect(snapshot.nodes).toHaveLength(2);
+    expect(snapshot.subscriptions).toHaveLength(1);
+    expect(activeSubscription(snapshot)?.name).toBe("Main");
     expect(snapshot.selectedNodeId).toBe("node-aaaaaaaa");
     expect(snapshot.updatedAt).toBeTruthy();
   });
@@ -146,6 +167,29 @@ describe("createSubscriptionSnapshot", () => {
     expect(() => createSubscriptionSnapshot("url", [])).toThrow(
       "No supported nodes found",
     );
+  });
+
+  it("keeps multiple named subscriptions", () => {
+    const first = createSubscriptionSnapshot("https://example.com/a", nodes, undefined, "Alpha");
+    const second = createSubscriptionSnapshot(
+      "https://example.com/b",
+      [nodes[1]],
+      first,
+      "Beta",
+    );
+
+    expect(second.subscriptions).toHaveLength(2);
+    expect(totalSubscriptionNodes(second)).toBe(3);
+    expect(activeSubscription(second)?.name).toBe("Beta");
+
+    const alphaId = second.subscriptions.find((item) => item.name === "Alpha")?.id ?? "";
+    const selected = selectSubscription(second, alphaId);
+    expect(activeSubscription(selected)?.name).toBe("Alpha");
+    expect(selected.nodes).toHaveLength(2);
+
+    const removed = removeSubscription(selected, alphaId);
+    expect(removed.subscriptions).toHaveLength(1);
+    expect(activeSubscription(removed)?.name).toBe("Beta");
   });
 });
 
