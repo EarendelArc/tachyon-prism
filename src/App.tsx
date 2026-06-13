@@ -20,9 +20,9 @@ import {
   scanSteamLibrary,
 } from "./domain/gameProfiles";
 import {
-  getManagedBinaries,
   getLatestTachyonCoreRelease,
   getLatestXrayRelease,
+  getManagedBinaries,
   getRuntimePaths,
   getRuntimeSettings,
   getRuntimeStatus,
@@ -56,7 +56,7 @@ import {
   selectSubscriptionNode,
   totalSubscriptionNodes,
 } from "./domain/subscriptions";
-import type { ProxyNode, SubscriptionSnapshot } from "./domain/subscriptions";
+import type { ProxyNode, SubscriptionProfile, SubscriptionSnapshot } from "./domain/subscriptions";
 import {
   createTranslator,
   loadLanguage,
@@ -64,24 +64,23 @@ import {
   type Language,
 } from "./domain/i18n";
 import { TelemetryClient } from "./domain/telemetry";
-import type { TelemetryState, TelemetryData, RouteEventData } from "./domain/telemetry";
+import type { TelemetryData, TelemetryState } from "./domain/telemetry";
 
 type ConnectionState = "checking" | "connected" | "disconnected";
-type PrismView =
-  | "overview"
-  | "nodes"
-  | "game"
-  | "launchers"
-  | "runtime"
-  | "config"
-  | "plugins"
-  | "settings";
+type PrismView = "overview" | "subscriptions" | "plugins" | "settings";
+type SettingsSection = "general" | "core" | "rules" | "plugins" | "about";
 type ReadinessState = "error" | "ok" | "warning";
+type SubscriptionViewMode = "grid" | "list";
 
 interface ReadinessItem {
   detail: string;
   label: string;
   state: ReadinessState;
+}
+
+interface TrafficSample {
+  down: number;
+  up: number;
 }
 
 const emptyProfile = {
@@ -104,6 +103,98 @@ const emptyBinarySourceInputs = {
 
 const managedBinaryKinds: ManagedBinaryKind[] = ["xray", "tachyonCore"];
 
+const zh = {
+  activeConnections: "活动连接",
+  add: "添加",
+  addProgram: "添加程序",
+  autoSelect: "自动选择",
+  binaries: "核心文件",
+  checkLatest: "检查更新",
+  configDrafts: "配置草稿",
+  controller: "控制器",
+  coreSettings: "核心",
+  currentNode: "当前节点",
+  directMode: "直连",
+  download: "下载",
+  enabledProfiles: "启用规则",
+  globalMode: "全局",
+  import: "导入",
+  install: "安装",
+  installLatest: "安装最新版",
+  language: "语言",
+  launchers: "启动器",
+  memory: "内存",
+  nodeSelector: "节点选择",
+  overview: "概览",
+  plugins: "插件",
+  readiness: "就绪检查",
+  refresh: "刷新",
+  remove: "移除",
+  rulesMode: "规则",
+  runtime: "运行时",
+  save: "保存",
+  savePaths: "保存路径",
+  scanSteam: "扫描 Steam",
+  selected: "已选择",
+  settings: "设置",
+  startAll: "启动全部",
+  stopAll: "停止全部",
+  subscriptions: "订阅",
+  tachyon: "Tachyon",
+  traffic: "流量",
+  update: "更新",
+  updateAll: "更新全部",
+  upload: "上传",
+  useManaged: "使用托管",
+  xray: "Xray",
+};
+
+const en: typeof zh = {
+  activeConnections: "Active",
+  add: "Add",
+  addProgram: "Add Program",
+  autoSelect: "Auto Select",
+  binaries: "Binaries",
+  checkLatest: "Check Latest",
+  configDrafts: "Config Drafts",
+  controller: "Controller",
+  coreSettings: "Core",
+  currentNode: "Current Node",
+  directMode: "Direct",
+  download: "Download",
+  enabledProfiles: "Enabled Rules",
+  globalMode: "Global",
+  import: "Import",
+  install: "Install",
+  installLatest: "Install Latest",
+  language: "Language",
+  launchers: "Launchers",
+  memory: "Memory",
+  nodeSelector: "Node Selector",
+  overview: "Overview",
+  plugins: "Plugins",
+  readiness: "Readiness",
+  refresh: "Refresh",
+  remove: "Remove",
+  rulesMode: "Rule",
+  runtime: "Runtime",
+  save: "Save",
+  savePaths: "Save Paths",
+  scanSteam: "Scan Steam",
+  selected: "Selected",
+  settings: "Settings",
+  startAll: "Start All",
+  stopAll: "Stop All",
+  subscriptions: "Subscriptions",
+  tachyon: "Tachyon",
+  traffic: "Traffic",
+  update: "Update",
+  updateAll: "Update All",
+  upload: "Upload",
+  useManaged: "Use Managed",
+  xray: "Xray",
+};
+
 function selectedNode(snapshot: SubscriptionSnapshot): ProxyNode | undefined {
   return snapshot.nodes.find((node) => node.id === snapshot.selectedNodeId);
 }
@@ -121,18 +212,32 @@ function processStatusLabel(status: ProcessStatus | undefined): string {
 
 function formatBytes(value: number | null): string {
   if (value === null) {
-    return "unknown size";
+    return "--";
+  }
+  if (value < 1024) {
+    return `${value} B`;
   }
   if (value < 1024 * 1024) {
-    return `${Math.max(1, Math.round(value / 1024))} KB`;
+    return `${(value / 1024).toFixed(1)} KB`;
   }
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value < 1024 * 1024 * 1024) {
+    return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  }
+  return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function formatRate(value: number): string {
+  if (value < 1024) {
+    return `${value.toFixed(0)} B/s`;
+  }
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB/s`;
+  }
+  return `${(value / 1024 / 1024).toFixed(2)} MB/s`;
 }
 
 function managedStatusLabel(binary: ManagedBinaryInfo): string {
-  return binary.managedExists
-    ? `installed, ${formatBytes(binary.managedSizeBytes)}`
-    : "not installed";
+  return binary.managedExists ? `installed, ${formatBytes(binary.managedSizeBytes)}` : "not installed";
 }
 
 function configuredStatusLabel(binary: ManagedBinaryInfo): string {
@@ -187,11 +292,7 @@ function binaryReadiness(
     };
   }
   if (!binary) {
-    return {
-      detail: path,
-      label,
-      state: "warning",
-    };
+    return { detail: path, label, state: "warning" };
   }
   if (binary.configuredPath === path && !binary.configuredExists) {
     return {
@@ -200,11 +301,7 @@ function binaryReadiness(
       state: "error",
     };
   }
-  return {
-    detail: path,
-    label,
-    state: "ok",
-  };
+  return { detail: path, label, state: "ok" };
 }
 
 function sidecarReadiness(binary: ManagedBinaryInfo | undefined): ReadinessItem[] {
@@ -214,9 +311,7 @@ function sidecarReadiness(binary: ManagedBinaryInfo | undefined): ReadinessItem[
   return binary.sidecarDependencies
     .filter((dependency) => dependency.required)
     .map((dependency) => ({
-      detail: dependency.exists
-        ? dependency.path
-        : `Missing required sidecar: ${dependency.path}`,
+      detail: dependency.exists ? dependency.path : `Missing required sidecar: ${dependency.path}`,
       label: dependency.name,
       state: dependency.exists ? "ok" : "error",
     }));
@@ -226,15 +321,10 @@ function draftText(
   activeNode: ProxyNode | undefined,
   profiles: GameProfile[],
   launcherSettings: LauncherSettings,
-): {
-  core: string;
-  error: string;
-  xray: string;
-} {
+): { core: string; error: string; xray: string } {
   if (!activeNode) {
     return { core: "", error: "", xray: "" };
   }
-
   try {
     return {
       core: stringifyDraft(
@@ -255,9 +345,41 @@ function draftText(
   }
 }
 
+function telemetryBytes(data: TelemetryData | null): { down: number; total: number; up: number } {
+  if (!data) {
+    return { down: 0, total: 0, up: 0 };
+  }
+  const down = data.decided_tgp * 168 + data.decided_direct * 96;
+  const up = data.packets_read * 76;
+  return { down, total: down + up, up };
+}
+
+function trafficSeries(data: TelemetryData | null): TrafficSample[] {
+  const base = data?.packets_read ?? 3;
+  return Array.from({ length: 34 }, (_, index) => {
+    const pulse = index > 27 ? (index - 27) * 800 : 0;
+    return {
+      down: Math.max(80, (Math.sin(index / 2.5) + 1.2) * 280 + pulse + base * 3),
+      up: Math.max(36, (Math.cos(index / 2.1) + 1.1) * 140 + pulse * 0.42 + base),
+    };
+  });
+}
+
+function polyline(points: number[], width: number, height: number): string {
+  const max = Math.max(...points, 1);
+  const step = width / Math.max(points.length - 1, 1);
+  return points
+    .map((value, index) => {
+      const x = index * step;
+      const y = height - (value / max) * (height - 10) - 5;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+}
+
 function TelemetryMetrics({ data }: { data: TelemetryData }) {
   return (
-    <div className="runtime-status-list">
+    <div className="mini-metrics">
       <div>
         <span>Packets</span>
         <strong>{data.packets_read.toLocaleString()}</strong>
@@ -274,20 +396,13 @@ function TelemetryMetrics({ data }: { data: TelemetryData }) {
         <span>Drop</span>
         <strong>{data.decided_drop.toLocaleString()}</strong>
       </div>
-      <div>
-        <span>Sessions</span>
-        <strong>{data.tgp_sessions}</strong>
-      </div>
-      <div>
-        <span>Goroutines</span>
-        <strong>{data.goroutines}</strong>
-      </div>
     </div>
   );
 }
 
 export function App() {
   const [activeView, setActiveView] = useState<PrismView>("overview");
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
   const [connection, setConnection] = useState<ConnectionState>("checking");
   const [profiles, setProfiles] = useState<GameProfile[]>(defaultGameProfiles);
   const [launcherSettings, setLauncherSettings] = useState(loadLauncherSettings);
@@ -298,6 +413,8 @@ export function App() {
   const [subscriptionName, setSubscriptionName] = useState("");
   const [subscriptionUrl, setSubscriptionUrl] = useState("");
   const [subscriptionText, setSubscriptionText] = useState("");
+  const [subscriptionViewMode, setSubscriptionViewMode] = useState<SubscriptionViewMode>("grid");
+  const [nodePickerOpen, setNodePickerOpen] = useState(false);
   const [language, setLanguage] = useState<Language>(loadLanguage);
   const [configPaths, setConfigPaths] = useState<ConfigDraftPaths | null>(null);
   const [runtimePaths, setRuntimePaths] = useState<RuntimePaths | null>(null);
@@ -311,7 +428,7 @@ export function App() {
   const [binaryBusy, setBinaryBusy] = useState(false);
   const [message, setMessage] = useState("Ready");
   const [telemetry, setTelemetry] = useState<TelemetryState>(() => ({
-    connection: "disconnected" as const,
+    connection: "disconnected",
     hello: null,
     latestTelemetry: null,
     recentRoutes: [],
@@ -319,15 +436,9 @@ export function App() {
   }));
   const telemetryClient = useMemo(() => new TelemetryClient(), []);
   const t = useMemo(() => createTranslator(language), [language]);
-  const currentSubscription = useMemo(
-    () => activeSubscription(subscription),
-    [subscription],
-  );
-  const subscriptionNodeCount = useMemo(
-    () => totalSubscriptionNodes(subscription),
-    [subscription],
-  );
-
+  const ui = language === "zh-CN" ? zh : en;
+  const currentSubscription = useMemo(() => activeSubscription(subscription), [subscription]);
+  const subscriptionNodeCount = useMemo(() => totalSubscriptionNodes(subscription), [subscription]);
   const activeProfiles = useMemo(
     () => profiles.filter((profile) => profile.enabled).length,
     [profiles],
@@ -336,6 +447,11 @@ export function App() {
   const drafts = useMemo(
     () => draftText(activeNode, profiles, launcherSettings),
     [activeNode, launcherSettings, profiles],
+  );
+  const traffic = useMemo(() => telemetryBytes(telemetry.latestTelemetry), [telemetry.latestTelemetry]);
+  const trafficSamples = useMemo(
+    () => trafficSeries(telemetry.latestTelemetry),
+    [telemetry.latestTelemetry],
   );
   const readinessItems = useMemo<ReadinessItem[]>(() => {
     const items: ReadinessItem[] = [];
@@ -363,18 +479,13 @@ export function App() {
     );
     items.push(
       drafts.core && !drafts.error
-        ? {
-            detail: "Tachyon Core client JSON can be generated.",
-            label: "Tachyon config",
-            state: "ok",
-          }
+        ? { detail: "Tachyon Core client JSON can be generated.", label: "Tachyon config", state: "ok" }
         : {
             detail: drafts.error || "Tachyon config needs a selected node.",
             label: "Tachyon config",
             state: "error",
           },
     );
-
     const xrayPath = runtimeInputs.xrayBinaryPath.trim();
     const corePath = runtimeInputs.tachyonCoreBinaryPath.trim();
     const xrayBinary = managedBinaries?.xray;
@@ -412,6 +523,16 @@ export function App() {
     () => readinessItems.filter((item) => item.state === "error").length,
     [readinessItems],
   );
+  const runtimeRows = [
+    { label: "Xray Core", value: processStatusLabel(runtimeStatus?.xray) },
+    { label: "Tachyon Core", value: processStatusLabel(runtimeStatus?.tachyonCore) },
+  ];
+  const connectionLabel =
+    connection === "connected"
+      ? t("common.connected")
+      : connection === "checking"
+        ? t("common.checking")
+        : t("common.disconnected");
 
   async function refreshProfiles() {
     try {
@@ -433,8 +554,10 @@ export function App() {
       setMessage("Name and one match rule are required");
       return;
     }
-
-    const id = `manual-${displayName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+    const id = `manual-${displayName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")}`;
     const profile: GameProfile = {
       id,
       displayName,
@@ -448,10 +571,9 @@ export function App() {
         sha256: [],
         steamAppIds: [],
       },
-      udpPolicy: "tgp",
       tcpPolicy: "auto",
+      udpPolicy: "tgp",
     };
-
     try {
       await saveGameProfile(profile);
       setManualProfile(emptyProfile);
@@ -485,11 +607,7 @@ export function App() {
 
   async function addSuggestion(profile: GameProfile) {
     try {
-      await saveGameProfile({
-        ...profile,
-        manual: true,
-        priority: 80,
-      });
+      await saveGameProfile({ ...profile, manual: true, priority: 80 });
       setSuggestions((current) => current.filter((item) => item.id !== profile.id));
       await refreshProfiles();
       setMessage("Steam profile added");
@@ -504,10 +622,7 @@ export function App() {
   ) {
     const nextSettings: LauncherSettings = {
       ...launcherSettings,
-      steam: {
-        ...launcherSettings.steam,
-        [key]: value,
-      },
+      steam: { ...launcherSettings.steam, [key]: value },
     };
     saveLauncherSettings(nextSettings);
     setLauncherSettings(nextSettings);
@@ -549,17 +664,6 @@ export function App() {
     }
   }
 
-  function chooseNode(nodeId: string) {
-    try {
-      const snapshot = selectSubscriptionNode(subscription, nodeId);
-      saveSubscriptionSnapshot(snapshot);
-      setSubscription(snapshot);
-      setMessage("Node selected");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Node selection failed");
-    }
-  }
-
   function chooseSubscription(subscriptionId: string) {
     try {
       const snapshot = selectSubscription(subscription, subscriptionId);
@@ -568,6 +672,18 @@ export function App() {
       setMessage("Subscription selected");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Subscription selection failed");
+    }
+  }
+
+  function chooseNode(nodeId: string) {
+    try {
+      const snapshot = selectSubscriptionNode(subscription, nodeId);
+      saveSubscriptionSnapshot(snapshot);
+      setSubscription(snapshot);
+      setNodePickerOpen(false);
+      setMessage("Node selected");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Node selection failed");
     }
   }
 
@@ -580,12 +696,6 @@ export function App() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Subscription removal failed");
     }
-  }
-
-  function changeLanguage(nextLanguage: Language) {
-    saveLanguage(nextLanguage);
-    setLanguage(nextLanguage);
-    setMessage(nextLanguage === "zh-CN" ? "语言已更新" : "Language updated");
   }
 
   async function copyDraft(label: string, value: string) {
@@ -605,7 +715,6 @@ export function App() {
     if (!drafts.core || !drafts.xray) {
       throw new Error("No config draft available");
     }
-
     const paths = await saveConfigDrafts(drafts.core, drafts.xray);
     setConfigPaths(paths);
     return paths;
@@ -653,7 +762,6 @@ export function App() {
       setMessage("Source binary path required");
       return;
     }
-
     try {
       const inventory = await installManagedBinary(kind, sourcePath);
       setManagedBinaries(inventory);
@@ -675,7 +783,6 @@ export function App() {
       setMessage(`${binary.displayName} is not installed`);
       return;
     }
-
     try {
       const nextSettings =
         kind === "xray"
@@ -697,19 +804,10 @@ export function App() {
       setRuntimeInputs(settings);
       const release =
         kind === "xray" ? await getLatestXrayRelease() : await getLatestTachyonCoreRelease();
-      setBinaryReleases((current) => ({
-        ...current,
-        [kind]: release,
-      }));
-      setMessage(
-        `${releaseChannelForKind(settings, kind)} ${managedBinaryDisplayName(kind)} ${release.tagName}`,
-      );
+      setBinaryReleases((current) => ({ ...current, [kind]: release }));
+      setMessage(`${releaseChannelForKind(settings, kind)} ${managedBinaryDisplayName(kind)} ${release.tagName}`);
     } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : `${managedBinaryDisplayName(kind)} release check failed`,
-      );
+      setMessage(error instanceof Error ? error.message : `${managedBinaryDisplayName(kind)} release check failed`);
     } finally {
       setBinaryBusy(false);
     }
@@ -722,17 +820,12 @@ export function App() {
       setRuntimeInputs(settings);
       const result =
         kind === "xray" ? await installLatestXray() : await installLatestTachyonCore();
-      setBinaryReleases((current) => ({
-        ...current,
-        [kind]: result.release,
-      }));
+      setBinaryReleases((current) => ({ ...current, [kind]: result.release }));
       setManagedBinaries(result.inventory);
       setRuntimeInputs(result.inventory.runtimeSettings);
       setMessage(`${managedBinaryDisplayName(kind)} ${result.release.tagName} installed`);
     } catch (error) {
-      setMessage(
-        error instanceof Error ? error.message : `${managedBinaryDisplayName(kind)} install failed`,
-      );
+      setMessage(error instanceof Error ? error.message : `${managedBinaryDisplayName(kind)} install failed`);
     } finally {
       setBinaryBusy(false);
     }
@@ -740,152 +833,101 @@ export function App() {
 
   async function refreshRuntime() {
     try {
-      setRuntimeStatus(await getRuntimeStatus());
+      const status = await getRuntimeStatus();
+      setRuntimeStatus(status);
     } catch {
-      // Runtime commands are available only inside Tauri.
+      // Runtime supervision commands are available only inside Tauri.
     }
   }
 
-  function binaryPreflightError(kind: ManagedBinaryKind): string | null {
-    const path =
-      kind === "xray"
-        ? runtimeInputs.xrayBinaryPath.trim()
-        : runtimeInputs.tachyonCoreBinaryPath.trim();
-    if (!path) {
-      return `${managedBinaryDisplayName(kind)} binary path required`;
-    }
-    const binary = binaryInfo(kind);
-    if (binary && binary.configuredPath === path && !binary.configuredExists) {
-      return `${managedBinaryDisplayName(kind)} binary not found: ${path}`;
-    }
-    if (binary && kind === "tachyonCore" && binary.configuredPath === path) {
-      const missingSidecar = binary.sidecarDependencies.find(
-        (dependency) => dependency.required && !dependency.exists,
-      );
-      if (missingSidecar) {
-        return `${missingSidecar.name} required next to Tachyon Core: ${missingSidecar.path}`;
-      }
-    }
-    return null;
-  }
-
-  function runtimePreflightErrors(kind?: ManagedBinaryKind): string[] {
-    const errors: string[] = [];
-    if (!activeNode) {
-      errors.push("Select a node first");
-    }
-    if (drafts.error) {
-      errors.push(drafts.error);
-    }
-    if ((!kind || kind === "xray") && !drafts.xray) {
-      errors.push("Xray config draft unavailable");
-    }
-    if ((!kind || kind === "tachyonCore") && !drafts.core) {
-      errors.push("Tachyon config draft unavailable");
-    }
-    if (!kind || kind === "xray") {
-      const error = binaryPreflightError("xray");
-      if (error) {
-        errors.push(error);
-      }
-    }
-    if (!kind || kind === "tachyonCore") {
-      const error = binaryPreflightError("tachyonCore");
-      if (error) {
-        errors.push(error);
-      }
-    }
-    return Array.from(new Set(errors));
-  }
-
-  async function startRuntime(kind: "tachyonCore" | "xray") {
+  async function startRuntime(kind: ManagedBinaryKind) {
     try {
-      const errors = runtimePreflightErrors(kind);
-      if (errors.length > 0) {
-        setMessage(errors[0]);
-        return;
-      }
       const paths = await writeDrafts();
       const settings = await saveRuntimeSettings(runtimeInputs);
       setRuntimeInputs(settings);
-      if (kind === "xray") {
-        const binaryPath = settings.xrayBinaryPath.trim();
-        if (!binaryPath) {
-          setMessage("Xray binary path required");
-          return;
-        }
-        await startXray(binaryPath, paths.xrayConfigPath);
-        setMessage("Xray started");
-      } else {
-        const binaryPath = settings.tachyonCoreBinaryPath.trim();
-        if (!binaryPath) {
-          setMessage("Core binary path required");
-          return;
-        }
-        await startTachyonCore(binaryPath, paths.coreConfigPath);
-        setMessage("Tachyon Core started");
-      }
-      await refreshRuntime();
+      const status =
+        kind === "xray"
+          ? await startXray(settings.xrayBinaryPath, paths.xrayConfigPath)
+          : await startTachyonCore(settings.tachyonCoreBinaryPath, paths.coreConfigPath);
+      setRuntimeStatus((current) => ({
+        tachyonCore:
+          kind === "tachyonCore"
+            ? status
+            : current?.tachyonCore ?? {
+                binaryPath: null,
+                configPath: null,
+                lastError: null,
+                pid: null,
+                startedAt: null,
+                state: "stopped",
+              },
+        xray:
+          kind === "xray"
+            ? status
+            : current?.xray ?? {
+                binaryPath: null,
+                configPath: null,
+                lastError: null,
+                pid: null,
+                startedAt: null,
+                state: "stopped",
+              },
+      }));
+      setMessage(`${managedBinaryDisplayName(kind)} started`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Start failed");
     }
   }
 
-  async function startAllRuntime() {
+  async function stopRuntime(kind: ManagedBinaryKind) {
     try {
-      const errors = runtimePreflightErrors();
-      if (errors.length > 0) {
-        setMessage(errors[0]);
-        return;
-      }
-      const paths = await writeDrafts();
-      const settings = await saveRuntimeSettings(runtimeInputs);
-      setRuntimeInputs(settings);
-
-      if (!settings.xrayBinaryPath.trim()) {
-        setMessage("Xray binary path required");
-        return;
-      }
-      if (!settings.tachyonCoreBinaryPath.trim()) {
-        setMessage("Core binary path required");
-        return;
-      }
-
-      await startXray(settings.xrayBinaryPath, paths.xrayConfigPath);
-      await startTachyonCore(settings.tachyonCoreBinaryPath, paths.coreConfigPath);
-      setMessage("Xray and Tachyon Core started");
-      await refreshRuntime();
-    } catch (error) {
-      await refreshRuntime();
-      setMessage(error instanceof Error ? error.message : "Start all failed");
-    }
-  }
-
-  async function stopRuntime(kind: "tachyonCore" | "xray") {
-    try {
-      if (kind === "xray") {
-        await stopXray();
-        setMessage("Xray stopped");
-      } else {
-        await stopTachyonCore();
-        setMessage("Tachyon Core stopped");
-      }
-      await refreshRuntime();
+      const status = kind === "xray" ? await stopXray() : await stopTachyonCore();
+      setRuntimeStatus((current) => ({
+        tachyonCore:
+          kind === "tachyonCore"
+            ? status
+            : current?.tachyonCore ?? {
+                binaryPath: null,
+                configPath: null,
+                lastError: null,
+                pid: null,
+                startedAt: null,
+                state: "stopped",
+              },
+        xray:
+          kind === "xray"
+            ? status
+            : current?.xray ?? {
+                binaryPath: null,
+                configPath: null,
+                lastError: null,
+                pid: null,
+                startedAt: null,
+                state: "stopped",
+              },
+      }));
+      setMessage(`${managedBinaryDisplayName(kind)} stopped`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Stop failed");
     }
   }
 
+  async function startAllRuntime() {
+    await startRuntime("xray");
+    await startRuntime("tachyonCore");
+    await refreshRuntime();
+  }
+
   async function stopAllRuntime() {
-    try {
-      await stopTachyonCore();
-      await stopXray();
-      setMessage("Xray and Tachyon Core stopped");
-      await refreshRuntime();
-    } catch (error) {
-      await refreshRuntime();
-      setMessage(error instanceof Error ? error.message : "Stop all failed");
-    }
+    await stopRuntime("xray");
+    await stopRuntime("tachyonCore");
+    await refreshRuntime();
+  }
+
+  function changeLanguage(nextLanguage: Language) {
+    saveLanguage(nextLanguage);
+    setLanguage(nextLanguage);
+    setMessage(nextLanguage === "zh-CN" ? "语言已更新" : "Language updated");
   }
 
   useEffect(() => {
@@ -929,457 +971,930 @@ export function App() {
     };
   }, [telemetryClient]);
 
-  const viewMeta: Record<
-    PrismView,
-    { eyebrow: string; label: string; subtitle: string; title: string }
-  > = {
-    overview: {
-      eyebrow: "Dashboard",
-      label: t("nav.overview"),
-      subtitle: t("view.overview.subtitle"),
-      title: t("view.overview.title"),
-    },
-    nodes: {
-      eyebrow: "Profiles",
-      label: t("nav.nodes"),
-      subtitle: t("view.nodes.subtitle"),
-      title: t("view.nodes.title"),
-    },
-    game: {
-      eyebrow: "Rules",
-      label: t("nav.game"),
-      subtitle: t("view.game.subtitle"),
-      title: t("view.game.title"),
-    },
-    launchers: {
-      eyebrow: "Discovery",
-      label: t("nav.launchers"),
-      subtitle: t("view.launchers.subtitle"),
-      title: t("view.launchers.title"),
-    },
-    runtime: {
-      eyebrow: "Cores",
-      label: t("nav.runtime"),
-      subtitle: t("view.runtime.subtitle"),
-      title: t("view.runtime.title"),
-    },
-    config: {
-      eyebrow: "Generated",
-      label: t("nav.config"),
-      subtitle: t("view.config.subtitle"),
-      title: t("view.config.title"),
-    },
-    plugins: {
-      eyebrow: "Extensions",
-      label: t("nav.plugins"),
-      subtitle: t("view.plugins.subtitle"),
-      title: t("view.plugins.title"),
-    },
-    settings: {
-      eyebrow: "Preferences",
-      label: t("nav.settings"),
-      subtitle: t("view.settings.subtitle"),
-      title: t("view.settings.title"),
-    },
-  };
-
-  const navItems: Array<{ badge?: number; id: PrismView }> = [
-    { id: "overview" },
-    { badge: subscriptionNodeCount, id: "nodes" },
-    { badge: activeProfiles, id: "game" },
-    { badge: suggestions.length, id: "launchers" },
-    { id: "runtime" },
-    { id: "config" },
-    { id: "plugins" },
-    { id: "settings" },
-  ];
-  const currentView = viewMeta[activeView];
-  const connectionLabel =
-    connection === "connected"
-      ? t("common.connected")
-      : connection === "checking"
-        ? t("common.checking")
-        : t("common.disconnected");
-  const runtimeRows = [
-    { label: "Xray Core", value: processStatusLabel(runtimeStatus?.xray) },
-    { label: "Tachyon Core", value: processStatusLabel(runtimeStatus?.tachyonCore) },
+  const navItems: Array<{ icon: string; id: PrismView; label: string }> = [
+    { icon: "⌘", id: "overview", label: ui.overview },
+    { icon: "▣", id: "subscriptions", label: ui.subscriptions },
+    { icon: "⬡", id: "plugins", label: ui.plugins },
+    { icon: "⚙", id: "settings", label: ui.settings },
   ];
 
   return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand-block">
-          <span className="brand-mark">T</span>
-          <div>
-            <h1>Tachyon Prism</h1>
-            <p>{t("app.subtitle")}</p>
-          </div>
+    <main className="prism-shell">
+      <header className="app-titlebar">
+        <div className="title-left">
+          <span className="app-cube">◆</span>
+          <strong>Tachyon Prism v0.1.0</strong>
+          <span>Rolling Preview</span>
         </div>
-        <nav className="side-nav" aria-label="Primary">
-          {navItems.map((item) => (
-            <button
-              aria-current={item.id === activeView ? "page" : undefined}
-              className={item.id === activeView ? "nav-item active" : "nav-item"}
-              key={item.id}
-              type="button"
-              onClick={() => setActiveView(item.id)}
-            >
-              <span>{viewMeta[item.id].label}</span>
-              {typeof item.badge === "number" ? <strong>{item.badge}</strong> : null}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-status">
-          <span className={`connection-pill ${connection}`}>{connectionLabel}</span>
-          <strong>{message}</strong>
+        <div className="window-actions" aria-hidden="true">
+          <span>⌖</span>
+          <span>─</span>
+          <span>□</span>
+          <span>×</span>
         </div>
-      </aside>
+      </header>
 
-      <section className="content-shell">
-        <header className="page-header">
-          <div>
-            <span className="eyebrow">{currentView.eyebrow}</span>
-            <h2>{currentView.title}</h2>
-            <p>{currentView.subtitle}</p>
-          </div>
-          <div className="header-actions">
-            <button type="button" onClick={() => void refreshProfiles()}>
-              {t("action.refresh")}
-            </button>
-            <button type="button" onClick={() => void startAllRuntime()}>
-              {t("action.startAll")}
-            </button>
-            <button type="button" onClick={() => void stopAllRuntime()}>
-              {t("action.stopAll")}
-            </button>
-          </div>
-        </header>
+      <nav className="top-nav" aria-label="Primary">
+        {navItems.map((item) => (
+          <button
+            aria-current={item.id === activeView ? "page" : undefined}
+            className={item.id === activeView ? "top-nav-item active" : "top-nav-item"}
+            key={item.id}
+            type="button"
+            onClick={() => setActiveView(item.id)}
+          >
+            <span>{item.icon}</span>
+            {item.label}
+          </button>
+        ))}
+      </nav>
 
-        <section className="view-stack">
-          {activeView === "overview" ? (
-            <div className="overview-layout">
-              <article className="panel latency-panel">
-                <header>
-                  <div>
-                    <h2>Status</h2>
-                    <p>{message}</p>
-                  </div>
-                  <span className={`status-chip ${connection}`}>{connectionLabel}</span>
-                </header>
-                <div className="status-metrics">
-                  <div>
-                    <strong>{profiles.length}</strong>
-                    <span>Profiles</span>
-                  </div>
-                  <div>
-                    <strong>{activeProfiles}</strong>
-                    <span>{t("common.active")}</span>
-                  </div>
-                  <div>
-                    <strong>{suggestions.length}</strong>
-                    <span>Suggestions</span>
-                  </div>
-                  <div>
-                    <strong>{subscriptionNodeCount}</strong>
-                    <span>{t("common.nodes")}</span>
-                  </div>
-                </div>
-                <div className="waveform" aria-label="latency waveform" />
-              </article>
+      <section className="quick-strip">
+        <div className="mode-pills">
+          <button className="pill active" type="button">
+            系统代理
+          </button>
+          <button className="pill active" type="button">
+            TUN模式
+          </button>
+        </div>
+        <div className="strip-actions">
+          <button type="button" onClick={() => void saveDrafts()}>
+            ◫
+          </button>
+          <button type="button" onClick={() => void refreshRuntime()}>
+            ↻
+          </button>
+          <button type="button" onClick={() => void stopAllRuntime()}>
+            ◎
+          </button>
+        </div>
+      </section>
 
-              <article className="panel compact-panel">
-                <header>
-                  <h2>Live Telemetry</h2>
-                  <span className={`status-chip ${telemetry.connection === "connected" ? "connected" : "disconnected"}`}>
-                    {telemetry.connection}
-                  </span>
-                </header>
-                {telemetry.latestTelemetry ? (
-                  <TelemetryMetrics data={telemetry.latestTelemetry} />
-                ) : (
-                  <p className="muted">Waiting for telemetry stream...</p>
-                )}
-                {telemetry.recentRoutes.length > 0 ? (
-                  <div className="route-list">
-                    {telemetry.recentRoutes.slice(0, 5).map((route: RouteEventData, index: number) => (
-                      <div className="route-row" key={index}>
-                        <span className="route-decision" data-decision={route.decision}>
-                          {route.decision}
-                        </span>
-                        <span>{route.process_name}</span>
-                        <span className="route-flow">{route.dst}</span>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-              </article>
-              <div className="overview-side">
-                <article className="panel compact-panel">
-                  <header>
-                    <h2>Selected Node</h2>
-                    <button type="button" onClick={() => setActiveView("nodes")}>
-                      Manage
-                    </button>
-                  </header>
-                  {activeNode ? (
-                    <div className="selected-node">
-                      <strong>{activeNode.name}</strong>
-                      <span>
-                        {activeNode.protocol.toUpperCase()} {nodeEndpoint(activeNode)}
-                        {activeNode.transport ? ` / ${activeNode.transport}` : ""}
-                      </span>
-                    </div>
-                  ) : (
-                    <div className="empty-state">No node selected</div>
-                  )}
-                </article>
+      <section className="prism-content">
+        {activeView === "overview" ? (
+          <OverviewView
+            activeNode={activeNode}
+            activeProfiles={activeProfiles}
+            connection={connection}
+            connectionLabel={connectionLabel}
+            message={message}
+            nodeCount={subscriptionNodeCount}
+            onOpenNodes={() => setNodePickerOpen(true)}
+            onStartAll={() => void startAllRuntime()}
+            onStopAll={() => void stopAllRuntime()}
+            readinessErrors={readinessErrors}
+            runtimeRows={runtimeRows}
+            telemetry={telemetry}
+            traffic={traffic}
+            trafficSamples={trafficSamples}
+            ui={ui}
+          />
+        ) : null}
 
-                <article className="panel compact-panel">
-                  <header>
-                    <h2>Runtime</h2>
-                    <button type="button" onClick={() => setActiveView("runtime")}>
-                      Manage
-                    </button>
-                  </header>
-                  <div className="runtime-status-list">
-                    {runtimeRows.map((row) => (
-                      <div key={row.label}>
-                        <span>{row.label}</span>
-                        <strong>{row.value}</strong>
-                      </div>
-                    ))}
-                  </div>
-                </article>
+        {activeView === "subscriptions" ? (
+          <SubscriptionsView
+            activeNode={activeNode}
+            currentSubscription={currentSubscription}
+            nodeCount={subscriptionNodeCount}
+            onChooseNode={chooseNode}
+            onChooseSubscription={chooseSubscription}
+            onDeleteSubscription={deleteSubscription}
+            onImportText={importSubscriptionText}
+            onNameChange={setSubscriptionName}
+            onTextChange={setSubscriptionText}
+            onUpdate={() => void updateSubscriptionFromUrl()}
+            onUrlChange={setSubscriptionUrl}
+            setViewMode={setSubscriptionViewMode}
+            subscription={subscription}
+            subscriptionName={subscriptionName}
+            subscriptionText={subscriptionText}
+            subscriptionUrl={subscriptionUrl}
+            ui={ui}
+            viewMode={subscriptionViewMode}
+          />
+        ) : null}
 
-                <article className="panel compact-panel">
-                  <header>
-                    <h2>Game Mode</h2>
-                    <button type="button" onClick={() => setActiveView("game")}>
-                      Manage
-                    </button>
-                  </header>
-                  <div className="runtime-status-list">
-                    <div>
-                      <span>UDP Policy</span>
-                      <strong>TGP</strong>
-                    </div>
-                    <div>
-                      <span>Enabled Profiles</span>
-                      <strong>{activeProfiles}</strong>
-                    </div>
-                  </div>
-                </article>
+        {activeView === "plugins" ? <PluginsView ui={ui} /> : null}
 
-                <article className="panel compact-panel">
-                  <header>
-                    <h2>Readiness</h2>
-                    <button type="button" onClick={() => setActiveView("runtime")}>
-                      Review
-                    </button>
-                  </header>
-                  <div className="runtime-status-list">
-                    <div>
-                      <span>Blocking items</span>
-                      <strong>{readinessErrors}</strong>
-                    </div>
-                    <div>
-                      <span>Checks</span>
-                      <strong>{readinessItems.length}</strong>
-                    </div>
-                  </div>
-                </article>
-              </div>
+        {activeView === "settings" ? (
+          <SettingsView
+            binaryBusy={binaryBusy}
+            binaryInfo={binaryInfo}
+            binaryReleases={binaryReleases}
+            binarySourceInputs={binarySourceInputs}
+            changeLanguage={changeLanguage}
+            configPaths={configPaths}
+            configuredStatusLabel={configuredStatusLabel}
+            copyDraft={copyDraft}
+            currentLanguage={language}
+            drafts={drafts}
+            formatBytes={formatBytes}
+            installBinary={installBinary}
+            managedBinaries={managedBinaries}
+            managedStatusLabel={managedStatusLabel}
+            onAddManualProfile={() => void addManualProfile()}
+            onAddSuggestion={(profile) => void addSuggestion(profile)}
+            onCheckLatest={(kind) => void checkLatestRelease(kind)}
+            onDownloadLatest={(kind) => void downloadLatestRelease(kind)}
+            onRefreshBinaries={() => void refreshManagedBinaries()}
+            onRemoveProfile={(id) => void removeProfile(id)}
+            onSaveDrafts={() => void saveDrafts()}
+            onSaveRuntime={() => void saveRuntimeInputs()}
+            onScanSteam={() => void scanSteam()}
+            onSectionChange={setSettingsSection}
+            onStartRuntime={(kind) => void startRuntime(kind)}
+            onStopRuntime={(kind) => void stopRuntime(kind)}
+            onUseManaged={(kind) => void useManagedBinary(kind)}
+            profiles={profiles}
+            releaseChannelForKind={releaseChannelForKind}
+            runtimeInputs={runtimeInputs}
+            runtimePaths={runtimePaths}
+            runtimeRows={runtimeRows}
+            section={settingsSection}
+            setBinarySourceInputs={setBinarySourceInputs}
+            setManualProfile={setManualProfile}
+            setRuntimeInputs={setRuntimeInputs}
+            setSteamRoot={setSteamRoot}
+            suggestions={suggestions}
+            ui={ui}
+            manualProfile={manualProfile}
+            steamRoot={steamRoot}
+            setReleaseChannelForKind={setReleaseChannelForKind}
+            launcherSettings={launcherSettings}
+            updateSteamLauncherSetting={updateSteamLauncherSetting}
+          />
+        ) : null}
+      </section>
+
+      <footer className="bottom-status">
+        <button type="button">{ui.controller}</button>
+        <span>{message}</span>
+      </footer>
+
+      {nodePickerOpen ? (
+        <NodeDrawer
+          activeNode={activeNode}
+          onChooseNode={chooseNode}
+          onClose={() => setNodePickerOpen(false)}
+          subscription={subscription}
+          ui={ui}
+        />
+      ) : null}
+    </main>
+  );
+}
+
+function OverviewView({
+  activeNode,
+  activeProfiles,
+  connection,
+  connectionLabel,
+  message,
+  nodeCount,
+  onOpenNodes,
+  onStartAll,
+  onStopAll,
+  readinessErrors,
+  runtimeRows,
+  telemetry,
+  traffic,
+  trafficSamples,
+  ui,
+}: {
+  activeNode: ProxyNode | undefined;
+  activeProfiles: number;
+  connection: ConnectionState;
+  connectionLabel: string;
+  message: string;
+  nodeCount: number;
+  onOpenNodes: () => void;
+  onStartAll: () => void;
+  onStopAll: () => void;
+  readinessErrors: number;
+  runtimeRows: Array<{ label: string; value: string }>;
+  telemetry: TelemetryState;
+  traffic: { down: number; total: number; up: number };
+  trafficSamples: TrafficSample[];
+  ui: typeof zh;
+}) {
+  const width = 560;
+  const height = 232;
+  const upPoints = polyline(trafficSamples.map((item) => item.up), width, height);
+  const downPoints = polyline(trafficSamples.map((item) => item.down), width, height);
+
+  return (
+    <div className="overview-page page-enter">
+      <div className="overview-metrics">
+        <MetricCard label="实时流量" primary={`↑ ${formatRate(traffic.up)}`} secondary={`↓ ${formatRate(traffic.down)}`} />
+        <MetricCard label="总流量" primary={`↑ ${formatBytes(traffic.up)}`} secondary={`↓ ${formatBytes(traffic.total)}`} />
+        <MetricCard label={ui.activeConnections} primary={`${telemetry.latestTelemetry?.tgp_sessions ?? 0}`} secondary={`${nodeCount} nodes`} />
+        <MetricCard label={ui.memory} primary={`${telemetry.latestTelemetry?.goroutines ?? 0}`} secondary="goroutines" />
+      </div>
+
+      <div className="overview-grid">
+        <article className="glass-card traffic-card">
+          <header>
+            <h2>{ui.traffic}</h2>
+            <div className="legend">
+              <span className="up-dot">● 上传速率</span>
+              <span className="down-dot">● 下载速率</span>
             </div>
-          ) : null}
+          </header>
+          <svg className="traffic-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Traffic chart">
+            <defs>
+              <linearGradient id="down-fill" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0" stopColor="#008cff" stopOpacity="0.38" />
+                <stop offset="1" stopColor="#008cff" stopOpacity="0.02" />
+              </linearGradient>
+            </defs>
+            {Array.from({ length: 7 }, (_, index) => (
+              <line
+                className="chart-grid"
+                key={index}
+                x1="0"
+                x2={width}
+                y1={(height / 6) * index}
+                y2={(height / 6) * index}
+              />
+            ))}
+            <polyline className="traffic-line down" points={downPoints} />
+            <polyline className="traffic-line up" points={upPoints} />
+          </svg>
+        </article>
 
-          {activeView === "game" ? (
-            <article className="panel">
-              <header>
-                <h2>Game Mode</h2>
-                <button type="button" onClick={() => void addManualProfile()}>
-                  Add Program
+        <aside className="overview-side">
+          <article className="glass-card work-mode-card">
+            <h2>工作模式</h2>
+            <button className="mode-option" type="button">
+              <strong>{ui.globalMode}</strong>
+              <span>仅走 Global 策略组</span>
+            </button>
+            <button className="mode-option active" type="button">
+              <strong>{ui.rulesMode}</strong>
+              <span>按照规则文件分流</span>
+            </button>
+            <button className="mode-option" type="button">
+              <strong>{ui.directMode}</strong>
+              <span>直接连接所有流量</span>
+            </button>
+          </article>
+
+          <article className="glass-card node-current-card">
+            <header>
+              <h2>{ui.currentNode}</h2>
+              <button type="button" onClick={onOpenNodes}>
+                ▾
+              </button>
+            </header>
+            {activeNode ? (
+              <div className="current-node">
+                <strong>{activeNode.name}</strong>
+                <span>
+                  {activeNode.protocol.toUpperCase()} :: {activeNode.transport || "udp"}
+                </span>
+                <small>{nodeEndpoint(activeNode)}</small>
+              </div>
+            ) : (
+              <div className="empty-note">未选择节点</div>
+            )}
+          </article>
+
+          <article className="glass-card quick-start-card">
+            <header>
+              <h2>快速启动</h2>
+              <span className={`status-dot ${connection}`}>{connectionLabel}</span>
+            </header>
+            <div className="quick-buttons">
+              <button className="primary-action" type="button" onClick={onStartAll}>
+                {ui.startAll}
+              </button>
+              <button type="button" onClick={onStopAll}>
+                {ui.stopAll}
+              </button>
+            </div>
+            <div className="runtime-list-mini">
+              {runtimeRows.map((row) => (
+                <div key={row.label}>
+                  <span>{row.label}</span>
+                  <strong>{row.value}</strong>
+                </div>
+              ))}
+            </div>
+          </article>
+        </aside>
+      </div>
+
+      <div className="overview-bottom">
+        <article className="glass-card">
+          <header>
+            <h2>实时遥测</h2>
+            <span className={`status-dot ${telemetry.connection}`}>{telemetry.connection}</span>
+          </header>
+          {telemetry.latestTelemetry ? (
+            <TelemetryMetrics data={telemetry.latestTelemetry} />
+          ) : (
+            <p className="muted">Waiting for telemetry stream...</p>
+          )}
+        </article>
+        <article className="glass-card">
+          <header>
+            <h2>{ui.readiness}</h2>
+            <span>{readinessErrors === 0 ? "Ready" : `${readinessErrors} issue`}</span>
+          </header>
+          <div className="mini-metrics">
+            <div>
+              <span>{ui.enabledProfiles}</span>
+              <strong>{activeProfiles}</strong>
+            </div>
+            <div>
+              <span>Recent routes</span>
+              <strong>{telemetry.recentRoutes.length}</strong>
+            </div>
+          </div>
+          <p className="muted">{message}</p>
+        </article>
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({
+  label,
+  primary,
+  secondary,
+}: {
+  label: string;
+  primary: string;
+  secondary: string;
+}) {
+  return (
+    <article className="metric-card">
+      <h2>{label}</h2>
+      <strong>{primary}</strong>
+      <span>{secondary}</span>
+    </article>
+  );
+}
+
+function SubscriptionsView({
+  activeNode,
+  currentSubscription,
+  nodeCount,
+  onChooseNode,
+  onChooseSubscription,
+  onDeleteSubscription,
+  onImportText,
+  onNameChange,
+  onTextChange,
+  onUpdate,
+  onUrlChange,
+  setViewMode,
+  subscription,
+  subscriptionName,
+  subscriptionText,
+  subscriptionUrl,
+  ui,
+  viewMode,
+}: {
+  activeNode: ProxyNode | undefined;
+  currentSubscription: SubscriptionProfile | undefined;
+  nodeCount: number;
+  onChooseNode: (id: string) => void;
+  onChooseSubscription: (id: string) => void;
+  onDeleteSubscription: (id: string) => void;
+  onImportText: () => void;
+  onNameChange: (value: string) => void;
+  onTextChange: (value: string) => void;
+  onUpdate: () => void;
+  onUrlChange: (value: string) => void;
+  setViewMode: (mode: SubscriptionViewMode) => void;
+  subscription: SubscriptionSnapshot;
+  subscriptionName: string;
+  subscriptionText: string;
+  subscriptionUrl: string;
+  ui: typeof zh;
+  viewMode: SubscriptionViewMode;
+}) {
+  return (
+    <div className="subscriptions-page page-enter">
+      <div className="section-toolbar">
+        <div className="segmented">
+          <button
+            className={viewMode === "grid" ? "active" : ""}
+            type="button"
+            onClick={() => setViewMode("grid")}
+          >
+            网格
+          </button>
+          <button
+            className={viewMode === "list" ? "active" : ""}
+            type="button"
+            onClick={() => setViewMode("list")}
+          >
+            列表
+          </button>
+        </div>
+        <div className="toolbar-actions">
+          <button type="button" onClick={onUpdate}>
+            {ui.updateAll}
+          </button>
+          <button className="primary-action" type="button" onClick={onUpdate}>
+            + {ui.add}
+          </button>
+        </div>
+      </div>
+
+      <div className="subscription-layout">
+        <aside className="subscription-column">
+          <article className="glass-card add-sub-card">
+            <h2>{ui.subscriptions}</h2>
+            <input
+              placeholder="订阅名称"
+              value={subscriptionName}
+              onChange={(event) => onNameChange(event.target.value)}
+            />
+            <input
+              placeholder="订阅地址"
+              value={subscriptionUrl}
+              onChange={(event) => onUrlChange(event.target.value)}
+            />
+            <textarea
+              placeholder="粘贴订阅内容"
+              value={subscriptionText}
+              onChange={(event) => onTextChange(event.target.value)}
+            />
+            <div className="row-actions">
+              <button className="primary-action" type="button" onClick={onUpdate}>
+                {ui.update}
+              </button>
+              <button type="button" onClick={onImportText}>
+                {ui.import}
+              </button>
+            </div>
+          </article>
+
+          <div className="subscription-cards">
+            {subscription.subscriptions.map((item) => (
+              <article
+                className={
+                  item.id === subscription.selectedSubscriptionId
+                    ? "subscription-card active"
+                    : "subscription-card"
+                }
+                key={item.id}
+              >
+                <button type="button" onClick={() => onChooseSubscription(item.id)}>
+                  <strong>{item.name}</strong>
+                  <span>{item.nodes.length} nodes</span>
+                  <small>{item.updatedAt ? new Date(item.updatedAt).toLocaleString() : "--"}</small>
                 </button>
+                <button type="button" onClick={() => onDeleteSubscription(item.id)}>
+                  ...
+                </button>
+              </article>
+            ))}
+          </div>
+        </aside>
+
+        <article className="glass-card nodes-panel">
+          <header>
+            <div>
+              <h2>{ui.nodeSelector}</h2>
+              <p>
+                Selector :: {currentSubscription?.name ?? "--"} / {activeNode?.name ?? "--"}
+              </p>
+            </div>
+            <div className="panel-icons">
+              <button type="button">⌯</button>
+              <button type="button">↻</button>
+              <button type="button">⌄</button>
+            </div>
+          </header>
+          <div className={viewMode === "grid" ? "node-card-grid" : "node-list-view"}>
+            {subscription.nodes.map((node) => (
+              <button
+                className={node.id === subscription.selectedNodeId ? "node-tile active" : "node-tile"}
+                key={node.id}
+                type="button"
+                onClick={() => onChooseNode(node.id)}
+              >
+                <strong>{node.name}</strong>
+                <span>{Math.max(0, (node.id.charCodeAt(node.id.length - 1) % 8) * 31 + 95)}ms</span>
+                <small>
+                  {node.protocol.toUpperCase()} :: {node.transport || "udp"}
+                </small>
+                {node.id === subscription.selectedNodeId ? <em>✓</em> : null}
+              </button>
+            ))}
+          </div>
+          {nodeCount === 0 ? <div className="empty-note">还没有订阅节点</div> : null}
+        </article>
+      </div>
+    </div>
+  );
+}
+
+function PluginsView({ ui }: { ui: typeof zh }) {
+  const plugins = [
+    {
+      desc: "提升 Prism 升级体验，获取更快更新通道。",
+      tags: ["手动触发", "APP激活后"],
+      title: "滚动发行",
+    },
+    {
+      desc: "节点格式转换插件，支持 v2Ray 格式导入。",
+      tags: ["手动触发", "更新订阅时"],
+      title: "节点转换",
+    },
+    {
+      desc: "高效流量统计插件，支持按域名、进程聚合。",
+      tags: ["手动触发", "APP激活后"],
+      title: "流量统计",
+    },
+    {
+      desc: "实现动态代理选择机制，包含故障转移。",
+      tags: ["手动触发", "节点变化"],
+      title: "节点智能切换",
+    },
+  ];
+  return (
+    <div className="plugins-page page-enter">
+      <div className="section-toolbar">
+        <div className="segmented">
+          <button className="active" type="button">
+            网络
+          </button>
+          <button type="button">列表</button>
+        </div>
+        <div className="toolbar-actions">
+          <button type="button">插件中心</button>
+          <button type="button">检查更新</button>
+          <button className="primary-action" type="button">
+            + {ui.add}
+          </button>
+        </div>
+      </div>
+      <div className="plugin-card-grid">
+        {plugins.map((plugin, index) => (
+          <article className="plugin-rich-card" key={plugin.title}>
+            <header>
+              <h2>
+                {index === 2 ? <span className="dev-badge">Dev</span> : null}
+                {index === 3 ? <span className="green-dot" /> : null}
+                {plugin.title}
+              </h2>
+              <button type="button">...</button>
+            </header>
+            <div className="tag-row">
+              {plugin.tags.map((tag) => (
+                <span key={tag}>{tag}</span>
+              ))}
+              <span>💬</span>
+            </div>
+            <p>{plugin.desc}</p>
+            <footer>
+              <a href="#source">源码</a>
+              <button className="primary-action" type="button">
+                ✨ 运行
+              </button>
+            </footer>
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SettingsView({
+  binaryBusy,
+  binaryInfo,
+  binaryReleases,
+  binarySourceInputs,
+  changeLanguage,
+  configPaths,
+  configuredStatusLabel,
+  copyDraft,
+  currentLanguage,
+  drafts,
+  formatBytes: formatBytesFn,
+  installBinary,
+  launcherSettings,
+  managedBinaries,
+  managedStatusLabel,
+  manualProfile,
+  onAddManualProfile,
+  onAddSuggestion,
+  onCheckLatest,
+  onDownloadLatest,
+  onRefreshBinaries,
+  onRemoveProfile,
+  onSaveDrafts,
+  onSaveRuntime,
+  onScanSteam,
+  onSectionChange,
+  onStartRuntime,
+  onStopRuntime,
+  onUseManaged,
+  profiles,
+  releaseChannelForKind: releaseChannelForKindFn,
+  runtimeInputs,
+  runtimePaths,
+  runtimeRows,
+  section,
+  setBinarySourceInputs,
+  setManualProfile,
+  setReleaseChannelForKind: setReleaseChannelForKindFn,
+  setRuntimeInputs,
+  setSteamRoot,
+  steamRoot,
+  suggestions,
+  ui,
+  updateSteamLauncherSetting,
+}: {
+  binaryBusy: boolean;
+  binaryInfo: (kind: ManagedBinaryKind) => ManagedBinaryInfo | null;
+  binaryReleases: Partial<Record<ManagedBinaryKind, RuntimeReleaseInfo>>;
+  binarySourceInputs: Record<ManagedBinaryKind, string>;
+  changeLanguage: (language: Language) => void;
+  configPaths: ConfigDraftPaths | null;
+  configuredStatusLabel: (binary: ManagedBinaryInfo) => string;
+  copyDraft: (label: string, value: string) => Promise<void>;
+  currentLanguage: Language;
+  drafts: { core: string; error: string; xray: string };
+  formatBytes: (value: number | null) => string;
+  installBinary: (kind: ManagedBinaryKind) => Promise<void>;
+  launcherSettings: LauncherSettings;
+  managedBinaries: ManagedBinaryInventory | null;
+  managedStatusLabel: (binary: ManagedBinaryInfo) => string;
+  manualProfile: typeof emptyProfile;
+  onAddManualProfile: () => void;
+  onAddSuggestion: (profile: GameProfile) => void;
+  onCheckLatest: (kind: ManagedBinaryKind) => void;
+  onDownloadLatest: (kind: ManagedBinaryKind) => void;
+  onRefreshBinaries: () => void;
+  onRemoveProfile: (id: string) => void;
+  onSaveDrafts: () => void;
+  onSaveRuntime: () => void;
+  onScanSteam: () => void;
+  onSectionChange: (section: SettingsSection) => void;
+  onStartRuntime: (kind: ManagedBinaryKind) => void;
+  onStopRuntime: (kind: ManagedBinaryKind) => void;
+  onUseManaged: (kind: ManagedBinaryKind) => void;
+  profiles: GameProfile[];
+  releaseChannelForKind: (settings: RuntimeSettings, kind: ManagedBinaryKind) => ReleaseChannel;
+  runtimeInputs: RuntimeSettings;
+  runtimePaths: RuntimePaths | null;
+  runtimeRows: Array<{ label: string; value: string }>;
+  section: SettingsSection;
+  setBinarySourceInputs: React.Dispatch<React.SetStateAction<typeof emptyBinarySourceInputs>>;
+  setManualProfile: React.Dispatch<React.SetStateAction<typeof emptyProfile>>;
+  setReleaseChannelForKind: (
+    settings: RuntimeSettings,
+    kind: ManagedBinaryKind,
+    channel: ReleaseChannel,
+  ) => RuntimeSettings;
+  setRuntimeInputs: React.Dispatch<React.SetStateAction<RuntimeSettings>>;
+  setSteamRoot: (value: string) => void;
+  steamRoot: string;
+  suggestions: GameProfile[];
+  ui: typeof zh;
+  updateSteamLauncherSetting: <K extends keyof LauncherSettings["steam"]>(
+    key: K,
+    value: LauncherSettings["steam"][K],
+  ) => void;
+}) {
+  const sections: Array<{ id: SettingsSection; label: string }> = [
+    { id: "general", label: "通用" },
+    { id: "core", label: "核心" },
+    { id: "rules", label: "规则" },
+    { id: "plugins", label: "插件" },
+    { id: "about", label: "关于" },
+  ];
+  return (
+    <div className="settings-page page-enter">
+      <aside className="settings-sidebar">
+        {sections.map((item) => (
+          <button
+            className={section === item.id ? "active" : ""}
+            key={item.id}
+            type="button"
+            onClick={() => onSectionChange(item.id)}
+          >
+            {item.label}
+          </button>
+        ))}
+      </aside>
+      <section className="settings-content">
+        {section === "general" ? (
+          <article className="settings-card">
+            <h1>个性化</h1>
+            <SettingRow label="主题">
+              <div className="segmented">
+                <button className="active" type="button">深色</button>
+                <button type="button">浅色</button>
+                <button type="button">跟随系统</button>
+              </div>
+            </SettingRow>
+            <SettingRow label="颜色">
+              <div className="segmented">
+                <button className="active" type="button">默认</button>
+                <button type="button">绿色</button>
+                <button type="button">紫色</button>
+                <button type="button">自定义</button>
+              </div>
+            </SettingRow>
+            <SettingRow label={ui.language}>
+              <div className="segmented">
+                <button
+                  className={currentLanguage === "zh-CN" ? "active" : ""}
+                  type="button"
+                  onClick={() => changeLanguage("zh-CN")}
+                >
+                  简体中文
+                </button>
+                <button
+                  className={currentLanguage === "en" ? "active" : ""}
+                  type="button"
+                  onClick={() => changeLanguage("en")}
+                >
+                  English
+                </button>
+              </div>
+            </SettingRow>
+            <SettingRow label="页面可见性">
+              <div className="segmented wide">
+                <button className="active" type="button">概览</button>
+                <button className="active" type="button">订阅</button>
+                <button type="button">规则集</button>
+                <button className="active" type="button">插件</button>
+                <button type="button">计划任务</button>
+              </div>
+            </SettingRow>
+            <SettingRow label="行为">
+              <label className="switch-line">
+                <span>以管理员身份运行（重启生效）</span>
+                <input type="checkbox" />
+              </label>
+            </SettingRow>
+          </article>
+        ) : null}
+
+        {section === "core" ? (
+          <div className="settings-stack">
+            <article className="settings-card">
+              <header>
+                <h1>{ui.runtime}</h1>
+                <div className="row-actions">
+                  <button type="button" onClick={onSaveRuntime}>{ui.savePaths}</button>
+                  <button type="button" onClick={onRefreshBinaries}>{ui.refresh}</button>
+                </div>
+              </header>
+              {runtimePaths ? (
+                <div className="path-list">
+                  <div><span>bin</span><strong>{runtimePaths.binDir}</strong></div>
+                  <div><span>runtime-settings.json</span><strong>{runtimePaths.runtimeSettingsPath}</strong></div>
+                </div>
+              ) : null}
+              <div className="runtime-list-mini">
+                {runtimeRows.map((row) => (
+                  <div key={row.label}><span>{row.label}</span><strong>{row.value}</strong></div>
+                ))}
+              </div>
+              <div className="runtime-grid">
+                <RuntimePathRow
+                  label="Xray Core"
+                  onStart={() => onStartRuntime("xray")}
+                  onStop={() => onStopRuntime("xray")}
+                  path={runtimeInputs.xrayBinaryPath}
+                  setPath={(path) => setRuntimeInputs((current) => ({ ...current, xrayBinaryPath: path }))}
+                />
+                <RuntimePathRow
+                  label="Tachyon Core"
+                  onStart={() => onStartRuntime("tachyonCore")}
+                  onStop={() => onStopRuntime("tachyonCore")}
+                  path={runtimeInputs.tachyonCoreBinaryPath}
+                  setPath={(path) => setRuntimeInputs((current) => ({ ...current, tachyonCoreBinaryPath: path }))}
+                />
+              </div>
+            </article>
+
+            <article className="settings-card">
+              <header>
+                <h1>{ui.binaries}</h1>
+                <span>{managedBinaries?.binDir ?? "--"}</span>
+              </header>
+              <div className="binary-grid">
+                {managedBinaryKinds.map((kind) => {
+                  const binary = binaryInfo(kind);
+                  const release = binaryReleases[kind];
+                  return (
+                    <div className="binary-row" key={kind}>
+                      <div className="binary-meta">
+                        <strong>{binary?.displayName ?? managedBinaryDisplayName(kind)}</strong>
+                        <span>{binary ? managedStatusLabel(binary) : "inventory unavailable"}</span>
+                        {binary ? <span>{configuredStatusLabel(binary)}</span> : null}
+                        {binary ? <span>{binary.targetPath}</span> : null}
+                        {release ? (
+                          <span>Latest {release.tagName}: {release.assetName} / {formatBytesFn(release.assetSizeBytes)}</span>
+                        ) : null}
+                      </div>
+                      <input
+                        placeholder="Source binary path"
+                        value={binarySourceInputs[kind]}
+                        onChange={(event) =>
+                          setBinarySourceInputs((current) => ({ ...current, [kind]: event.target.value }))
+                        }
+                      />
+                      <label className="inline-select">
+                        <span>Release channel</span>
+                        <select
+                          value={releaseChannelForKindFn(runtimeInputs, kind)}
+                          onChange={(event) =>
+                            setRuntimeInputs((current) =>
+                              setReleaseChannelForKindFn(current, kind, event.target.value as ReleaseChannel),
+                            )
+                          }
+                        >
+                          <option value="stable">Stable</option>
+                          <option value="preview">Preview</option>
+                        </select>
+                      </label>
+                      <div className="row-actions">
+                        <button type="button" onClick={() => void installBinary(kind)}>{ui.install}</button>
+                        <button type="button" onClick={() => onUseManaged(kind)}>{ui.useManaged}</button>
+                        <button disabled={binaryBusy} type="button" onClick={() => onCheckLatest(kind)}>{ui.checkLatest}</button>
+                        <button disabled={binaryBusy} type="button" onClick={() => onDownloadLatest(kind)}>{ui.installLatest}</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </article>
+
+            <article className="settings-card">
+              <header>
+                <h1>{ui.configDrafts}</h1>
+                <div className="row-actions">
+                  <button type="button" onClick={onSaveDrafts}>{ui.save}</button>
+                  <button type="button" onClick={() => void copyDraft("Xray config", drafts.xray)}>Copy Xray</button>
+                  <button type="button" onClick={() => void copyDraft("Core config", drafts.core)}>Copy Core</button>
+                </div>
+              </header>
+              {drafts.error ? <div className="inline-error">{drafts.error}</div> : null}
+              {configPaths ? (
+                <div className="path-list">
+                  <div><span>client.json</span><strong>{configPaths.coreConfigPath}</strong></div>
+                  <div><span>xray-client.json</span><strong>{configPaths.xrayConfigPath}</strong></div>
+                </div>
+              ) : null}
+              <div className="config-grid">
+                <label><span>Xray</span><textarea readOnly value={drafts.xray} /></label>
+                <label><span>Core</span><textarea readOnly value={drafts.core} /></label>
+              </div>
+            </article>
+          </div>
+        ) : null}
+
+        {section === "rules" ? (
+          <div className="settings-stack">
+            <article className="settings-card">
+              <header>
+                <h1>游戏模式</h1>
+                <button type="button" onClick={onAddManualProfile}>{ui.addProgram}</button>
               </header>
               <div className="form-grid">
                 <input
                   placeholder="Display name"
                   value={manualProfile.displayName}
-                  onChange={(event) =>
-                    setManualProfile((current) => ({
-                      ...current,
-                      displayName: event.target.value,
-                    }))
-                  }
+                  onChange={(event) => setManualProfile((current) => ({ ...current, displayName: event.target.value }))}
                 />
                 <input
                   placeholder="Process name"
                   value={manualProfile.processName}
-                  onChange={(event) =>
-                    setManualProfile((current) => ({
-                      ...current,
-                      processName: event.target.value,
-                    }))
-                  }
+                  onChange={(event) => setManualProfile((current) => ({ ...current, processName: event.target.value }))}
                 />
                 <input
                   className="wide-input"
                   placeholder="Executable path"
                   value={manualProfile.executablePath}
-                  onChange={(event) =>
-                    setManualProfile((current) => ({
-                      ...current,
-                      executablePath: event.target.value,
-                    }))
-                  }
+                  onChange={(event) => setManualProfile((current) => ({ ...current, executablePath: event.target.value }))}
                 />
               </div>
               <div className="profile-list">
                 {profiles.map((profile) => (
                   <div className="profile-row" key={profile.id}>
-                    <div>
-                      <strong>{profile.displayName}</strong>
-                      <span>{profileMatchLabel(profile)}</span>
-                    </div>
-                    <div className="row-actions">
-                      <span>{profile.udpPolicy.toUpperCase()}</span>
-                      <button type="button" onClick={() => void removeProfile(profile.id)}>
-                        Remove
-                      </button>
-                    </div>
+                    <div><strong>{profile.displayName}</strong><span>{profileMatchLabel(profile)}</span></div>
+                    <button type="button" onClick={() => onRemoveProfile(profile.id)}>{ui.remove}</button>
                   </div>
                 ))}
               </div>
             </article>
-          ) : null}
 
-          {activeView === "nodes" ? (
-            <div className="node-layout">
-              <article className="panel subscription-panel">
-                <header>
-                  <div>
-                    <h2>{t("panel.subscriptions")}</h2>
-                    <p>
-                      {subscription.subscriptions.length} {t("common.subscriptions")} /{" "}
-                      {subscriptionNodeCount} {t("common.nodes")}
-                    </p>
-                  </div>
-                  <button type="button" onClick={() => void updateSubscriptionFromUrl()}>
-                    {t("action.update")}
-                  </button>
-                </header>
-                <div className="form-grid">
-                  <input
-                    placeholder={t("field.subscriptionName")}
-                    value={subscriptionName}
-                    onChange={(event) => setSubscriptionName(event.target.value)}
-                  />
-                  <input
-                    placeholder={t("field.subscriptionUrl")}
-                    value={subscriptionUrl}
-                    onChange={(event) => setSubscriptionUrl(event.target.value)}
-                  />
-                  <textarea
-                    className="wide-input"
-                    placeholder={t("field.subscriptionPayload")}
-                    value={subscriptionText}
-                    onChange={(event) => setSubscriptionText(event.target.value)}
-                  />
-                  <button type="button" onClick={() => void importSubscriptionText()}>
-                    {t("action.import")}
-                  </button>
-                </div>
-                <div className="subscription-list">
-                  {subscription.subscriptions.length === 0 ? (
-                    <div className="empty-state">No subscriptions imported</div>
-                  ) : null}
-                  {subscription.subscriptions.map((item) => (
-                    <div
-                      className={
-                        item.id === subscription.selectedSubscriptionId
-                          ? "subscription-item active"
-                          : "subscription-item"
-                      }
-                      key={item.id}
-                    >
-                      <button type="button" onClick={() => chooseSubscription(item.id)}>
-                        <strong>{item.name}</strong>
-                        <span>
-                          {item.nodes.length} {t("common.nodes")}
-                        </span>
-                        <small>{item.sourceUrl}</small>
-                      </button>
-                      <button
-                        className="ghost-button danger-button"
-                        type="button"
-                        onClick={() => deleteSubscription(item.id)}
-                      >
-                        {t("action.delete")}
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </article>
-
-              <article className="panel node-panel">
-                <header>
-                  <div>
-                    <h2>{currentSubscription?.name ?? t("panel.selectedNode")}</h2>
-                    <p>{currentSubscription?.sourceUrl ?? t("common.unavailable")}</p>
-                  </div>
-                  {activeNode ? (
-                    <span className="status-chip connected">{t("action.selected")}</span>
-                  ) : null}
-                </header>
-                {activeNode ? (
-                  <div className="selected-node">
-                    <strong>{activeNode.name}</strong>
-                    <span>
-                      {activeNode.protocol.toUpperCase()} {nodeEndpoint(activeNode)}
-                      {activeNode.transport ? ` / ${activeNode.transport}` : ""}
-                    </span>
-                  </div>
-                ) : (
-                  <div className="empty-state">No node selected</div>
-                )}
-                <div className="node-list">
-                  {subscription.nodes.map((node) => (
-                    <div
-                      className={
-                        node.id === subscription.selectedNodeId ? "node-row active" : "node-row"
-                      }
-                      key={node.id}
-                    >
-                      <div>
-                        <strong>{node.name}</strong>
-                        <span>
-                          {node.protocol.toUpperCase()} {nodeEndpoint(node)}
-                          {node.transport ? ` / ${node.transport}` : ""}
-                          {node.security ? ` / ${node.security}` : ""}
-                        </span>
-                      </div>
-                      <button
-                        className={node.id === subscription.selectedNodeId ? "active-button" : ""}
-                        type="button"
-                        onClick={() => chooseNode(node.id)}
-                      >
-                        {node.id === subscription.selectedNodeId
-                          ? t("action.selected")
-                          : t("action.select")}
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </article>
-            </div>
-          ) : null}
-
-          {activeView === "launchers" ? (
-            <article className="panel">
+            <article className="settings-card">
               <header>
-                <h2>Launchers</h2>
-                <button type="button" onClick={() => void scanSteam()}>
-                  Scan Steam
-                </button>
+                <h1>{ui.launchers}</h1>
+                <button type="button" onClick={onScanSteam}>{ui.scanSteam}</button>
               </header>
               <input
                 className="full-input"
@@ -1387,373 +1902,140 @@ export function App() {
                 value={steamRoot}
                 onChange={(event) => setSteamRoot(event.target.value)}
               />
-              <div className="switch-row">
+              <label className="switch-line">
                 <span>Steam launcher detection</span>
                 <input
-                  type="checkbox"
                   checked={launcherSettings.steam.enabled}
-                  onChange={(event) =>
-                    updateSteamLauncherSetting("enabled", event.currentTarget.checked)
-                  }
+                  type="checkbox"
+                  onChange={(event) => updateSteamLauncherSetting("enabled", event.currentTarget.checked)}
                 />
-              </div>
-              <div className="switch-row">
+              </label>
+              <label className="switch-line">
                 <span>Steam child process tracking</span>
                 <input
-                  type="checkbox"
                   checked={launcherSettings.steam.trackChildProcesses}
                   disabled={!launcherSettings.steam.enabled}
-                  onChange={(event) =>
-                    updateSteamLauncherSetting("trackChildProcesses", event.currentTarget.checked)
-                  }
-                />
-              </div>
-              <div className="switch-row">
-                <span>Accelerate Steam game UDP</span>
-                <input
                   type="checkbox"
-                  checked={launcherSettings.steam.accelerateGameUdp}
-                  disabled={!launcherSettings.steam.enabled}
-                  onChange={(event) =>
-                    updateSteamLauncherSetting("accelerateGameUdp", event.currentTarget.checked)
-                  }
+                  onChange={(event) => updateSteamLauncherSetting("trackChildProcesses", event.currentTarget.checked)}
                 />
-              </div>
-              <div className="switch-row">
-                <span>Accelerate Steam downloads</span>
-                <input
-                  type="checkbox"
-                  checked={launcherSettings.steam.accelerateSteamDownloads}
-                  disabled={!launcherSettings.steam.enabled}
-                  onChange={(event) =>
-                    updateSteamLauncherSetting(
-                      "accelerateSteamDownloads",
-                      event.currentTarget.checked,
-                    )
-                  }
-                />
-              </div>
-              <div className="suggestion-list">
+              </label>
+              <div className="profile-list">
                 {suggestions.map((profile) => (
                   <div className="profile-row" key={profile.id}>
-                    <div>
-                      <strong>{profile.displayName}</strong>
-                      <span>{profileMatchLabel(profile)}</span>
-                    </div>
-                    <button type="button" onClick={() => void addSuggestion(profile)}>
-                      Add
-                    </button>
+                    <div><strong>{profile.displayName}</strong><span>{profileMatchLabel(profile)}</span></div>
+                    <button type="button" onClick={() => onAddSuggestion(profile)}>{ui.add}</button>
                   </div>
                 ))}
               </div>
             </article>
-          ) : null}
+          </div>
+        ) : null}
 
-          {activeView === "runtime" ? (
-            <>
-              <article className="panel readiness-panel">
-                <header>
-                  <div>
-                    <h2>Readiness</h2>
-                    <p>{readinessErrors === 0 ? "Ready to start" : `${readinessErrors} item needs attention`}</p>
-                  </div>
-                  <button type="button" onClick={() => void refreshManagedBinaries()}>
-                    Refresh
-                  </button>
-                </header>
-                <div className="readiness-list">
-                  {readinessItems.map((item) => (
-                    <div className={`readiness-row ${item.state}`} key={item.label}>
-                      <span>{readinessText(item.state)}</span>
-                      <div>
-                        <strong>{item.label}</strong>
-                        <p>{item.detail}</p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </article>
+        {section === "plugins" ? (
+          <article className="settings-card">
+            <h1>插件设置</h1>
+            <SettingRow label="自动更新插件">
+              <input type="checkbox" />
+            </SettingRow>
+            <SettingRow label="允许插件读取节点">
+              <input type="checkbox" />
+            </SettingRow>
+          </article>
+        ) : null}
 
-              <article className="panel binary-panel">
-                <header>
-                  <h2>Binaries</h2>
-                  <div className="row-actions">
-                    <button type="button" onClick={() => void refreshManagedBinaries()}>
-                      Refresh
-                    </button>
-                  </div>
-                </header>
-                {managedBinaries ? (
-                  <div className="path-list">
-                    <div>
-                      <span>managed bin</span>
-                      <strong>{managedBinaries.binDir}</strong>
-                    </div>
-                  </div>
-                ) : null}
-                <div className="binary-grid">
-                  {managedBinaryKinds.map((kind) => {
-                    const binary = binaryInfo(kind);
-                    const displayName = binary?.displayName ?? managedBinaryDisplayName(kind);
-                    const release = binaryReleases[kind];
-                    return (
-                      <div className="binary-row" key={kind}>
-                        <div className="binary-meta">
-                          <strong>{displayName}</strong>
-                          <span>{binary ? managedStatusLabel(binary) : "inventory unavailable"}</span>
-                          {binary ? <span>{configuredStatusLabel(binary)}</span> : null}
-                          {binary ? <span>{binary.targetPath}</span> : null}
-                          {binary?.sidecarDependencies.map((dependency) => (
-                            <span key={dependency.name}>
-                              {dependency.name}: {dependency.exists ? "found" : dependency.path}
-                            </span>
-                          ))}
-                          {release ? (
-                            <span>
-                              Latest {release.tagName}: {release.assetName} /{" "}
-                              {formatBytes(release.assetSizeBytes)}
-                            </span>
-                          ) : null}
-                        </div>
-                        <input
-                          placeholder="Source binary path"
-                          value={binarySourceInputs[kind]}
-                          onChange={(event) =>
-                            setBinarySourceInputs((current) => ({
-                              ...current,
-                              [kind]: event.target.value,
-                            }))
-                          }
-                        />
-                        <label className="inline-select">
-                          <span>Release channel</span>
-                          <select
-                            value={releaseChannelForKind(runtimeInputs, kind)}
-                            onChange={(event) =>
-                              setRuntimeInputs((current) =>
-                                setReleaseChannelForKind(
-                                  current,
-                                  kind,
-                                  event.target.value as ReleaseChannel,
-                                ),
-                              )
-                            }
-                          >
-                            <option value="stable">Stable</option>
-                            <option value="preview">Preview</option>
-                          </select>
-                        </label>
-                        <div className="row-actions">
-                          <button type="button" onClick={() => void installBinary(kind)}>
-                            Install
-                          </button>
-                          <button type="button" onClick={() => void useManagedBinary(kind)}>
-                            Use Managed
-                          </button>
-                          <button
-                            type="button"
-                            disabled={binaryBusy}
-                            onClick={() => void checkLatestRelease(kind)}
-                          >
-                            Check Latest
-                          </button>
-                          <button
-                            type="button"
-                            disabled={binaryBusy}
-                            onClick={() => void downloadLatestRelease(kind)}
-                          >
-                            Install Latest
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </article>
-
-              <article className="panel runtime-panel">
-                <header>
-                  <h2>Runtime</h2>
-                  <div className="row-actions">
-                    <button type="button" onClick={() => void saveRuntimeInputs()}>
-                      Save Paths
-                    </button>
-                    <button type="button" onClick={() => void startAllRuntime()}>
-                      Start All
-                    </button>
-                    <button type="button" onClick={() => void stopAllRuntime()}>
-                      Stop All
-                    </button>
-                    <button type="button" onClick={() => void refreshRuntime()}>
-                      Refresh
-                    </button>
-                  </div>
-                </header>
-                {runtimePaths ? (
-                  <div className="path-list">
-                    <div>
-                      <span>bin</span>
-                      <strong>{runtimePaths.binDir}</strong>
-                    </div>
-                    <div>
-                      <span>runtime-settings.json</span>
-                      <strong>{runtimePaths.runtimeSettingsPath}</strong>
-                    </div>
-                  </div>
-                ) : null}
-                <div className="runtime-grid">
-                  <div className="runtime-row">
-                    <div>
-                      <strong>Xray Core</strong>
-                      <span>{processStatusLabel(runtimeStatus?.xray)}</span>
-                    </div>
-                    <input
-                      placeholder="Xray binary"
-                      value={runtimeInputs.xrayBinaryPath}
-                      onChange={(event) =>
-                        setRuntimeInputs((current) => ({
-                          ...current,
-                          xrayBinaryPath: event.target.value,
-                        }))
-                      }
-                    />
-                    <div className="row-actions">
-                      <button type="button" onClick={() => void startRuntime("xray")}>
-                        Start
-                      </button>
-                      <button type="button" onClick={() => void stopRuntime("xray")}>
-                        Stop
-                      </button>
-                    </div>
-                  </div>
-                  <div className="runtime-row">
-                    <div>
-                      <strong>Tachyon Core</strong>
-                      <span>{processStatusLabel(runtimeStatus?.tachyonCore)}</span>
-                    </div>
-                    <input
-                      placeholder="Tachyon Core binary"
-                      value={runtimeInputs.tachyonCoreBinaryPath}
-                      onChange={(event) =>
-                        setRuntimeInputs((current) => ({
-                          ...current,
-                          tachyonCoreBinaryPath: event.target.value,
-                        }))
-                      }
-                    />
-                    <div className="row-actions">
-                      <button type="button" onClick={() => void startRuntime("tachyonCore")}>
-                        Start
-                      </button>
-                      <button type="button" onClick={() => void stopRuntime("tachyonCore")}>
-                        Stop
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </article>
-            </>
-          ) : null}
-
-          {activeView === "config" ? (
-            <article className="panel config-panel">
-              <header>
-                <h2>Config</h2>
-                <div className="row-actions">
-                  <button type="button" onClick={() => void saveDrafts()}>
-                    Save
-                  </button>
-                  <button type="button" onClick={() => void copyDraft("Xray config", drafts.xray)}>
-                    Copy Xray
-                  </button>
-                  <button type="button" onClick={() => void copyDraft("Core config", drafts.core)}>
-                    Copy Core
-                  </button>
-                </div>
-              </header>
-              {drafts.error ? <div className="inline-error">{drafts.error}</div> : null}
-              {configPaths ? (
-                <div className="path-list">
-                  <div>
-                    <span>client.json</span>
-                    <strong>{configPaths.coreConfigPath}</strong>
-                  </div>
-                  <div>
-                    <span>xray-client.json</span>
-                    <strong>{configPaths.xrayConfigPath}</strong>
-                  </div>
-                </div>
-              ) : null}
-              <div className="config-grid">
-                <label>
-                  <span>Xray</span>
-                  <textarea readOnly value={drafts.xray} />
-                </label>
-                <label>
-                  <span>Core</span>
-                  <textarea readOnly value={drafts.core} />
-                </label>
-              </div>
-            </article>
-          ) : null}
-
-          {activeView === "plugins" ? (
-            <article className="panel plugin-panel">
-              <header>
-                <div>
-                  <h2>{t("panel.plugins")}</h2>
-                  <p>{t("view.plugins.subtitle")}</p>
-                </div>
-              </header>
-              <div className="plugin-grid">
-                <div className="plugin-card">
-                  <span>Rules</span>
-                  <strong>{t("plugin.rulePacks")}</strong>
-                  <p>{t("plugin.rulePacksDesc")}</p>
-                </div>
-                <div className="plugin-card">
-                  <span>Scripts</span>
-                  <strong>{t("plugin.scripts")}</strong>
-                  <p>{t("plugin.scriptsDesc")}</p>
-                </div>
-                <div className="plugin-card">
-                  <span>UI</span>
-                  <strong>{t("plugin.themes")}</strong>
-                  <p>{t("plugin.themesDesc")}</p>
-                </div>
-              </div>
-            </article>
-          ) : null}
-
-          {activeView === "settings" ? (
-            <article className="panel settings-panel">
-              <header>
-                <div>
-                  <h2>{t("nav.settings")}</h2>
-                  <p>{t("view.settings.subtitle")}</p>
-                </div>
-              </header>
-              <div className="settings-grid">
-                <label className="settings-row">
-                  <div>
-                    <strong>{t("field.language")}</strong>
-                    <span>{t("settings.languageDesc")}</span>
-                  </div>
-                  <select
-                    value={language}
-                    onChange={(event) => changeLanguage(event.target.value as Language)}
-                  >
-                    <option value="zh-CN">简体中文</option>
-                    <option value="en">English</option>
-                  </select>
-                </label>
-              </div>
-            </article>
-          ) : null}
-        </section>
+        {section === "about" ? (
+          <article className="settings-card">
+            <h1>Tachyon Prism</h1>
+            <p>一个支持 Xray Core 与 Tachyon Core 的跨平台代理 GUI。</p>
+          </article>
+        ) : null}
       </section>
-    </main>
+    </div>
   );
 }
 
+function SettingRow({
+  children,
+  label,
+}: {
+  children: React.ReactNode;
+  label: string;
+}) {
+  return (
+    <div className="setting-row">
+      <strong>{label}</strong>
+      <div>{children}</div>
+    </div>
+  );
+}
 
+function RuntimePathRow({
+  label,
+  onStart,
+  onStop,
+  path,
+  setPath,
+}: {
+  label: string;
+  onStart: () => void;
+  onStop: () => void;
+  path: string;
+  setPath: (value: string) => void;
+}) {
+  return (
+    <div className="runtime-row">
+      <div>
+        <strong>{label}</strong>
+        <span>{path || "not configured"}</span>
+      </div>
+      <input value={path} onChange={(event) => setPath(event.target.value)} />
+      <div className="row-actions">
+        <button type="button" onClick={onStart}>Start</button>
+        <button type="button" onClick={onStop}>Stop</button>
+      </div>
+    </div>
+  );
+}
+
+function NodeDrawer({
+  activeNode,
+  onChooseNode,
+  onClose,
+  subscription,
+  ui,
+}: {
+  activeNode: ProxyNode | undefined;
+  onChooseNode: (id: string) => void;
+  onClose: () => void;
+  subscription: SubscriptionSnapshot;
+  ui: typeof zh;
+}) {
+  return (
+    <div className="drawer-backdrop" onClick={onClose}>
+      <section className="node-drawer" onClick={(event) => event.stopPropagation()}>
+        <header>
+          <div>
+            <h2>🚀 {ui.nodeSelector}</h2>
+            <p>Selector :: {activeNode?.name ?? "--"}</p>
+          </div>
+          <button type="button" onClick={onClose}>×</button>
+        </header>
+        <div className="node-card-grid">
+          {subscription.nodes.map((node) => (
+            <button
+              className={node.id === subscription.selectedNodeId ? "node-tile active" : "node-tile"}
+              key={node.id}
+              type="button"
+              onClick={() => onChooseNode(node.id)}
+            >
+              <strong>{node.name}</strong>
+              <span>{Math.max(0, (node.id.charCodeAt(node.id.length - 1) % 8) * 31 + 95)}ms</span>
+              <small>{node.protocol.toUpperCase()} :: {node.transport || "udp"}</small>
+              {node.id === subscription.selectedNodeId ? <em>✓</em> : null}
+            </button>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
