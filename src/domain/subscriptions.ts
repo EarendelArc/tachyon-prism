@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeDesktop } from "./tauri";
 
 export type XrayOutboundProtocol =
   | "blackhole"
@@ -103,7 +103,7 @@ export async function fetchSubscriptionText(sourceUrl: string): Promise<string> 
   }
 
   try {
-    return await invoke<string>("fetch_subscription_text", { sourceUrl: url });
+    return await invokeDesktop<string>("fetch_subscription_text", { sourceUrl: url });
   } catch {
     const response = await fetch(url, {
       headers: {

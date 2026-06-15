@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeDesktop, isTauriRuntime } from "./tauri";
 
 export type ProcessState = "failed" | "running" | "stopped";
 
@@ -79,71 +79,148 @@ export interface RuntimeStatus {
 }
 
 export async function getRuntimePaths(): Promise<RuntimePaths> {
-  return invoke<RuntimePaths>("runtime_paths");
+  if (!isTauriRuntime()) {
+    return previewRuntimePaths();
+  }
+  return invokeDesktop<RuntimePaths>("runtime_paths");
 }
 
 export async function getRuntimeSettings(): Promise<RuntimeSettings> {
-  return invoke<RuntimeSettings>("runtime_settings");
+  if (!isTauriRuntime()) {
+    return previewRuntimeSettings();
+  }
+  return invokeDesktop<RuntimeSettings>("runtime_settings");
 }
 
 export async function saveRuntimeSettings(
   settings: RuntimeSettings,
 ): Promise<RuntimeSettings> {
-  return invoke<RuntimeSettings>("save_runtime_settings", { settings });
+  if (!isTauriRuntime()) {
+    return settings;
+  }
+  return invokeDesktop<RuntimeSettings>("save_runtime_settings", { settings });
 }
 
 export async function getManagedBinaries(): Promise<ManagedBinaryInventory> {
-  return invoke<ManagedBinaryInventory>("managed_binaries");
+  if (!isTauriRuntime()) {
+    return previewManagedBinaries();
+  }
+  return invokeDesktop<ManagedBinaryInventory>("managed_binaries");
 }
 
 export async function installManagedBinary(
   kind: ManagedBinaryKind,
   sourcePath: string,
 ): Promise<ManagedBinaryInventory> {
-  return invoke<ManagedBinaryInventory>("install_managed_binary", {
+  return invokeDesktop<ManagedBinaryInventory>("install_managed_binary", {
     kind,
     sourcePath,
   });
 }
 
 export async function getLatestXrayRelease(): Promise<RuntimeReleaseInfo> {
-  return invoke<RuntimeReleaseInfo>("latest_xray_release");
+  return invokeDesktop<RuntimeReleaseInfo>("latest_xray_release");
 }
 
 export async function installLatestXray(): Promise<RuntimeInstallResult> {
-  return invoke<RuntimeInstallResult>("install_latest_xray");
+  return invokeDesktop<RuntimeInstallResult>("install_latest_xray");
 }
 
 export async function getLatestTachyonCoreRelease(): Promise<RuntimeReleaseInfo> {
-  return invoke<RuntimeReleaseInfo>("latest_tachyon_core_release");
+  return invokeDesktop<RuntimeReleaseInfo>("latest_tachyon_core_release");
 }
 
 export async function installLatestTachyonCore(): Promise<RuntimeInstallResult> {
-  return invoke<RuntimeInstallResult>("install_latest_tachyon_core");
+  return invokeDesktop<RuntimeInstallResult>("install_latest_tachyon_core");
 }
 
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
-  return invoke<RuntimeStatus>("runtime_status");
+  if (!isTauriRuntime()) {
+    return previewRuntimeStatus();
+  }
+  return invokeDesktop<RuntimeStatus>("runtime_status");
 }
 
 export async function startXray(
   binaryPath: string,
   configPath: string,
 ): Promise<ProcessStatus> {
-  return invoke<ProcessStatus>("start_xray", { binaryPath, configPath });
+  return invokeDesktop<ProcessStatus>("start_xray", { binaryPath, configPath });
 }
 
 export async function stopXray(): Promise<ProcessStatus> {
-  return invoke<ProcessStatus>("stop_xray");
+  return invokeDesktop<ProcessStatus>("stop_xray");
 }
 
 export async function startTachyonCore(
   binaryPath: string,
   configPath: string,
 ): Promise<ProcessStatus> {
-  return invoke<ProcessStatus>("start_tachyon_core", { binaryPath, configPath });
+  return invokeDesktop<ProcessStatus>("start_tachyon_core", { binaryPath, configPath });
 }
 
 export async function stopTachyonCore(): Promise<ProcessStatus> {
-  return invoke<ProcessStatus>("stop_tachyon_core");
+  return invokeDesktop<ProcessStatus>("stop_tachyon_core");
+}
+
+function previewRuntimeSettings(): RuntimeSettings {
+  return {
+    tachyonCoreBinaryPath: "",
+    tachyonCoreReleaseChannel: "preview",
+    xrayBinaryPath: "",
+    xrayReleaseChannel: "stable",
+  };
+}
+
+function previewRuntimePaths(): RuntimePaths {
+  return {
+    binDir: "Preview mode",
+    runtimeSettingsPath: "Preview mode / runtime-settings.json",
+    tachyonCoreBinaryPath: "Preview mode / tachyon-core",
+    xrayBinaryPath: "Preview mode / xray",
+  };
+}
+
+function previewManagedBinaries(): ManagedBinaryInventory {
+  const settings = previewRuntimeSettings();
+  return {
+    binDir: "Preview mode",
+    runtimeSettings: settings,
+    tachyonCore: previewBinary("tachyonCore", "Tachyon Core"),
+    xray: previewBinary("xray", "Xray Core"),
+  };
+}
+
+function previewBinary(kind: ManagedBinaryKind, displayName: string): ManagedBinaryInfo {
+  return {
+    configuredExists: false,
+    configuredModifiedAt: null,
+    configuredPath: "",
+    configuredSizeBytes: null,
+    displayName,
+    kind,
+    managedExists: false,
+    managedModifiedAt: null,
+    managedSizeBytes: null,
+    sidecarDependencies: [],
+    targetPath: `Preview mode / ${displayName}`,
+  };
+}
+
+function previewRuntimeStatus(): RuntimeStatus {
+  return {
+    tachyonCore: stoppedPreviewProcess(),
+    xray: stoppedPreviewProcess(),
+  };
+}
+
+function stoppedPreviewProcess(): ProcessStatus {
+  return {
+    binaryPath: null,
+    configPath: null,
+    lastError: null,
+    pid: null,
+    startedAt: null,
+    state: "stopped",
+  };
 }

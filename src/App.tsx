@@ -72,6 +72,8 @@ type SettingsSection = "general" | "core" | "rules" | "plugins" | "about";
 type ReadinessState = "error" | "ok" | "warning";
 type SubscriptionViewMode = "grid" | "list";
 
+const prismViews: PrismView[] = ["overview", "subscriptions", "plugins", "settings"];
+
 interface ReadinessItem {
   detail: string;
   label: string;
@@ -396,6 +398,11 @@ function configuredStatusLabel(binary: ManagedBinaryInfo): string {
   return binary.configuredExists ? "configured path exists" : "configured path missing";
 }
 
+function viewFromHash(hash: string): PrismView {
+  const value = hash.replace(/^#\/?/, "");
+  return prismViews.includes(value as PrismView) ? (value as PrismView) : "overview";
+}
+
 function profileMatchLabel(profile: GameProfile): string {
   const labels = [
     ...profile.match.processNames,
@@ -553,7 +560,9 @@ function TelemetryMetrics({ data }: { data: TelemetryData }) {
 }
 
 export function App() {
-  const [activeView, setActiveView] = useState<PrismView>("overview");
+  const [activeView, setActiveView] = useState<PrismView>(() =>
+    viewFromHash(globalThis.location?.hash ?? ""),
+  );
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
   const [connection, setConnection] = useState<ConnectionState>("checking");
   const [profiles, setProfiles] = useState<GameProfile[]>(defaultGameProfiles);
@@ -1082,6 +1091,20 @@ export function App() {
     setMessage(nextLanguage === "zh-CN" ? "语言已更新" : "Language updated");
   }
 
+  function navigateView(view: PrismView) {
+    setActiveView(view);
+    const nextHash = `#${view}`;
+    if (globalThis.location?.hash !== nextHash) {
+      globalThis.history?.replaceState(null, "", nextHash);
+    }
+  }
+
+  useEffect(() => {
+    const onHashChange = () => setActiveView(viewFromHash(globalThis.location?.hash ?? ""));
+    globalThis.addEventListener?.("hashchange", onHashChange);
+    return () => globalThis.removeEventListener?.("hashchange", onHashChange);
+  }, []);
+
   useEffect(() => {
     void refreshProfiles();
     void getConfigPaths()
@@ -1153,7 +1176,7 @@ export function App() {
             className={item.id === activeView ? "top-nav-item active" : "top-nav-item"}
             key={item.id}
             type="button"
-            onClick={() => setActiveView(item.id)}
+            onClick={() => navigateView(item.id)}
           >
             <span>{item.icon}</span>
             {item.label}

@@ -6,3 +6,5 @@ src-tauri/gen/
 .idea/
 .vscode/
 *.log
+artifacts/
+artifacts-prism-*.png
