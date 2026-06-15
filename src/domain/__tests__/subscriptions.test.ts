@@ -163,6 +163,15 @@ describe("createSubscriptionSnapshot", () => {
     expect(next.selectedNodeId).toBe("node-bbbbbbbb");
   });
 
+  it("uses the last URL path segment as the default subscription name", () => {
+    const snapshot = createSubscriptionSnapshot(
+      "http://earendel.art:45098/unsubscribe/Earendel",
+      nodes,
+    );
+
+    expect(activeSubscription(snapshot)?.name).toBe("Earendel");
+  });
+
   it("throws when nodes array is empty", () => {
     expect(() => createSubscriptionSnapshot("url", [])).toThrow(
       "No supported nodes found",

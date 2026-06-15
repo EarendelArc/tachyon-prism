@@ -975,7 +975,12 @@ function normalizeSubscriptionName(name: string, sourceUrl: string): string {
   }
   try {
     const url = new URL(sourceUrl);
-    return url.hostname || "Subscription";
+    const pathSegments = safeDecodeURIComponent(url.pathname)
+      .split("/")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const pathName = pathSegments[pathSegments.length - 1];
+    return pathName || url.hostname || "Subscription";
   } catch {
     return "Subscription";
   }
