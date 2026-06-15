@@ -115,6 +115,7 @@ const zh = {
   coreSettings: "核心",
   currentNode: "当前节点",
   directMode: "直连",
+  directModeDesc: "直接连接所有流量",
   download: "下载",
   enabledProfiles: "启用规则",
   globalMode: "全局",
@@ -123,21 +124,26 @@ const zh = {
   installLatest: "安装最新版",
   language: "语言",
   launchers: "启动器",
+  list: "列表",
   memory: "内存",
   nodeSelector: "节点选择",
   overview: "概览",
   plugins: "插件",
   readiness: "就绪检查",
+  realTimeTraffic: "实时流量",
   refresh: "刷新",
   remove: "移除",
   rulesMode: "规则",
+  rulesModeDesc: "按照规则文件分流",
   runtime: "运行时",
   save: "保存",
   savePaths: "保存路径",
   scanSteam: "扫描 Steam",
   selected: "已选择",
   settings: "设置",
+  start: "启动",
   startAll: "启动全部",
+  stop: "停止",
   stopAll: "停止全部",
   subscriptions: "订阅",
   tachyon: "Tachyon",
@@ -147,6 +153,76 @@ const zh = {
   upload: "上传",
   useManaged: "使用托管",
   xray: "Xray",
+  aboutDescription: "一个支持 Xray Core 与 Tachyon Core 的跨平台代理 GUI。",
+  adminRestart: "以管理员身份运行（重启生效）",
+  allowPluginNodeAccess: "允许插件读取节点",
+  autoUpdatePlugins: "自动更新插件",
+  behavior: "行为",
+  checkUpdates: "检查更新",
+  color: "颜色",
+  copyCore: "复制 Core",
+  copyXray: "复制 Xray",
+  custom: "自定义",
+  dark: "深色",
+  defaultColor: "默认",
+  displayName: "显示名称",
+  downloadRate: "下载速率",
+  executablePath: "可执行文件路径",
+  followSystem: "跟随系统",
+  gameMode: "游戏模式",
+  globalModeDesc: "仅走 Global 策略组",
+  green: "绿色",
+  grid: "网格",
+  light: "浅色",
+  liveTelemetry: "实时遥测",
+  noNodeSelected: "未选择节点",
+  noSubscriptionNodes: "还没有订阅节点",
+  notConfigured: "未配置",
+  pageVisibility: "页面可见性",
+  personalized: "个性化",
+  pluginAllowNodeRead: "允许插件读取节点",
+  pluginAutoUpdate: "自动更新插件",
+  pluginCenter: "插件中心",
+  pluginRollingDesc: "提升 Prism 升级体验，获取更快更新通道。",
+  pluginRollingTitle: "滚动发行",
+  pluginSettings: "插件设置",
+  pluginStatsDesc: "高效流量统计插件，支持按域名、进程聚合。",
+  pluginStatsTitle: "流量统计",
+  pluginSwitchDesc: "实现动态代理选择机制，包含故障转移。",
+  pluginSwitchTitle: "节点智能切换",
+  pluginTriggerApp: "APP激活后",
+  pluginTriggerManual: "手动触发",
+  pluginTriggerNode: "节点变化",
+  pluginTriggerUpdate: "更新订阅时",
+  pluginTransformDesc: "节点格式转换插件，支持 v2Ray 格式导入。",
+  pluginTransformTitle: "节点转换",
+  processName: "进程名",
+  purple: "紫色",
+  quickStart: "快速启动",
+  ready: "Ready",
+  recentRoutes: "最近路由",
+  releaseChannel: "发布通道",
+  ruleSets: "规则集",
+  run: "运行",
+  scheduledTasks: "计划任务",
+  selector: "Selector",
+  settingsAbout: "关于",
+  settingsGeneral: "通用",
+  source: "源码",
+  sourceBinaryPath: "源二进制路径",
+  steamChildTracking: "Steam 子进程追踪",
+  steamLauncherDetection: "Steam 启动器检测",
+  steamRoot: "Steam 根目录",
+  subscriptionName: "订阅名称",
+  subscriptionPayload: "粘贴订阅内容",
+  subscriptionUrl: "订阅地址",
+  systemProxy: "系统代理",
+  theme: "主题",
+  totalTraffic: "总流量",
+  tunMode: "TUN模式",
+  uploadRate: "上传速率",
+  waitingTelemetry: "等待遥测流...",
+  workMode: "工作模式",
 };
 
 const en: typeof zh = {
@@ -161,6 +237,7 @@ const en: typeof zh = {
   coreSettings: "Core",
   currentNode: "Current Node",
   directMode: "Direct",
+  directModeDesc: "Direct all traffic",
   download: "Download",
   enabledProfiles: "Enabled Rules",
   globalMode: "Global",
@@ -169,21 +246,26 @@ const en: typeof zh = {
   installLatest: "Install Latest",
   language: "Language",
   launchers: "Launchers",
+  list: "List",
   memory: "Memory",
   nodeSelector: "Node Selector",
   overview: "Overview",
   plugins: "Plugins",
   readiness: "Readiness",
+  realTimeTraffic: "Realtime Traffic",
   refresh: "Refresh",
   remove: "Remove",
   rulesMode: "Rule",
+  rulesModeDesc: "Route by rules",
   runtime: "Runtime",
   save: "Save",
   savePaths: "Save Paths",
   scanSteam: "Scan Steam",
   selected: "Selected",
   settings: "Settings",
+  start: "Start",
   startAll: "Start All",
+  stop: "Stop",
   stopAll: "Stop All",
   subscriptions: "Subscriptions",
   tachyon: "Tachyon",
@@ -193,6 +275,76 @@ const en: typeof zh = {
   upload: "Upload",
   useManaged: "Use Managed",
   xray: "Xray",
+  aboutDescription: "A cross-platform proxy GUI for Xray Core and Tachyon Core.",
+  adminRestart: "Run as administrator (requires restart)",
+  allowPluginNodeAccess: "Allow plugins to read nodes",
+  autoUpdatePlugins: "Auto-update plugins",
+  behavior: "Behavior",
+  checkUpdates: "Check Updates",
+  color: "Color",
+  copyCore: "Copy Core",
+  copyXray: "Copy Xray",
+  custom: "Custom",
+  dark: "Dark",
+  defaultColor: "Default",
+  displayName: "Display name",
+  downloadRate: "Download rate",
+  executablePath: "Executable path",
+  followSystem: "Follow system",
+  gameMode: "Game Mode",
+  globalModeDesc: "Use only the Global policy group",
+  green: "Green",
+  grid: "Grid",
+  light: "Light",
+  liveTelemetry: "Live Telemetry",
+  noNodeSelected: "No node selected",
+  noSubscriptionNodes: "No subscription nodes yet",
+  notConfigured: "Not configured",
+  pageVisibility: "Page visibility",
+  personalized: "Personalization",
+  pluginAllowNodeRead: "Allow plugins to read nodes",
+  pluginAutoUpdate: "Auto-update plugins",
+  pluginCenter: "Plugin Center",
+  pluginRollingDesc: "Improve Prism update experience with faster preview channels.",
+  pluginRollingTitle: "Rolling Release",
+  pluginSettings: "Plugin Settings",
+  pluginStatsDesc: "Efficient traffic statistics by domain and process.",
+  pluginStatsTitle: "Traffic Stats",
+  pluginSwitchDesc: "Dynamic proxy selection with failover.",
+  pluginSwitchTitle: "Smart Node Switch",
+  pluginTriggerApp: "After app activation",
+  pluginTriggerManual: "Manual trigger",
+  pluginTriggerNode: "Node change",
+  pluginTriggerUpdate: "On subscription update",
+  pluginTransformDesc: "Node format converter with v2Ray-style imports.",
+  pluginTransformTitle: "Node Transform",
+  processName: "Process name",
+  purple: "Purple",
+  quickStart: "Quick Start",
+  ready: "Ready",
+  recentRoutes: "Recent routes",
+  releaseChannel: "Release channel",
+  ruleSets: "Rule sets",
+  run: "Run",
+  scheduledTasks: "Scheduled tasks",
+  selector: "Selector",
+  settingsAbout: "About",
+  settingsGeneral: "General",
+  source: "Source",
+  sourceBinaryPath: "Source binary path",
+  steamChildTracking: "Steam child process tracking",
+  steamLauncherDetection: "Steam launcher detection",
+  steamRoot: "Steam root",
+  subscriptionName: "Subscription name",
+  subscriptionPayload: "Paste subscription payload",
+  subscriptionUrl: "Subscription URL",
+  systemProxy: "System Proxy",
+  theme: "Theme",
+  totalTraffic: "Total Traffic",
+  tunMode: "TUN Mode",
+  uploadRate: "Upload rate",
+  waitingTelemetry: "Waiting for telemetry stream...",
+  workMode: "Work Mode",
 };
 
 function selectedNode(snapshot: SubscriptionSnapshot): ProxyNode | undefined {
@@ -1012,10 +1164,10 @@ export function App() {
       <section className="quick-strip">
         <div className="mode-pills">
           <button className="pill active" type="button">
-            系统代理
+            {ui.systemProxy}
           </button>
           <button className="pill active" type="button">
-            TUN模式
+            {ui.tunMode}
           </button>
         </div>
         <div className="strip-actions">
@@ -1186,8 +1338,8 @@ function OverviewView({
   return (
     <div className="overview-page page-enter">
       <div className="overview-metrics">
-        <MetricCard label="实时流量" primary={`↑ ${formatRate(traffic.up)}`} secondary={`↓ ${formatRate(traffic.down)}`} />
-        <MetricCard label="总流量" primary={`↑ ${formatBytes(traffic.up)}`} secondary={`↓ ${formatBytes(traffic.total)}`} />
+        <MetricCard label={ui.realTimeTraffic} primary={`↑ ${formatRate(traffic.up)}`} secondary={`↓ ${formatRate(traffic.down)}`} />
+        <MetricCard label={ui.totalTraffic} primary={`↑ ${formatBytes(traffic.up)}`} secondary={`↓ ${formatBytes(traffic.total)}`} />
         <MetricCard label={ui.activeConnections} primary={`${telemetry.latestTelemetry?.tgp_sessions ?? 0}`} secondary={`${nodeCount} nodes`} />
         <MetricCard label={ui.memory} primary={`${telemetry.latestTelemetry?.goroutines ?? 0}`} secondary="goroutines" />
       </div>
@@ -1197,8 +1349,8 @@ function OverviewView({
           <header>
             <h2>{ui.traffic}</h2>
             <div className="legend">
-              <span className="up-dot">● 上传速率</span>
-              <span className="down-dot">● 下载速率</span>
+              <span className="up-dot">● {ui.uploadRate}</span>
+              <span className="down-dot">● {ui.downloadRate}</span>
             </div>
           </header>
           <svg className="traffic-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Traffic chart">
@@ -1225,18 +1377,18 @@ function OverviewView({
 
         <aside className="overview-side">
           <article className="glass-card work-mode-card">
-            <h2>工作模式</h2>
+            <h2>{ui.workMode}</h2>
             <button className="mode-option" type="button">
               <strong>{ui.globalMode}</strong>
-              <span>仅走 Global 策略组</span>
+              <span>{ui.globalModeDesc}</span>
             </button>
             <button className="mode-option active" type="button">
               <strong>{ui.rulesMode}</strong>
-              <span>按照规则文件分流</span>
+              <span>{ui.rulesModeDesc}</span>
             </button>
             <button className="mode-option" type="button">
               <strong>{ui.directMode}</strong>
-              <span>直接连接所有流量</span>
+              <span>{ui.directModeDesc}</span>
             </button>
           </article>
 
@@ -1256,13 +1408,13 @@ function OverviewView({
                 <small>{nodeEndpoint(activeNode)}</small>
               </div>
             ) : (
-              <div className="empty-note">未选择节点</div>
+              <div className="empty-note">{ui.noNodeSelected}</div>
             )}
           </article>
 
           <article className="glass-card quick-start-card">
             <header>
-              <h2>快速启动</h2>
+              <h2>{ui.quickStart}</h2>
               <span className={`status-dot ${connection}`}>{connectionLabel}</span>
             </header>
             <div className="quick-buttons">
@@ -1288,19 +1440,19 @@ function OverviewView({
       <div className="overview-bottom">
         <article className="glass-card">
           <header>
-            <h2>实时遥测</h2>
+            <h2>{ui.liveTelemetry}</h2>
             <span className={`status-dot ${telemetry.connection}`}>{telemetry.connection}</span>
           </header>
           {telemetry.latestTelemetry ? (
             <TelemetryMetrics data={telemetry.latestTelemetry} />
           ) : (
-            <p className="muted">Waiting for telemetry stream...</p>
+            <p className="muted">{ui.waitingTelemetry}</p>
           )}
         </article>
         <article className="glass-card">
           <header>
             <h2>{ui.readiness}</h2>
-            <span>{readinessErrors === 0 ? "Ready" : `${readinessErrors} issue`}</span>
+            <span>{readinessErrors === 0 ? ui.ready : `${readinessErrors} issue`}</span>
           </header>
           <div className="mini-metrics">
             <div>
@@ -1308,7 +1460,7 @@ function OverviewView({
               <strong>{activeProfiles}</strong>
             </div>
             <div>
-              <span>Recent routes</span>
+              <span>{ui.recentRoutes}</span>
               <strong>{telemetry.recentRoutes.length}</strong>
             </div>
           </div>
@@ -1385,14 +1537,14 @@ function SubscriptionsView({
             type="button"
             onClick={() => setViewMode("grid")}
           >
-            网格
+            {ui.grid}
           </button>
           <button
             className={viewMode === "list" ? "active" : ""}
             type="button"
             onClick={() => setViewMode("list")}
           >
-            列表
+            {ui.list}
           </button>
         </div>
         <div className="toolbar-actions">
@@ -1410,17 +1562,17 @@ function SubscriptionsView({
           <article className="glass-card add-sub-card">
             <h2>{ui.subscriptions}</h2>
             <input
-              placeholder="订阅名称"
+              placeholder={ui.subscriptionName}
               value={subscriptionName}
               onChange={(event) => onNameChange(event.target.value)}
             />
             <input
-              placeholder="订阅地址"
+              placeholder={ui.subscriptionUrl}
               value={subscriptionUrl}
               onChange={(event) => onUrlChange(event.target.value)}
             />
             <textarea
-              placeholder="粘贴订阅内容"
+              placeholder={ui.subscriptionPayload}
               value={subscriptionText}
               onChange={(event) => onTextChange(event.target.value)}
             />
@@ -1462,7 +1614,7 @@ function SubscriptionsView({
             <div>
               <h2>{ui.nodeSelector}</h2>
               <p>
-                Selector :: {currentSubscription?.name ?? "--"} / {activeNode?.name ?? "--"}
+                {ui.selector} :: {currentSubscription?.name ?? "--"} / {activeNode?.name ?? "--"}
               </p>
             </div>
             <div className="panel-icons">
@@ -1488,7 +1640,7 @@ function SubscriptionsView({
               </button>
             ))}
           </div>
-          {nodeCount === 0 ? <div className="empty-note">还没有订阅节点</div> : null}
+          {nodeCount === 0 ? <div className="empty-note">{ui.noSubscriptionNodes}</div> : null}
         </article>
       </div>
     </div>
@@ -1498,24 +1650,24 @@ function SubscriptionsView({
 function PluginsView({ ui }: { ui: typeof zh }) {
   const plugins = [
     {
-      desc: "提升 Prism 升级体验，获取更快更新通道。",
-      tags: ["手动触发", "APP激活后"],
-      title: "滚动发行",
+      desc: ui.pluginRollingDesc,
+      tags: [ui.pluginTriggerManual, ui.pluginTriggerApp],
+      title: ui.pluginRollingTitle,
     },
     {
-      desc: "节点格式转换插件，支持 v2Ray 格式导入。",
-      tags: ["手动触发", "更新订阅时"],
-      title: "节点转换",
+      desc: ui.pluginTransformDesc,
+      tags: [ui.pluginTriggerManual, ui.pluginTriggerUpdate],
+      title: ui.pluginTransformTitle,
     },
     {
-      desc: "高效流量统计插件，支持按域名、进程聚合。",
-      tags: ["手动触发", "APP激活后"],
-      title: "流量统计",
+      desc: ui.pluginStatsDesc,
+      tags: [ui.pluginTriggerManual, ui.pluginTriggerApp],
+      title: ui.pluginStatsTitle,
     },
     {
-      desc: "实现动态代理选择机制，包含故障转移。",
-      tags: ["手动触发", "节点变化"],
-      title: "节点智能切换",
+      desc: ui.pluginSwitchDesc,
+      tags: [ui.pluginTriggerManual, ui.pluginTriggerNode],
+      title: ui.pluginSwitchTitle,
     },
   ];
   return (
@@ -1523,13 +1675,13 @@ function PluginsView({ ui }: { ui: typeof zh }) {
       <div className="section-toolbar">
         <div className="segmented">
           <button className="active" type="button">
-            网络
+            {ui.traffic}
           </button>
-          <button type="button">列表</button>
+          <button type="button">{ui.list}</button>
         </div>
         <div className="toolbar-actions">
-          <button type="button">插件中心</button>
-          <button type="button">检查更新</button>
+          <button type="button">{ui.pluginCenter}</button>
+          <button type="button">{ui.checkUpdates}</button>
           <button className="primary-action" type="button">
             + {ui.add}
           </button>
@@ -1554,9 +1706,9 @@ function PluginsView({ ui }: { ui: typeof zh }) {
             </div>
             <p>{plugin.desc}</p>
             <footer>
-              <a href="#source">源码</a>
+              <a href="#source">{ui.source}</a>
               <button className="primary-action" type="button">
-                ✨ 运行
+                ✨ {ui.run}
               </button>
             </footer>
           </article>
@@ -1665,11 +1817,11 @@ function SettingsView({
   ) => void;
 }) {
   const sections: Array<{ id: SettingsSection; label: string }> = [
-    { id: "general", label: "通用" },
-    { id: "core", label: "核心" },
-    { id: "rules", label: "规则" },
-    { id: "plugins", label: "插件" },
-    { id: "about", label: "关于" },
+    { id: "general", label: ui.settingsGeneral },
+    { id: "core", label: ui.coreSettings },
+    { id: "rules", label: ui.rulesMode },
+    { id: "plugins", label: ui.plugins },
+    { id: "about", label: ui.settingsAbout },
   ];
   return (
     <div className="settings-page page-enter">
@@ -1688,20 +1840,20 @@ function SettingsView({
       <section className="settings-content">
         {section === "general" ? (
           <article className="settings-card">
-            <h1>个性化</h1>
-            <SettingRow label="主题">
+            <h1>{ui.personalized}</h1>
+            <SettingRow label={ui.theme}>
               <div className="segmented">
-                <button className="active" type="button">深色</button>
-                <button type="button">浅色</button>
-                <button type="button">跟随系统</button>
+                <button className="active" type="button">{ui.dark}</button>
+                <button type="button">{ui.light}</button>
+                <button type="button">{ui.followSystem}</button>
               </div>
             </SettingRow>
-            <SettingRow label="颜色">
+            <SettingRow label={ui.color}>
               <div className="segmented">
-                <button className="active" type="button">默认</button>
-                <button type="button">绿色</button>
-                <button type="button">紫色</button>
-                <button type="button">自定义</button>
+                <button className="active" type="button">{ui.defaultColor}</button>
+                <button type="button">{ui.green}</button>
+                <button type="button">{ui.purple}</button>
+                <button type="button">{ui.custom}</button>
               </div>
             </SettingRow>
             <SettingRow label={ui.language}>
@@ -1722,18 +1874,18 @@ function SettingsView({
                 </button>
               </div>
             </SettingRow>
-            <SettingRow label="页面可见性">
+            <SettingRow label={ui.pageVisibility}>
               <div className="segmented wide">
-                <button className="active" type="button">概览</button>
-                <button className="active" type="button">订阅</button>
-                <button type="button">规则集</button>
-                <button className="active" type="button">插件</button>
-                <button type="button">计划任务</button>
+                <button className="active" type="button">{ui.overview}</button>
+                <button className="active" type="button">{ui.subscriptions}</button>
+                <button type="button">{ui.ruleSets}</button>
+                <button className="active" type="button">{ui.plugins}</button>
+                <button type="button">{ui.scheduledTasks}</button>
               </div>
             </SettingRow>
-            <SettingRow label="行为">
+            <SettingRow label={ui.behavior}>
               <label className="switch-line">
-                <span>以管理员身份运行（重启生效）</span>
+                <span>{ui.adminRestart}</span>
                 <input type="checkbox" />
               </label>
             </SettingRow>
@@ -1768,6 +1920,7 @@ function SettingsView({
                   onStop={() => onStopRuntime("xray")}
                   path={runtimeInputs.xrayBinaryPath}
                   setPath={(path) => setRuntimeInputs((current) => ({ ...current, xrayBinaryPath: path }))}
+                  ui={ui}
                 />
                 <RuntimePathRow
                   label="Tachyon Core"
@@ -1775,6 +1928,7 @@ function SettingsView({
                   onStop={() => onStopRuntime("tachyonCore")}
                   path={runtimeInputs.tachyonCoreBinaryPath}
                   setPath={(path) => setRuntimeInputs((current) => ({ ...current, tachyonCoreBinaryPath: path }))}
+                  ui={ui}
                 />
               </div>
             </article>
@@ -1800,14 +1954,14 @@ function SettingsView({
                         ) : null}
                       </div>
                       <input
-                        placeholder="Source binary path"
+                        placeholder={ui.sourceBinaryPath}
                         value={binarySourceInputs[kind]}
                         onChange={(event) =>
                           setBinarySourceInputs((current) => ({ ...current, [kind]: event.target.value }))
                         }
                       />
                       <label className="inline-select">
-                        <span>Release channel</span>
+                        <span>{ui.releaseChannel}</span>
                         <select
                           value={releaseChannelForKindFn(runtimeInputs, kind)}
                           onChange={(event) =>
@@ -1837,8 +1991,8 @@ function SettingsView({
                 <h1>{ui.configDrafts}</h1>
                 <div className="row-actions">
                   <button type="button" onClick={onSaveDrafts}>{ui.save}</button>
-                  <button type="button" onClick={() => void copyDraft("Xray config", drafts.xray)}>Copy Xray</button>
-                  <button type="button" onClick={() => void copyDraft("Core config", drafts.core)}>Copy Core</button>
+                  <button type="button" onClick={() => void copyDraft("Xray config", drafts.xray)}>{ui.copyXray}</button>
+                  <button type="button" onClick={() => void copyDraft("Core config", drafts.core)}>{ui.copyCore}</button>
                 </div>
               </header>
               {drafts.error ? <div className="inline-error">{drafts.error}</div> : null}
@@ -1860,23 +2014,23 @@ function SettingsView({
           <div className="settings-stack">
             <article className="settings-card">
               <header>
-                <h1>游戏模式</h1>
+                <h1>{ui.gameMode}</h1>
                 <button type="button" onClick={onAddManualProfile}>{ui.addProgram}</button>
               </header>
               <div className="form-grid">
                 <input
-                  placeholder="Display name"
+                  placeholder={ui.displayName}
                   value={manualProfile.displayName}
                   onChange={(event) => setManualProfile((current) => ({ ...current, displayName: event.target.value }))}
                 />
                 <input
-                  placeholder="Process name"
+                  placeholder={ui.processName}
                   value={manualProfile.processName}
                   onChange={(event) => setManualProfile((current) => ({ ...current, processName: event.target.value }))}
                 />
                 <input
                   className="wide-input"
-                  placeholder="Executable path"
+                  placeholder={ui.executablePath}
                   value={manualProfile.executablePath}
                   onChange={(event) => setManualProfile((current) => ({ ...current, executablePath: event.target.value }))}
                 />
@@ -1898,12 +2052,12 @@ function SettingsView({
               </header>
               <input
                 className="full-input"
-                placeholder="Steam root"
+                placeholder={ui.steamRoot}
                 value={steamRoot}
                 onChange={(event) => setSteamRoot(event.target.value)}
               />
               <label className="switch-line">
-                <span>Steam launcher detection</span>
+                <span>{ui.steamLauncherDetection}</span>
                 <input
                   checked={launcherSettings.steam.enabled}
                   type="checkbox"
@@ -1911,7 +2065,7 @@ function SettingsView({
                 />
               </label>
               <label className="switch-line">
-                <span>Steam child process tracking</span>
+                <span>{ui.steamChildTracking}</span>
                 <input
                   checked={launcherSettings.steam.trackChildProcesses}
                   disabled={!launcherSettings.steam.enabled}
@@ -1933,11 +2087,11 @@ function SettingsView({
 
         {section === "plugins" ? (
           <article className="settings-card">
-            <h1>插件设置</h1>
-            <SettingRow label="自动更新插件">
+            <h1>{ui.pluginSettings}</h1>
+            <SettingRow label={ui.pluginAutoUpdate}>
               <input type="checkbox" />
             </SettingRow>
-            <SettingRow label="允许插件读取节点">
+            <SettingRow label={ui.pluginAllowNodeRead}>
               <input type="checkbox" />
             </SettingRow>
           </article>
@@ -1946,7 +2100,7 @@ function SettingsView({
         {section === "about" ? (
           <article className="settings-card">
             <h1>Tachyon Prism</h1>
-            <p>一个支持 Xray Core 与 Tachyon Core 的跨平台代理 GUI。</p>
+            <p>{ui.aboutDescription}</p>
           </article>
         ) : null}
       </section>
@@ -1975,23 +2129,25 @@ function RuntimePathRow({
   onStop,
   path,
   setPath,
+  ui,
 }: {
   label: string;
   onStart: () => void;
   onStop: () => void;
   path: string;
   setPath: (value: string) => void;
+  ui: typeof zh;
 }) {
   return (
     <div className="runtime-row">
       <div>
         <strong>{label}</strong>
-        <span>{path || "not configured"}</span>
+        <span>{path || ui.notConfigured}</span>
       </div>
       <input value={path} onChange={(event) => setPath(event.target.value)} />
       <div className="row-actions">
-        <button type="button" onClick={onStart}>Start</button>
-        <button type="button" onClick={onStop}>Stop</button>
+        <button type="button" onClick={onStart}>{ui.start}</button>
+        <button type="button" onClick={onStop}>{ui.stop}</button>
       </div>
     </div>
   );
