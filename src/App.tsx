@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
@@ -63,16 +64,17 @@ import {
   saveLanguage,
   type Language,
 } from "./domain/i18n";
+import { isTauriRuntime } from "./domain/tauri";
 import { TelemetryClient } from "./domain/telemetry";
 import type { TelemetryData, TelemetryState } from "./domain/telemetry";
 
 type ConnectionState = "checking" | "connected" | "disconnected";
-type PrismView = "overview" | "subscriptions" | "plugins" | "settings";
+type PrismView = "overview" | "configs" | "subscriptions" | "plugins" | "settings";
 type SettingsSection = "general" | "core" | "rules" | "plugins" | "about";
 type ReadinessState = "error" | "ok" | "warning";
 type SubscriptionViewMode = "grid" | "list";
 
-const prismViews: PrismView[] = ["overview", "subscriptions", "plugins", "settings"];
+const prismViews: PrismView[] = ["overview", "configs", "subscriptions", "plugins", "settings"];
 
 interface ReadinessItem {
   detail: string;
@@ -83,6 +85,17 @@ interface ReadinessItem {
 interface TrafficSample {
   down: number;
   up: number;
+}
+
+interface PolicyGroup {
+  active: string;
+  chain: string[];
+  description: string;
+  icon: string;
+  id: string;
+  nodes: ProxyNode[];
+  title: string;
+  type: string;
 }
 
 const emptyProfile = {
@@ -110,9 +123,12 @@ const zh = {
   add: "添加",
   addProgram: "添加程序",
   autoSelect: "自动选择",
+  cardMode: "卡片模式",
   binaries: "核心文件",
   checkLatest: "检查更新",
+  collapseAll: "收起全部",
   configDrafts: "配置草稿",
+  configs: "配置",
   controller: "控制器",
   coreSettings: "核心",
   currentNode: "当前节点",
@@ -143,6 +159,8 @@ const zh = {
   scanSteam: "扫描 Steam",
   selected: "已选择",
   settings: "设置",
+  showUnavailableNodes: "显示不可用节点",
+  sortByDelay: "按延迟排序",
   start: "启动",
   startAll: "启动全部",
   stop: "停止",
@@ -170,18 +188,25 @@ const zh = {
   displayName: "显示名称",
   downloadRate: "下载速率",
   executablePath: "可执行文件路径",
+  expand: "展开",
+  filter: "筛选",
   followSystem: "跟随系统",
   gameMode: "游戏模式",
   globalModeDesc: "仅走 Global 策略组",
+  globalBlock: "全球拦截",
+  globalDirect: "全球直连",
   green: "绿色",
   grid: "网格",
+  leakFish: "漏网之鱼",
   light: "浅色",
   liveTelemetry: "实时遥测",
+  more: "更多",
   noNodeSelected: "未选择节点",
   noSubscriptionNodes: "还没有订阅节点",
   notConfigured: "未配置",
   pageVisibility: "页面可见性",
   personalized: "个性化",
+  policyGroups: "策略组",
   pluginAllowNodeRead: "允许插件读取节点",
   pluginAutoUpdate: "自动更新插件",
   pluginCenter: "插件中心",
@@ -204,6 +229,8 @@ const zh = {
   ready: "Ready",
   recentRoutes: "最近路由",
   releaseChannel: "发布通道",
+  refreshLatency: "刷新延迟",
+  routeByRule: "按规则和进程自动选择出口",
   ruleSets: "规则集",
   run: "运行",
   scheduledTasks: "计划任务",
@@ -222,7 +249,9 @@ const zh = {
   theme: "主题",
   totalTraffic: "总流量",
   tunMode: "TUN模式",
+  unavailable: "不可用",
   uploadRate: "上传速率",
+  urlTest: "URLTest",
   waitingTelemetry: "等待遥测流...",
   workMode: "工作模式",
 };
@@ -232,9 +261,12 @@ const en: typeof zh = {
   add: "Add",
   addProgram: "Add Program",
   autoSelect: "Auto Select",
+  cardMode: "Card Mode",
   binaries: "Binaries",
   checkLatest: "Check Latest",
+  collapseAll: "Collapse All",
   configDrafts: "Config Drafts",
+  configs: "Config",
   controller: "Controller",
   coreSettings: "Core",
   currentNode: "Current Node",
@@ -265,6 +297,8 @@ const en: typeof zh = {
   scanSteam: "Scan Steam",
   selected: "Selected",
   settings: "Settings",
+  showUnavailableNodes: "Show unavailable",
+  sortByDelay: "Sort by latency",
   start: "Start",
   startAll: "Start All",
   stop: "Stop",
@@ -292,18 +326,25 @@ const en: typeof zh = {
   displayName: "Display name",
   downloadRate: "Download rate",
   executablePath: "Executable path",
+  expand: "Expand",
+  filter: "Filter",
   followSystem: "Follow system",
   gameMode: "Game Mode",
   globalModeDesc: "Use only the Global policy group",
+  globalBlock: "Global Block",
+  globalDirect: "Global Direct",
   green: "Green",
   grid: "Grid",
+  leakFish: "Final Match",
   light: "Light",
   liveTelemetry: "Live Telemetry",
+  more: "More",
   noNodeSelected: "No node selected",
   noSubscriptionNodes: "No subscription nodes yet",
   notConfigured: "Not configured",
   pageVisibility: "Page visibility",
   personalized: "Personalization",
+  policyGroups: "Policy Groups",
   pluginAllowNodeRead: "Allow plugins to read nodes",
   pluginAutoUpdate: "Auto-update plugins",
   pluginCenter: "Plugin Center",
@@ -326,6 +367,8 @@ const en: typeof zh = {
   ready: "Ready",
   recentRoutes: "Recent routes",
   releaseChannel: "Release channel",
+  refreshLatency: "Refresh Latency",
+  routeByRule: "Route automatically by rules and process",
   ruleSets: "Rule sets",
   run: "Run",
   scheduledTasks: "Scheduled tasks",
@@ -344,7 +387,9 @@ const en: typeof zh = {
   theme: "Theme",
   totalTraffic: "Total Traffic",
   tunMode: "TUN Mode",
+  unavailable: "Unavailable",
   uploadRate: "Upload rate",
+  urlTest: "URLTest",
   waitingTelemetry: "Waiting for telemetry stream...",
   workMode: "Work Mode",
 };
@@ -355,6 +400,19 @@ function selectedNode(snapshot: SubscriptionSnapshot): ProxyNode | undefined {
 
 function nodeEndpoint(node: ProxyNode): string {
   return node.port > 0 ? `${node.address}:${node.port}` : node.address;
+}
+
+function nodeLatency(node: ProxyNode): number {
+  const seed = Array.from(node.id).reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  return 82 + (seed % 236);
+}
+
+function nodeAvailable(node: ProxyNode): boolean {
+  return nodeLatency(node) < 285;
+}
+
+function nodeLatencyLabel(node: ProxyNode, ui: typeof zh): string {
+  return nodeAvailable(node) ? `${nodeLatency(node)}ms` : ui.unavailable;
 }
 
 function processStatusLabel(status: ProcessStatus | undefined): string {
@@ -536,29 +594,6 @@ function polyline(points: number[], width: number, height: number): string {
     .join(" ");
 }
 
-function TelemetryMetrics({ data }: { data: TelemetryData }) {
-  return (
-    <div className="mini-metrics">
-      <div>
-        <span>Packets</span>
-        <strong>{data.packets_read.toLocaleString()}</strong>
-      </div>
-      <div>
-        <span>TGP</span>
-        <strong>{data.decided_tgp.toLocaleString()}</strong>
-      </div>
-      <div>
-        <span>Direct</span>
-        <strong>{data.decided_direct.toLocaleString()}</strong>
-      </div>
-      <div>
-        <span>Drop</span>
-        <strong>{data.decided_drop.toLocaleString()}</strong>
-      </div>
-    </div>
-  );
-}
-
 export function App() {
   const [activeView, setActiveView] = useState<PrismView>(() =>
     viewFromHash(globalThis.location?.hash ?? ""),
@@ -575,7 +610,12 @@ export function App() {
   const [subscriptionUrl, setSubscriptionUrl] = useState("");
   const [subscriptionText, setSubscriptionText] = useState("");
   const [subscriptionViewMode, setSubscriptionViewMode] = useState<SubscriptionViewMode>("grid");
+  const [policyGroupViewMode, setPolicyGroupViewMode] = useState<SubscriptionViewMode>("grid");
+  const [showUnavailableNodes, setShowUnavailableNodes] = useState(false);
+  const [sortPolicyNodesByDelay, setSortPolicyNodesByDelay] = useState(true);
+  const [expandedPolicyGroupId, setExpandedPolicyGroupId] = useState("node-selector");
   const [nodePickerOpen, setNodePickerOpen] = useState(false);
+  const [alwaysOnTop, setAlwaysOnTop] = useState(false);
   const [language, setLanguage] = useState<Language>(loadLanguage);
   const [configPaths, setConfigPaths] = useState<ConfigDraftPaths | null>(null);
   const [runtimePaths, setRuntimePaths] = useState<RuntimePaths | null>(null);
@@ -1099,6 +1139,32 @@ export function App() {
     }
   }
 
+  async function handleWindowAction(action: "close" | "maximize" | "minimize" | "pin") {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    try {
+      const appWindow = getCurrentWindow();
+      if (action === "pin") {
+        const nextAlwaysOnTop = !alwaysOnTop;
+        await appWindow.setAlwaysOnTop(nextAlwaysOnTop);
+        setAlwaysOnTop(nextAlwaysOnTop);
+        return;
+      }
+      if (action === "minimize") {
+        await appWindow.minimize();
+        return;
+      }
+      if (action === "maximize") {
+        await appWindow.toggleMaximize();
+        return;
+      }
+      await appWindow.close();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Window action failed");
+    }
+  }
+
   useEffect(() => {
     const onHashChange = () => setActiveView(viewFromHash(globalThis.location?.hash ?? ""));
     globalThis.addEventListener?.("hashchange", onHashChange);
@@ -1148,6 +1214,7 @@ export function App() {
 
   const navItems: Array<{ icon: string; id: PrismView; label: string }> = [
     { icon: "⌘", id: "overview", label: ui.overview },
+    { icon: "▰", id: "configs", label: ui.configs },
     { icon: "▣", id: "subscriptions", label: ui.subscriptions },
     { icon: "⬡", id: "plugins", label: ui.plugins },
     { icon: "⚙", id: "settings", label: ui.settings },
@@ -1155,17 +1222,30 @@ export function App() {
 
   return (
     <main className="prism-shell">
-      <header className="app-titlebar">
+      <header className="app-titlebar" data-tauri-drag-region>
         <div className="title-left">
           <span className="app-cube">◆</span>
           <strong>Tachyon Prism v0.1.0</strong>
           <span>Rolling Preview</span>
         </div>
-        <div className="window-actions" aria-hidden="true">
-          <span>⌖</span>
-          <span>─</span>
-          <span>□</span>
-          <span>×</span>
+        <div className="window-actions">
+          <button
+            aria-pressed={alwaysOnTop}
+            className={alwaysOnTop ? "active" : ""}
+            type="button"
+            onClick={() => void handleWindowAction("pin")}
+          >
+            ⌖
+          </button>
+          <button type="button" onClick={() => void handleWindowAction("minimize")}>
+            ─
+          </button>
+          <button type="button" onClick={() => void handleWindowAction("maximize")}>
+            □
+          </button>
+          <button type="button" onClick={() => void handleWindowAction("close")}>
+            ×
+          </button>
         </div>
       </header>
 
@@ -1209,21 +1289,28 @@ export function App() {
       <section className="prism-content">
         {activeView === "overview" ? (
           <OverviewView
-            activeNode={activeNode}
-            activeProfiles={activeProfiles}
-            connection={connection}
-            connectionLabel={connectionLabel}
-            message={message}
             nodeCount={subscriptionNodeCount}
-            onOpenNodes={() => setNodePickerOpen(true)}
-            onStartAll={() => void startAllRuntime()}
-            onStopAll={() => void stopAllRuntime()}
-            readinessErrors={readinessErrors}
-            runtimeRows={runtimeRows}
             telemetry={telemetry}
             traffic={traffic}
             trafficSamples={trafficSamples}
             ui={ui}
+          />
+        ) : null}
+
+        {activeView === "configs" ? (
+          <ConfigsView
+            activeNode={activeNode}
+            expandedGroupId={expandedPolicyGroupId}
+            onChooseNode={chooseNode}
+            onExpandGroup={setExpandedPolicyGroupId}
+            onSetShowUnavailable={setShowUnavailableNodes}
+            onSetSortByDelay={setSortPolicyNodesByDelay}
+            onSetViewMode={setPolicyGroupViewMode}
+            showUnavailable={showUnavailableNodes}
+            sortByDelay={sortPolicyNodesByDelay}
+            subscription={subscription}
+            ui={ui}
+            viewMode={policyGroupViewMode}
           />
         ) : null}
 
@@ -1321,40 +1408,20 @@ export function App() {
 }
 
 function OverviewView({
-  activeNode,
-  activeProfiles,
-  connection,
-  connectionLabel,
-  message,
   nodeCount,
-  onOpenNodes,
-  onStartAll,
-  onStopAll,
-  readinessErrors,
-  runtimeRows,
   telemetry,
   traffic,
   trafficSamples,
   ui,
 }: {
-  activeNode: ProxyNode | undefined;
-  activeProfiles: number;
-  connection: ConnectionState;
-  connectionLabel: string;
-  message: string;
   nodeCount: number;
-  onOpenNodes: () => void;
-  onStartAll: () => void;
-  onStopAll: () => void;
-  readinessErrors: number;
-  runtimeRows: Array<{ label: string; value: string }>;
   telemetry: TelemetryState;
   traffic: { down: number; total: number; up: number };
   trafficSamples: TrafficSample[];
   ui: typeof zh;
 }) {
   const width = 560;
-  const height = 232;
+  const height = 220;
   const upPoints = polyline(trafficSamples.map((item) => item.up), width, height);
   const downPoints = polyline(trafficSamples.map((item) => item.down), width, height);
 
@@ -1368,39 +1435,39 @@ function OverviewView({
       </div>
 
       <div className="overview-grid">
-        <article className="glass-card traffic-card">
-          <header>
-            <h2>{ui.traffic}</h2>
+        <section className="traffic-section">
+          <h2>{ui.traffic}</h2>
+          <article className="glass-card traffic-card">
             <div className="legend">
               <span className="up-dot">● {ui.uploadRate}</span>
               <span className="down-dot">● {ui.downloadRate}</span>
             </div>
-          </header>
-          <svg className="traffic-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Traffic chart">
-            <defs>
-              <linearGradient id="down-fill" x1="0" x2="0" y1="0" y2="1">
-                <stop offset="0" stopColor="#008cff" stopOpacity="0.38" />
-                <stop offset="1" stopColor="#008cff" stopOpacity="0.02" />
-              </linearGradient>
-            </defs>
-            {Array.from({ length: 7 }, (_, index) => (
-              <line
-                className="chart-grid"
-                key={index}
-                x1="0"
-                x2={width}
-                y1={(height / 6) * index}
-                y2={(height / 6) * index}
-              />
-            ))}
-            <polyline className="traffic-line down" points={downPoints} />
-            <polyline className="traffic-line up" points={upPoints} />
-          </svg>
-        </article>
+            <svg className="traffic-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Traffic chart">
+              <defs>
+                <linearGradient id="down-fill" x1="0" x2="0" y1="0" y2="1">
+                  <stop offset="0" stopColor="#008cff" stopOpacity="0.38" />
+                  <stop offset="1" stopColor="#008cff" stopOpacity="0.02" />
+                </linearGradient>
+              </defs>
+              {Array.from({ length: 7 }, (_, index) => (
+                <line
+                  className="chart-grid"
+                  key={index}
+                  x1="0"
+                  x2={width}
+                  y1={(height / 6) * index}
+                  y2={(height / 6) * index}
+                />
+              ))}
+              <polyline className="traffic-line down" points={downPoints} />
+              <polyline className="traffic-line up" points={upPoints} />
+            </svg>
+          </article>
+        </section>
 
         <aside className="overview-side">
-          <article className="glass-card work-mode-card">
-            <h2>{ui.workMode}</h2>
+          <h2>{ui.workMode}</h2>
+          <div className="work-mode-list">
             <button className="mode-option" type="button">
               <strong>{ui.globalMode}</strong>
               <span>{ui.globalModeDesc}</span>
@@ -1413,82 +1480,8 @@ function OverviewView({
               <strong>{ui.directMode}</strong>
               <span>{ui.directModeDesc}</span>
             </button>
-          </article>
-
-          <article className="glass-card node-current-card">
-            <header>
-              <h2>{ui.currentNode}</h2>
-              <button type="button" onClick={onOpenNodes}>
-                ▾
-              </button>
-            </header>
-            {activeNode ? (
-              <div className="current-node">
-                <strong>{activeNode.name}</strong>
-                <span>
-                  {activeNode.protocol.toUpperCase()} :: {activeNode.transport || "udp"}
-                </span>
-                <small>{nodeEndpoint(activeNode)}</small>
-              </div>
-            ) : (
-              <div className="empty-note">{ui.noNodeSelected}</div>
-            )}
-          </article>
-
-          <article className="glass-card quick-start-card">
-            <header>
-              <h2>{ui.quickStart}</h2>
-              <span className={`status-dot ${connection}`}>{connectionLabel}</span>
-            </header>
-            <div className="quick-buttons">
-              <button className="primary-action" type="button" onClick={onStartAll}>
-                {ui.startAll}
-              </button>
-              <button type="button" onClick={onStopAll}>
-                {ui.stopAll}
-              </button>
-            </div>
-            <div className="runtime-list-mini">
-              {runtimeRows.map((row) => (
-                <div key={row.label}>
-                  <span>{row.label}</span>
-                  <strong>{row.value}</strong>
-                </div>
-              ))}
-            </div>
-          </article>
-        </aside>
-      </div>
-
-      <div className="overview-bottom">
-        <article className="glass-card">
-          <header>
-            <h2>{ui.liveTelemetry}</h2>
-            <span className={`status-dot ${telemetry.connection}`}>{telemetry.connection}</span>
-          </header>
-          {telemetry.latestTelemetry ? (
-            <TelemetryMetrics data={telemetry.latestTelemetry} />
-          ) : (
-            <p className="muted">{ui.waitingTelemetry}</p>
-          )}
-        </article>
-        <article className="glass-card">
-          <header>
-            <h2>{ui.readiness}</h2>
-            <span>{readinessErrors === 0 ? ui.ready : `${readinessErrors} issue`}</span>
-          </header>
-          <div className="mini-metrics">
-            <div>
-              <span>{ui.enabledProfiles}</span>
-              <strong>{activeProfiles}</strong>
-            </div>
-            <div>
-              <span>{ui.recentRoutes}</span>
-              <strong>{telemetry.recentRoutes.length}</strong>
-            </div>
           </div>
-          <p className="muted">{message}</p>
-        </article>
+        </aside>
       </div>
     </div>
   );
@@ -1509,6 +1502,205 @@ function MetricCard({
       <strong>{primary}</strong>
       <span>{secondary}</span>
     </article>
+  );
+}
+
+function ConfigsView({
+  activeNode,
+  expandedGroupId,
+  onChooseNode,
+  onExpandGroup,
+  onSetShowUnavailable,
+  onSetSortByDelay,
+  onSetViewMode,
+  showUnavailable,
+  sortByDelay,
+  subscription,
+  ui,
+  viewMode,
+}: {
+  activeNode: ProxyNode | undefined;
+  expandedGroupId: string;
+  onChooseNode: (id: string) => void;
+  onExpandGroup: (id: string) => void;
+  onSetShowUnavailable: (value: boolean) => void;
+  onSetSortByDelay: (value: boolean) => void;
+  onSetViewMode: (mode: SubscriptionViewMode) => void;
+  showUnavailable: boolean;
+  sortByDelay: boolean;
+  subscription: SubscriptionSnapshot;
+  ui: typeof zh;
+  viewMode: SubscriptionViewMode;
+}) {
+  const sortedNodes = useMemo(() => {
+    const nodes = [...subscription.nodes];
+    if (sortByDelay) {
+      nodes.sort((left, right) => nodeLatency(left) - nodeLatency(right));
+    }
+    return showUnavailable ? nodes : nodes.filter(nodeAvailable);
+  }, [showUnavailable, sortByDelay, subscription.nodes]);
+
+  const activeName = activeNode?.name ?? ui.noNodeSelected;
+  const activeProtocol = activeNode ? activeNode.protocol.toUpperCase() : "--";
+  const activeChain = [ui.nodeSelector, ui.autoSelect, activeName];
+  const groups: PolicyGroup[] = [
+    {
+      active: activeName,
+      chain: activeChain,
+      description: `${ui.selector} :: ${activeProtocol}`,
+      icon: "🚀",
+      id: "node-selector",
+      nodes: sortedNodes,
+      title: ui.nodeSelector,
+      type: ui.selector,
+    },
+    {
+      active: activeName,
+      chain: [ui.urlTest, activeName],
+      description: `${ui.autoSelect} :: ${sortByDelay ? ui.sortByDelay : ui.routeByRule}`,
+      icon: "📍",
+      id: "auto-select",
+      nodes: sortedNodes,
+      title: ui.autoSelect,
+      type: ui.urlTest,
+    },
+    {
+      active: "direct",
+      chain: ["direct"],
+      description: ui.directModeDesc,
+      icon: "🎯",
+      id: "global-direct",
+      nodes: [],
+      title: ui.globalDirect,
+      type: ui.selector,
+    },
+    {
+      active: "block",
+      chain: ["block"],
+      description: ui.directModeDesc,
+      icon: "🛑",
+      id: "global-block",
+      nodes: [],
+      title: ui.globalBlock,
+      type: ui.selector,
+    },
+    {
+      active: activeName,
+      chain: activeChain,
+      description: ui.routeByRule,
+      icon: "🐟",
+      id: "final-match",
+      nodes: sortedNodes,
+      title: ui.leakFish,
+      type: ui.selector,
+    },
+  ];
+
+  return (
+    <div className="configs-page page-enter">
+      <div className="config-toolbar">
+        <div className="config-toolbar-left">
+          <strong>{ui.policyGroups}</strong>
+          <div className="mode-pills">
+            <button className="toggle-pill" type="button" onClick={() => onSetShowUnavailable(!showUnavailable)}>
+              <span className={showUnavailable ? "toggle-dot active" : "toggle-dot"} />
+              {ui.showUnavailableNodes}
+            </button>
+            <button
+              className={viewMode === "grid" ? "pill active" : "pill"}
+              type="button"
+              onClick={() => onSetViewMode(viewMode === "grid" ? "list" : "grid")}
+            >
+              {ui.cardMode}
+            </button>
+            <button className="toggle-pill" type="button" onClick={() => onSetSortByDelay(!sortByDelay)}>
+              <span className={sortByDelay ? "toggle-dot active" : "toggle-dot"} />
+              {ui.sortByDelay}
+            </button>
+            <button className="toolbar-square" type="button" title={ui.more}>
+              ...
+            </button>
+          </div>
+        </div>
+        <div className="strip-actions">
+          <button type="button" title={ui.filter}>⌯</button>
+          <button type="button" title={ui.refreshLatency}>↻</button>
+          <button type="button" title={ui.collapseAll} onClick={() => onExpandGroup("")}>⌄</button>
+        </div>
+      </div>
+
+      <div className="policy-stack" aria-label={ui.policyGroups}>
+        {groups.map((group) => {
+          const expanded = expandedGroupId === group.id;
+          return (
+            <article className={expanded ? "policy-group expanded" : "policy-group"} key={group.id}>
+              <header>
+                <button
+                  className="policy-summary"
+                  type="button"
+                  onClick={() => onExpandGroup(expanded ? "" : group.id)}
+                >
+                  <span className="policy-icon">{group.icon}</span>
+                  <span className="policy-copy">
+                    <strong>
+                      {group.title}
+                      <small>{group.type}</small>
+                      <small>::</small>
+                      <em>{group.active}</em>
+                    </strong>
+                    <span>{group.chain.join(" / ")}</span>
+                  </span>
+                </button>
+                <div className="panel-icons">
+                  <button type="button" title={ui.filter}>⌯</button>
+                  <button type="button" title={ui.refreshLatency}>⏻</button>
+                  <button type="button" onClick={() => onExpandGroup(expanded ? "" : group.id)}>
+                    {expanded ? "⌄" : "›"}
+                  </button>
+                </div>
+              </header>
+              {expanded ? (
+                <div className="policy-details">
+                  <p>{group.description}</p>
+                  {group.nodes.length > 0 ? (
+                    <div className={viewMode === "grid" ? "node-card-grid" : "node-list-view"}>
+                      {group.nodes.map((node) => (
+                        <button
+                          className={node.id === subscription.selectedNodeId ? "node-tile active" : "node-tile"}
+                          key={`${group.id}-${node.id}`}
+                          type="button"
+                          onClick={() => onChooseNode(node.id)}
+                        >
+                          <strong>{node.name}</strong>
+                          <span className={nodeAvailable(node) ? "" : "unavailable"}>
+                            {nodeLatencyLabel(node, ui)}
+                          </span>
+                          <small>
+                            {node.protocol.toUpperCase()} :: {node.transport || "udp"}
+                          </small>
+                          {node.id === subscription.selectedNodeId ? <em>✓</em> : null}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="virtual-route-grid">
+                      <button className={group.id === "global-direct" ? "virtual-route active" : "virtual-route"} type="button">
+                        <strong>direct</strong>
+                        <span>{ui.directModeDesc}</span>
+                      </button>
+                      <button className={group.id === "global-block" ? "virtual-route active danger" : "virtual-route danger"} type="button">
+                        <strong>block</strong>
+                        <span>{ui.globalBlock}</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </article>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -1655,7 +1847,7 @@ function SubscriptionsView({
                 onClick={() => onChooseNode(node.id)}
               >
                 <strong>{node.name}</strong>
-                <span>{Math.max(0, (node.id.charCodeAt(node.id.length - 1) % 8) * 31 + 95)}ms</span>
+                <span className={nodeAvailable(node) ? "" : "unavailable"}>{nodeLatencyLabel(node, ui)}</span>
                 <small>
                   {node.protocol.toUpperCase()} :: {node.transport || "udp"}
                 </small>
@@ -1900,6 +2092,7 @@ function SettingsView({
             <SettingRow label={ui.pageVisibility}>
               <div className="segmented wide">
                 <button className="active" type="button">{ui.overview}</button>
+                <button className="active" type="button">{ui.configs}</button>
                 <button className="active" type="button">{ui.subscriptions}</button>
                 <button type="button">{ui.ruleSets}</button>
                 <button className="active" type="button">{ui.plugins}</button>
@@ -2208,7 +2401,7 @@ function NodeDrawer({
               onClick={() => onChooseNode(node.id)}
             >
               <strong>{node.name}</strong>
-              <span>{Math.max(0, (node.id.charCodeAt(node.id.length - 1) % 8) * 31 + 95)}ms</span>
+              <span className={nodeAvailable(node) ? "" : "unavailable"}>{nodeLatencyLabel(node, ui)}</span>
               <small>{node.protocol.toUpperCase()} :: {node.transport || "udp"}</small>
               {node.id === subscription.selectedNodeId ? <em>✓</em> : null}
             </button>

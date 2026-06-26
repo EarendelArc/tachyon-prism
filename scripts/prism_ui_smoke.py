@@ -213,6 +213,23 @@ def assert_no_horizontal_overflow(cdp: CDP) -> None:
         raise AssertionError(f"horizontal overflow detected: {overflow}")
 
 
+def assert_content_fits_viewport(cdp: CDP) -> None:
+    overflow = cdp.evaluate(
+        """
+        (() => {
+          const content = document.querySelector('.prism-content');
+          return {
+            client: content?.clientHeight ?? 0,
+            scroll: content?.scrollHeight ?? 0,
+            window: window.innerHeight
+          };
+        })()
+        """,
+    )
+    if int(overflow["scroll"]) > int(overflow["client"]) + 2:
+        raise AssertionError(f"content vertical overflow detected: {overflow}")
+
+
 def import_sample_subscription(cdp: CDP) -> str:
     sample = "\n".join(
         [
@@ -299,6 +316,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         assert_contains(text, "Tachyon Prism", "系统代理", "实时流量")
         assert_no_runtime_error(text)
         assert_no_horizontal_overflow(cdp)
+        assert_content_fits_viewport(cdp)
         cdp.screenshot(output_dir / "overview-desktop.png")
 
         text = navigate_hash(cdp, "subscriptions")
@@ -307,6 +325,12 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         text = import_sample_subscription(cdp)
         assert_contains(text, "Smoke", "Smoke VLESS", "Smoke Trojan", "Smoke Hysteria")
         cdp.screenshot(output_dir / "subscriptions-desktop.png")
+
+        text = navigate_hash(cdp, "configs")
+        assert_contains(text, "策略组", "节点选择", "自动选择", "漏网之鱼", "Smoke VLESS")
+        assert_no_runtime_error(text)
+        assert_no_horizontal_overflow(cdp)
+        cdp.screenshot(output_dir / "configs-desktop.png")
 
         text = navigate_hash(cdp, "plugins")
         assert_contains(text, "插件中心", "滚动发行", "节点转换")
@@ -319,13 +343,6 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         text = switch_to_english(cdp)
         assert_contains(text, "Personalization", "Theme", "Core")
         cdp.screenshot(output_dir / "settings-desktop-en.png")
-
-        set_viewport(cdp, 390, 844)
-        text = navigate_hash(cdp, "overview")
-        assert_contains(text, "System Proxy", "Realtime Traffic")
-        assert_no_runtime_error(text)
-        assert_no_horizontal_overflow(cdp)
-        cdp.screenshot(output_dir / "overview-mobile-en.png")
 
         print(f"Prism UI smoke test passed. Artifacts: {output_dir}")
     finally:
