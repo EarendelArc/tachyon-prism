@@ -91,10 +91,7 @@ a {
 }
 
 .prism-shell {
-  background:
-    radial-gradient(circle at 52% 62%, rgba(0, 122, 255, 0.16), transparent 24%),
-    radial-gradient(circle at 20% 100%, rgba(20, 225, 169, 0.08), transparent 20%),
-    linear-gradient(90deg, #050707, #111315 45%, #151719);
+  background: #070909;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 7px;
   display: grid;
@@ -249,7 +246,7 @@ a {
 .prism-content {
   min-height: 0;
   overflow: auto;
-  padding: 10px 15px 18px;
+  padding: 8px 15px 0;
 }
 
 .page-enter {
@@ -261,12 +258,10 @@ a {
 .settings-card,
 .subscription-card,
 .plugin-rich-card {
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.035)),
-    rgba(20, 22, 24, 0.86);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: #1a1c1e;
+  border: 0;
   border-radius: 8px;
-  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.24);
+  box-shadow: none;
   min-width: 0;
 }
 
@@ -319,7 +314,7 @@ p,
 
 .overview-page {
   display: grid;
-  gap: 14px;
+  gap: 8px;
 }
 
 .overview-metrics {
@@ -330,9 +325,17 @@ p,
 
 .metric-card {
   display: grid;
-  gap: 10px;
-  min-height: 78px;
-  padding: 12px;
+  gap: 8px;
+  min-height: 70px;
+  padding: 10px;
+}
+
+.metric-card:hover,
+.glass-card:hover,
+.settings-card:hover,
+.subscription-card:hover,
+.plugin-rich-card:hover {
+  background: #202326;
 }
 
 .metric-card h2 {
@@ -352,7 +355,7 @@ p,
 
 .traffic-section {
   display: grid;
-  gap: 10px;
+  gap: 7px;
   min-width: 0;
 }
 
@@ -363,8 +366,8 @@ p,
 }
 
 .traffic-card {
-  min-height: 278px;
-  padding: 0 16px 12px;
+  min-height: 198px;
+  padding: 0 16px 10px;
 }
 
 .legend {
@@ -383,7 +386,7 @@ p,
 }
 
 .traffic-chart {
-  height: 230px;
+  height: 160px;
   margin-top: 4px;
   overflow: visible;
   width: 100%;
@@ -391,16 +394,30 @@ p,
 
 .chart-grid {
   stroke: rgba(255, 255, 255, 0.44);
-  stroke-dasharray: 1 7;
+  stroke-dasharray: 1 4;
   stroke-width: 1;
+}
+
+.chart-axis-label {
+  fill: #0078ff;
+  font-size: 8px;
+}
+
+.traffic-fill {
+  stroke: none;
+}
+
+.traffic-fill.down {
+  fill: rgba(46, 154, 229, 0.18);
+}
+
+.traffic-fill.up {
+  fill: rgba(136, 81, 227, 0.18);
 }
 
 .traffic-line {
   fill: none;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 3;
-  filter: drop-shadow(0 0 8px rgba(0, 126, 255, 0.4));
+  stroke-width: 2;
 }
 
 .traffic-line.down {
@@ -733,6 +750,16 @@ p,
 
 .segmented.wide {
   border-radius: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  overflow: visible;
+}
+
+.segmented.wide button {
+  border-radius: 6px;
+  font-size: 13px;
+  min-height: 30px;
+  padding: 5px 10px;
 }
 
 .subscription-layout {
@@ -1070,6 +1097,42 @@ p,
   z-index: 20;
 }
 
+.controller-backdrop {
+  animation: fade-in 160ms ease both;
+  backdrop-filter: blur(18px);
+  background: rgba(0, 0, 0, 0.46);
+  inset: 0;
+  overflow: hidden;
+  position: fixed;
+  z-index: 18;
+}
+
+.controller-panel {
+  animation: drawer-up 240ms ease both;
+  bottom: 28px;
+  left: 16px;
+  max-height: calc(100vh - 56px);
+  overflow: auto;
+  position: absolute;
+  right: 16px;
+  top: 16px;
+}
+
+.controller-close {
+  background: #202326;
+  border: 0;
+  border-radius: 999px;
+  bottom: 10px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32);
+  left: 50%;
+  min-height: 28px;
+  min-width: 36px;
+  padding: 2px 10px;
+  position: fixed;
+  transform: translateX(-50%);
+  z-index: 19;
+}
+
 .node-drawer {
   animation: drawer-up 220ms ease both;
   background:
@@ -1087,7 +1150,7 @@ p,
   right: 24px;
 }
 
-@media (max-width: 920px) {
+@media (max-width: 760px) {
   body {
     overflow: auto;
   }

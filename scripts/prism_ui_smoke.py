@@ -278,6 +278,28 @@ def switch_to_english(cdp: CDP) -> str:
     )
 
 
+def open_and_close_controller(cdp: CDP) -> str:
+    return str(
+        cdp.evaluate(
+            """
+            new Promise((resolve) => {
+              const controller = Array.from(document.querySelectorAll('button')).find((item) =>
+                item.textContent.trim() === '控制器' || item.textContent.trim() === 'Controller'
+              );
+              controller.click();
+              setTimeout(() => {
+                const text = document.body.innerText;
+                const close = document.querySelector('.controller-close');
+                close?.click();
+                setTimeout(() => resolve(text), 300);
+              }, 450);
+            })
+            """,
+            await_promise=True,
+        ),
+    )
+
+
 def run(edge_path: Path, port: int, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     server = start_server(port)
@@ -296,7 +318,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
             f"--remote-debugging-port={debug_port}",
             "--remote-allow-origins=*",
             f"--user-data-dir={user_dir.name}",
-            "--window-size=1120,720",
+            "--window-size=800,540",
             f"http://127.0.0.1:{port}/",
         ],
         stderr=subprocess.PIPE,
@@ -311,6 +333,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         cdp = CDP(page["webSocketDebuggerUrl"])
         cdp.call("Runtime.enable")
         cdp.call("Page.enable")
+        set_viewport(cdp, 800, 540)
 
         text = wait_for_shell(cdp)
         assert_contains(text, "Tachyon Prism", "系统代理", "实时流量")
@@ -318,6 +341,9 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         assert_no_horizontal_overflow(cdp)
         assert_content_fits_viewport(cdp)
         cdp.screenshot(output_dir / "overview-desktop.png")
+        text = open_and_close_controller(cdp)
+        assert_contains(text, "策略组", "节点选择", "自动选择")
+        assert_no_runtime_error(text)
 
         text = navigate_hash(cdp, "subscriptions")
         assert_contains(text, "订阅", "节点选择")

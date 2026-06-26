@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
@@ -582,12 +581,12 @@ function trafficSeries(data: TelemetryData | null): TrafficSample[] {
   });
 }
 
-function polyline(points: number[], width: number, height: number): string {
+function polyline(points: number[], width: number, height: number, padding = 0): string {
   const max = Math.max(...points, 1);
-  const step = width / Math.max(points.length - 1, 1);
+  const step = (width - padding) / Math.max(points.length - 1, 1);
   return points
     .map((value, index) => {
-      const x = index * step;
+      const x = padding + index * step;
       const y = height - (value / max) * (height - 10) - 5;
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     })
@@ -615,6 +614,7 @@ export function App() {
   const [sortPolicyNodesByDelay, setSortPolicyNodesByDelay] = useState(true);
   const [expandedPolicyGroupId, setExpandedPolicyGroupId] = useState("node-selector");
   const [nodePickerOpen, setNodePickerOpen] = useState(false);
+  const [controllerOpen, setControllerOpen] = useState(false);
   const [alwaysOnTop, setAlwaysOnTop] = useState(false);
   const [language, setLanguage] = useState<Language>(loadLanguage);
   const [configPaths, setConfigPaths] = useState<ConfigDraftPaths | null>(null);
@@ -1144,6 +1144,7 @@ export function App() {
       return;
     }
     try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
       const appWindow = getCurrentWindow();
       if (action === "pin") {
         const nextAlwaysOnTop = !alwaysOnTop;
@@ -1390,9 +1391,27 @@ export function App() {
       </section>
 
       <footer className="bottom-status">
-        <button type="button">{ui.controller}</button>
+        <button type="button" onClick={() => setControllerOpen(true)}>{ui.controller}</button>
         <span>{message}</span>
       </footer>
+
+      {controllerOpen ? (
+        <ControllerDrawer
+          activeNode={activeNode}
+          expandedGroupId={expandedPolicyGroupId}
+          onChooseNode={chooseNode}
+          onClose={() => setControllerOpen(false)}
+          onExpandGroup={setExpandedPolicyGroupId}
+          onSetShowUnavailable={setShowUnavailableNodes}
+          onSetSortByDelay={setSortPolicyNodesByDelay}
+          onSetViewMode={setPolicyGroupViewMode}
+          showUnavailable={showUnavailableNodes}
+          sortByDelay={sortPolicyNodesByDelay}
+          subscription={subscription}
+          ui={ui}
+          viewMode={policyGroupViewMode}
+        />
+      ) : null}
 
       {nodePickerOpen ? (
         <NodeDrawer
@@ -1422,8 +1441,9 @@ function OverviewView({
 }) {
   const width = 560;
   const height = 220;
-  const upPoints = polyline(trafficSamples.map((item) => item.up), width, height);
-  const downPoints = polyline(trafficSamples.map((item) => item.down), width, height);
+  const chartPadding = 48;
+  const upPoints = polyline(trafficSamples.map((item) => item.up), width, height, chartPadding);
+  const downPoints = polyline(trafficSamples.map((item) => item.down), width, height, chartPadding);
 
   return (
     <div className="overview-page page-enter">
@@ -1449,18 +1469,24 @@ function OverviewView({
                   <stop offset="1" stopColor="#008cff" stopOpacity="0.02" />
                 </linearGradient>
               </defs>
-              {Array.from({ length: 7 }, (_, index) => (
+            {Array.from({ length: 7 }, (_, index) => (
+              <g key={index}>
+                <text className="chart-axis-label" x="4" y={Math.max(10, (height / 6) * index - 4)}>
+                  {formatBytes(Math.round(((6 - index) / 6) * Math.max(...trafficSamples.map((item) => item.down), 1)))}
+                </text>
                 <line
                   className="chart-grid"
-                  key={index}
-                  x1="0"
+                  x1="48"
                   x2={width}
                   y1={(height / 6) * index}
                   y2={(height / 6) * index}
                 />
-              ))}
-              <polyline className="traffic-line down" points={downPoints} />
-              <polyline className="traffic-line up" points={upPoints} />
+              </g>
+            ))}
+            <polyline className="traffic-fill down" points={`48,${height - 6} ${downPoints} ${width},${height - 6}`} />
+            <polyline className="traffic-fill up" points={`48,${height - 6} ${upPoints} ${width},${height - 6}`} />
+            <polyline className="traffic-line down" points={downPoints} />
+            <polyline className="traffic-line up" points={upPoints} />
             </svg>
           </article>
         </section>
@@ -2365,6 +2391,58 @@ function RuntimePathRow({
         <button type="button" onClick={onStart}>{ui.start}</button>
         <button type="button" onClick={onStop}>{ui.stop}</button>
       </div>
+    </div>
+  );
+}
+
+function ControllerDrawer({
+  activeNode,
+  expandedGroupId,
+  onChooseNode,
+  onClose,
+  onExpandGroup,
+  onSetShowUnavailable,
+  onSetSortByDelay,
+  onSetViewMode,
+  showUnavailable,
+  sortByDelay,
+  subscription,
+  ui,
+  viewMode,
+}: {
+  activeNode: ProxyNode | undefined;
+  expandedGroupId: string;
+  onChooseNode: (id: string) => void;
+  onClose: () => void;
+  onExpandGroup: (id: string) => void;
+  onSetShowUnavailable: (value: boolean) => void;
+  onSetSortByDelay: (value: boolean) => void;
+  onSetViewMode: (mode: SubscriptionViewMode) => void;
+  showUnavailable: boolean;
+  sortByDelay: boolean;
+  subscription: SubscriptionSnapshot;
+  ui: typeof zh;
+  viewMode: SubscriptionViewMode;
+}) {
+  return (
+    <div className="controller-backdrop">
+      <section className="controller-panel" aria-label={ui.controller}>
+        <ConfigsView
+          activeNode={activeNode}
+          expandedGroupId={expandedGroupId}
+          onChooseNode={onChooseNode}
+          onExpandGroup={onExpandGroup}
+          onSetShowUnavailable={onSetShowUnavailable}
+          onSetSortByDelay={onSetSortByDelay}
+          onSetViewMode={onSetViewMode}
+          showUnavailable={showUnavailable}
+          sortByDelay={sortByDelay}
+          subscription={subscription}
+          ui={ui}
+          viewMode={viewMode}
+        />
+      </section>
+      <button className="controller-close" type="button" onClick={onClose}>×</button>
     </div>
   );
 }

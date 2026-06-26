@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "Tachyon Prism",
-        "width": 1120,
-        "height": 720,
-        "minWidth": 860,
-        "minHeight": 560,
+        "width": 800,
+        "height": 540,
+        "minWidth": 800,
+        "minHeight": 540,
         "decorations": false
       }
     ],
