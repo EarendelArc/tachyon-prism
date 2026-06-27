@@ -286,6 +286,11 @@ function parsePayload(payload: string): ProxyNode[] {
     return jsonNodes;
   }
 
+  const clashNodes = parseClashPayload(payload);
+  if (clashNodes.length > 0) {
+    return clashNodes;
+  }
+
   const nodes: ProxyNode[] = [];
   for (const line of payload.split(/\r?\n/)) {
     const value = line.trim();
@@ -313,6 +318,344 @@ function parseJSONPayload(payload: string): ProxyNode[] {
     return [];
   }
   return nodesFromJSON(value, payload);
+}
+
+function parseClashPayload(payload: string): ProxyNode[] {
+  if (!/^\s*proxies\s*:/m.test(payload)) {
+    return [];
+  }
+
+  return parseClashProxyRecords(payload)
+    .map(nodeFromClashProxy)
+    .filter((node): node is ProxyNode => node !== null);
+}
+
+function parseClashProxyRecords(payload: string): Array<Record<string, string>> {
+  const records: Array<Record<string, string>> = [];
+  const lines = payload.replace(/\t/g, "  ").split(/\r?\n/);
+  let inProxies = false;
+  let proxiesIndent = 0;
+  let current: Record<string, string> | null = null;
+  let stack: Array<{ indent: number; path: string }> = [];
+
+  for (const rawLine of lines) {
+    const line = stripYamlComment(rawLine);
+    if (!line.trim()) {
+      continue;
+    }
+
+    const indent = leadingSpaces(line);
+    const trimmed = line.trim();
+    const topLevel = parseYamlKeyValue(trimmed);
+    if (!inProxies && topLevel?.key === "proxies") {
+      inProxies = true;
+      proxiesIndent = indent;
+      continue;
+    }
+
+    if (!inProxies) {
+      continue;
+    }
+    if (indent <= proxiesIndent && !trimmed.startsWith("- ")) {
+      break;
+    }
+
+    if (trimmed.startsWith("- ")) {
+      if (indent <= proxiesIndent) {
+        break;
+      }
+      if (current && Object.keys(current).length > 0) {
+        records.push(current);
+      }
+      current = {};
+      stack = [];
+      assignYamlEntry(current, "", trimmed.slice(2).trim());
+      continue;
+    }
+
+    if (!current) {
+      continue;
+    }
+
+    while (stack.length > 0 && indent <= stack[stack.length - 1].indent) {
+      stack.pop();
+    }
+
+    const entry = parseYamlKeyValue(trimmed);
+    if (!entry) {
+      continue;
+    }
+    const parentPath = stack.map((item) => item.path).join(".");
+    const keyPath = parentPath ? `${parentPath}.${entry.key}` : entry.key;
+    if (entry.value === "") {
+      stack.push({ indent, path: entry.key });
+      continue;
+    }
+    assignYamlValue(current, keyPath, entry.value);
+  }
+
+  if (current && Object.keys(current).length > 0) {
+    records.push(current);
+  }
+  return records;
+}
+
+function nodeFromClashProxy(record: Record<string, string>): ProxyNode | null {
+  const protocol = normalizeProtocol(clashValue(record, ["type"]));
+  if (protocol === "unknown") {
+    return null;
+  }
+
+  const address = clashValue(record, ["server", "address"]);
+  const port = parsePort(clashValue(record, ["port"]));
+  if (!address || port === 0) {
+    return null;
+  }
+
+  const name = clashValue(record, ["name"]) || `${protocol.toUpperCase()} ${address}`;
+  const settings = clashOutboundSettings(protocol, record, address, port);
+  const outbound = compactOutbound({
+    tag: name,
+    protocol,
+    settings,
+    streamSettings: clashStreamSettings(record),
+  });
+
+  return nodeFromOutbound(outbound, `clash://${stableNodeId(JSON.stringify(record))}`);
+}
+
+function clashOutboundSettings(
+  protocol: ProxyProtocol,
+  record: Record<string, string>,
+  address: string,
+  port: number,
+): Record<string, unknown> {
+  switch (protocol) {
+    case "vless":
+      return compactRecord({
+        address,
+        port,
+        id: clashValue(record, ["uuid", "id"]),
+        encryption: clashValue(record, ["encryption"]) || "none",
+        flow: clashValue(record, ["flow"]),
+      });
+    case "vmess":
+      return compactRecord({
+        address,
+        port,
+        id: clashValue(record, ["uuid", "id"]),
+        security: clashValue(record, ["cipher", "security"]) || "auto",
+      });
+    case "trojan":
+      return compactRecord({
+        address,
+        port,
+        password: clashValue(record, ["password"]),
+      });
+    case "shadowsocks":
+      return compactRecord({
+        address,
+        port,
+        method: clashValue(record, ["cipher", "method"]),
+        password: clashValue(record, ["password"]),
+      });
+    case "hysteria":
+      return compactRecord({
+        version: clashValue(record, ["type"]).toLowerCase() === "hysteria" ? 1 : 2,
+        address,
+        port,
+        auth: clashValue(record, ["auth", "auth-str", "password"]),
+      });
+    case "socks":
+    case "http":
+      return compactRecord({
+        address,
+        port,
+        user: clashValue(record, ["username", "user"]),
+        pass: clashValue(record, ["password", "pass"]),
+      });
+    case "wireguard":
+      return compactRecord({
+        secretKey: clashValue(record, ["private-key", "secret-key", "secretKey"]),
+        address: splitList(clashValue(record, ["ip", "address"])),
+        peers: [
+          compactRecord({
+            endpoint: `${address}:${port}`,
+            publicKey: clashValue(record, ["public-key", "publicKey"]),
+          }),
+        ],
+      });
+    default:
+      return compactRecord({ address, port });
+  }
+}
+
+function clashStreamSettings(record: Record<string, string>): Record<string, unknown> {
+  const params = new URLSearchParams();
+  const network = clashValue(record, ["network", "net"]);
+  if (network) {
+    params.set("type", network);
+  }
+
+  const hasReality =
+    clashValue(record, ["reality-opts.public-key", "reality-opts.publicKey", "pbk"]) !== "";
+  if (hasReality) {
+    params.set("security", "reality");
+  } else if (clashBoolean(record, ["tls"]) || clashValue(record, ["security"]) === "tls") {
+    params.set("security", "tls");
+  }
+
+  setParamIfPresent(params, "sni", clashValue(record, ["sni", "servername", "serverName"]));
+  setParamIfPresent(params, "fp", clashValue(record, ["client-fingerprint", "fingerprint", "fp"]));
+  setParamIfPresent(params, "alpn", clashValue(record, ["alpn"]));
+  setParamIfPresent(params, "pbk", clashValue(record, ["reality-opts.public-key", "reality-opts.publicKey", "pbk"]));
+  setParamIfPresent(params, "sid", clashValue(record, ["reality-opts.short-id", "reality-opts.shortId", "sid"]));
+  setParamIfPresent(params, "spx", clashValue(record, ["reality-opts.spider-x", "reality-opts.spiderX", "spx"]));
+  setParamIfPresent(params, "path", clashValue(record, ["ws-opts.path", "http-opts.path", "h2-opts.path", "path"]));
+  setParamIfPresent(
+    params,
+    "host",
+    clashValue(record, ["ws-opts.headers.Host", "ws-opts.headers.host", "ws-opts.host", "host"]),
+  );
+  setParamIfPresent(
+    params,
+    "serviceName",
+    clashValue(record, ["grpc-opts.grpc-service-name", "grpc-opts.serviceName", "serviceName"]),
+  );
+  return streamSettingsFromParams(params);
+}
+
+function assignYamlEntry(
+  record: Record<string, string>,
+  parentPath: string,
+  value: string,
+): void {
+  if (!value) {
+    return;
+  }
+  if (value.startsWith("{") && value.endsWith("}")) {
+    assignInlineYamlMap(record, parentPath, value);
+    return;
+  }
+  const entry = parseYamlKeyValue(value);
+  if (!entry) {
+    return;
+  }
+  assignYamlValue(record, parentPath ? `${parentPath}.${entry.key}` : entry.key, entry.value);
+}
+
+function assignYamlValue(
+  record: Record<string, string>,
+  keyPath: string,
+  rawValue: string,
+): void {
+  if (rawValue.startsWith("{") && rawValue.endsWith("}")) {
+    assignInlineYamlMap(record, keyPath, rawValue);
+    return;
+  }
+  record[keyPath] = yamlScalar(rawValue);
+}
+
+function assignInlineYamlMap(
+  record: Record<string, string>,
+  parentPath: string,
+  rawValue: string,
+): void {
+  const body = rawValue.trim().slice(1, -1).trim();
+  for (const item of splitInlineYamlItems(body)) {
+    const entry = parseYamlKeyValue(item);
+    if (!entry) {
+      continue;
+    }
+    const keyPath = parentPath ? `${parentPath}.${entry.key}` : entry.key;
+    assignYamlValue(record, keyPath, entry.value);
+  }
+}
+
+function parseYamlKeyValue(value: string): { key: string; value: string } | null {
+  const splitAt = value.indexOf(":");
+  if (splitAt <= 0) {
+    return null;
+  }
+  return {
+    key: value.slice(0, splitAt).trim().replace(/^["']|["']$/g, ""),
+    value: value.slice(splitAt + 1).trim(),
+  };
+}
+
+function stripYamlComment(value: string): string {
+  let quote = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if ((char === "'" || char === '"') && value[index - 1] !== "\\") {
+      quote = quote === char ? "" : quote || char;
+    }
+    if (char === "#" && !quote && (index === 0 || /\s/.test(value[index - 1]))) {
+      return value.slice(0, index);
+    }
+  }
+  return value;
+}
+
+function splitInlineYamlItems(value: string): string[] {
+  const items: string[] = [];
+  let quote = "";
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if ((char === "'" || char === '"') && value[index - 1] !== "\\") {
+      quote = quote === char ? "" : quote || char;
+    } else if (!quote && char === "{") {
+      depth += 1;
+    } else if (!quote && char === "}") {
+      depth -= 1;
+    } else if (!quote && depth === 0 && char === ",") {
+      items.push(value.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  items.push(value.slice(start).trim());
+  return items.filter(Boolean);
+}
+
+function yamlScalar(value: string): string {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  if (trimmed === "null" || trimmed === "~") {
+    return "";
+  }
+  return trimmed;
+}
+
+function clashValue(record: Record<string, string>, keys: string[]): string {
+  for (const key of keys) {
+    const value = record[key];
+    if (value !== undefined && value !== "") {
+      return value;
+    }
+  }
+  return "";
+}
+
+function clashBoolean(record: Record<string, string>, keys: string[]): boolean {
+  const value = clashValue(record, keys).toLowerCase();
+  return value === "true" || value === "1" || value === "yes";
+}
+
+function setParamIfPresent(params: URLSearchParams, key: string, value: string): void {
+  if (value) {
+    params.set(key, value);
+  }
+}
+
+function leadingSpaces(value: string): number {
+  return value.length - value.trimStart().length;
 }
 
 function nodesFromJSON(value: unknown, raw: string): ProxyNode[] {
@@ -840,8 +1183,14 @@ function endpointFromSettings(
     const endpoint = firstPeer ? stringValue(firstPeer.endpoint) : "";
     return parseEndpoint(endpoint, "wireguard", 0);
   }
+
+  const legacyEndpoint = endpointFromLegacyServerSettings(protocol, settings);
+  if (legacyEndpoint) {
+    return legacyEndpoint;
+  }
+
   return {
-    address: stringValue(settings.address) || protocol,
+    address: stringValue(settings.address) || stringValue(settings.server) || protocol,
     port: numberValue(settings.port),
   };
 }
@@ -853,19 +1202,86 @@ function credentialFromSettings(
   switch (protocol) {
     case "vless":
     case "vmess":
-      return stringOrUndefined(stringValue(settings.id));
+      return stringOrUndefined(
+        stringValue(settings.id) || stringValue(firstLegacyUser(settings)?.id),
+      );
     case "trojan":
-    case "shadowsocks":
     case "hysteria":
-      return stringOrUndefined(stringValue(settings.password) || stringValue(settings.auth));
+      return stringOrUndefined(
+        stringValue(settings.password) ||
+          stringValue(settings.auth) ||
+          stringValue(settings.authString) ||
+          stringValue(firstLegacyServer(settings)?.password),
+      );
+    case "shadowsocks": {
+      const method = stringValue(settings.method) || stringValue(firstLegacyServer(settings)?.method);
+      const password =
+        stringValue(settings.password) || stringValue(firstLegacyServer(settings)?.password);
+      if (method && password) {
+        return `${method}:${password}`;
+      }
+      return stringOrUndefined(password);
+    }
     case "socks":
-    case "http":
-      return stringOrUndefined(stringValue(settings.user));
+    case "http": {
+      const userRecord = firstLegacyServerUser(settings);
+      const user = stringValue(settings.user) || stringValue(userRecord?.user);
+      const pass = stringValue(settings.pass) || stringValue(userRecord?.pass);
+      return stringOrUndefined(user ? `${user}${pass ? ":***" : ""}` : "");
+    }
     case "wireguard":
       return stringOrUndefined(stringValue(settings.secretKey));
     default:
       return undefined;
   }
+}
+
+function endpointFromLegacyServerSettings(
+  protocol: ProxyProtocol,
+  settings: Record<string, unknown>,
+): { address: string; port: number } | null {
+  if (protocol === "vless" || protocol === "vmess") {
+    const firstVnext = firstRecord(settings.vnext);
+    if (firstVnext) {
+      const address = stringValue(firstVnext.address);
+      const port = numberValue(firstVnext.port);
+      if (address || port > 0) {
+        return { address: address || protocol, port };
+      }
+    }
+  }
+
+  const firstServer = firstLegacyServer(settings);
+  if (!firstServer) {
+    return null;
+  }
+  const address = stringValue(firstServer.address) || stringValue(firstServer.server);
+  const port = numberValue(firstServer.port);
+  if (!address && port === 0) {
+    return null;
+  }
+  return { address: address || protocol, port };
+}
+
+function firstLegacyServer(settings: Record<string, unknown>): Record<string, unknown> | null {
+  return firstRecord(settings.servers);
+}
+
+function firstLegacyUser(settings: Record<string, unknown>): Record<string, unknown> | null {
+  const firstVnext = firstRecord(settings.vnext);
+  return firstVnext ? firstRecord(firstVnext.users) : null;
+}
+
+function firstLegacyServerUser(settings: Record<string, unknown>): Record<string, unknown> | null {
+  const firstServer = firstLegacyServer(settings);
+  return firstServer ? firstRecord(firstServer.users) : null;
+}
+
+function firstRecord(value: unknown): Record<string, unknown> | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  return value.find(isRecord) ?? null;
 }
 
 function sniFromStream(stream: Record<string, unknown>): string | undefined {

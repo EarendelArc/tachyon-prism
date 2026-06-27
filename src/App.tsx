@@ -3,6 +3,7 @@ import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
   stringifyDraft,
+  type XrayRoutingMode,
 } from "./domain/configDrafts";
 import {
   getConfigPaths,
@@ -63,7 +64,6 @@ import {
   saveLanguage,
   type Language,
 } from "./domain/i18n";
-import { isTauriRuntime } from "./domain/tauri";
 import { TelemetryClient } from "./domain/telemetry";
 import type { TelemetryData, TelemetryState } from "./domain/telemetry";
 
@@ -74,6 +74,7 @@ type ReadinessState = "error" | "ok" | "warning";
 type SubscriptionViewMode = "grid" | "list";
 
 const prismViews: PrismView[] = ["overview", "configs", "subscriptions", "plugins", "settings"];
+const routingModeStorageKey = "tachyon.prism.routingMode.v1";
 
 interface ReadinessItem {
   detail: string;
@@ -460,6 +461,29 @@ function viewFromHash(hash: string): PrismView {
   return prismViews.includes(value as PrismView) ? (value as PrismView) : "overview";
 }
 
+function loadRoutingMode(): XrayRoutingMode {
+  try {
+    const value = globalThis.localStorage?.getItem(routingModeStorageKey);
+    return value === "direct" || value === "global" || value === "rule" ? value : "rule";
+  } catch {
+    return "rule";
+  }
+}
+
+function saveRoutingMode(mode: XrayRoutingMode): void {
+  globalThis.localStorage?.setItem(routingModeStorageKey, mode);
+}
+
+function routingModeLabel(mode: XrayRoutingMode, ui: typeof zh): string {
+  if (mode === "global") {
+    return ui.globalMode;
+  }
+  if (mode === "direct") {
+    return ui.directMode;
+  }
+  return ui.rulesMode;
+}
+
 function profileMatchLabel(profile: GameProfile): string {
   const labels = [
     ...profile.match.processNames,
@@ -537,6 +561,7 @@ function draftText(
   activeNode: ProxyNode | undefined,
   profiles: GameProfile[],
   launcherSettings: LauncherSettings,
+  routingMode: XrayRoutingMode,
 ): { core: string; error: string; xray: string } {
   if (!activeNode) {
     return { core: "", error: "", xray: "" };
@@ -550,7 +575,7 @@ function draftText(
         }),
       ),
       error: "",
-      xray: stringifyDraft(buildXrayClientConfigDraft(activeNode)),
+      xray: stringifyDraft(buildXrayClientConfigDraft(activeNode, { routingMode })),
     };
   } catch (error) {
     return {
@@ -610,6 +635,7 @@ export function App() {
   const [subscriptionText, setSubscriptionText] = useState("");
   const [subscriptionViewMode, setSubscriptionViewMode] = useState<SubscriptionViewMode>("grid");
   const [policyGroupViewMode, setPolicyGroupViewMode] = useState<SubscriptionViewMode>("grid");
+  const [routingMode, setRoutingMode] = useState<XrayRoutingMode>(loadRoutingMode);
   const [showUnavailableNodes, setShowUnavailableNodes] = useState(false);
   const [sortPolicyNodesByDelay, setSortPolicyNodesByDelay] = useState(true);
   const [expandedPolicyGroupId, setExpandedPolicyGroupId] = useState("node-selector");
@@ -645,8 +671,8 @@ export function App() {
   );
   const activeNode = useMemo(() => selectedNode(subscription), [subscription]);
   const drafts = useMemo(
-    () => draftText(activeNode, profiles, launcherSettings),
-    [activeNode, launcherSettings, profiles],
+    () => draftText(activeNode, profiles, launcherSettings, routingMode),
+    [activeNode, launcherSettings, profiles, routingMode],
   );
   const traffic = useMemo(() => telemetryBytes(telemetry.latestTelemetry), [telemetry.latestTelemetry]);
   const trafficSamples = useMemo(
@@ -896,6 +922,12 @@ export function App() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Subscription removal failed");
     }
+  }
+
+  function changeRoutingMode(mode: XrayRoutingMode) {
+    setRoutingMode(mode);
+    saveRoutingMode(mode);
+    setMessage(`${routingModeLabel(mode, ui)} mode selected`);
   }
 
   async function copyDraft(label: string, value: string) {
@@ -1244,6 +1276,8 @@ export function App() {
         {activeView === "overview" ? (
           <OverviewView
             nodeCount={subscriptionNodeCount}
+            onRoutingModeChange={changeRoutingMode}
+            routingMode={routingMode}
             telemetry={telemetry}
             traffic={traffic}
             trafficSamples={trafficSamples}
@@ -1381,12 +1415,16 @@ export function App() {
 
 function OverviewView({
   nodeCount,
+  onRoutingModeChange,
+  routingMode,
   telemetry,
   traffic,
   trafficSamples,
   ui,
 }: {
   nodeCount: number;
+  onRoutingModeChange: (mode: XrayRoutingMode) => void;
+  routingMode: XrayRoutingMode;
   telemetry: TelemetryState;
   traffic: { down: number; total: number; up: number };
   trafficSamples: TrafficSample[];
@@ -1447,15 +1485,30 @@ function OverviewView({
         <aside className="overview-side">
           <h2>{ui.workMode}</h2>
           <div className="work-mode-list">
-            <button className="mode-option" type="button">
+            <button
+              aria-pressed={routingMode === "global"}
+              className={routingMode === "global" ? "mode-option active" : "mode-option"}
+              type="button"
+              onClick={() => onRoutingModeChange("global")}
+            >
               <strong>{ui.globalMode}</strong>
               <span>{ui.globalModeDesc}</span>
             </button>
-            <button className="mode-option active" type="button">
+            <button
+              aria-pressed={routingMode === "rule"}
+              className={routingMode === "rule" ? "mode-option active" : "mode-option"}
+              type="button"
+              onClick={() => onRoutingModeChange("rule")}
+            >
               <strong>{ui.rulesMode}</strong>
               <span>{ui.rulesModeDesc}</span>
             </button>
-            <button className="mode-option" type="button">
+            <button
+              aria-pressed={routingMode === "direct"}
+              className={routingMode === "direct" ? "mode-option active" : "mode-option"}
+              type="button"
+              onClick={() => onRoutingModeChange("direct")}
+            >
               <strong>{ui.directMode}</strong>
               <span>{ui.directModeDesc}</span>
             </button>

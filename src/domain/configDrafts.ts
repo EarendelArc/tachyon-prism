@@ -4,9 +4,12 @@ import { buildXrayOutboundDraft } from "./subscriptions";
 import type { ProxyNode, XrayOutboundObject } from "./subscriptions";
 
 export interface XrayClientDraftOptions {
+  routingMode?: XrayRoutingMode;
   socksListen?: string;
   socksPort?: number;
 }
+
+export type XrayRoutingMode = "direct" | "global" | "rule";
 
 export interface CoreClientDraftOptions {
   gameProfiles?: GameProfile[];
@@ -34,6 +37,7 @@ export function buildXrayClientConfigDraft(
         },
       },
     ],
+    routing: xrayRouting(options.routingMode ?? "rule"),
     outbounds: [
       outbound,
       {
@@ -124,6 +128,42 @@ function withTag(outbound: XrayOutboundObject, tag: string): XrayOutboundObject 
   return {
     ...outbound,
     tag,
+  };
+}
+
+function xrayRouting(mode: XrayRoutingMode): Record<string, unknown> {
+  if (mode === "direct" || mode === "global") {
+    return {
+      domainStrategy: "AsIs",
+      rules: [
+        {
+          type: "field",
+          inboundTag: ["tachyon-socks"],
+          outboundTag: mode === "direct" ? "tachyon-direct" : "tachyon-proxy",
+        },
+      ],
+    };
+  }
+
+  return {
+    domainStrategy: "IPIfNonMatch",
+    rules: [
+      {
+        type: "field",
+        ip: ["geoip:private"],
+        outboundTag: "tachyon-direct",
+      },
+      {
+        type: "field",
+        domain: ["geosite:private"],
+        outboundTag: "tachyon-direct",
+      },
+      {
+        type: "field",
+        protocol: ["bittorrent"],
+        outboundTag: "tachyon-block",
+      },
+    ],
   };
 }
 

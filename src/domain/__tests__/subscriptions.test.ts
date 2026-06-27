@@ -106,6 +106,193 @@ describe("parseSubscription", () => {
     expect(nodes[2].name).toBe("Game Hysteria");
   });
 
+  it("extracts metadata from legacy Xray VLESS and VMess outbounds", () => {
+    const payload = JSON.stringify({
+      outbounds: [
+        {
+          tag: "Legacy VLESS",
+          protocol: "vless",
+          settings: {
+            vnext: [
+              {
+                address: "vless.example.com",
+                port: 443,
+                users: [{ id: "vless-uuid", encryption: "none", flow: "xtls-rprx-vision" }],
+              },
+            ],
+          },
+          streamSettings: {
+            network: "tcp",
+            security: "reality",
+            realitySettings: { serverName: "www.microsoft.com" },
+          },
+        },
+        {
+          tag: "Legacy VMess",
+          protocol: "vmess",
+          settings: {
+            vnext: [
+              {
+                address: "vmess.example.com",
+                port: 8443,
+                users: [{ id: "vmess-uuid", security: "auto" }],
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    const nodes = parseSubscription(payload);
+
+    expect(nodes).toHaveLength(2);
+    expect(nodes[0]).toMatchObject({
+      name: "Legacy VLESS",
+      protocol: "vless",
+      address: "vless.example.com",
+      port: 443,
+      credential: "vless-uuid",
+      security: "reality",
+      sni: "www.microsoft.com",
+    });
+    expect(nodes[1]).toMatchObject({
+      name: "Legacy VMess",
+      protocol: "vmess",
+      address: "vmess.example.com",
+      port: 8443,
+      credential: "vmess-uuid",
+    });
+    expect(buildXrayOutboundDraft(nodes[0]).settings).toHaveProperty("vnext");
+  });
+
+  it("extracts metadata from legacy Xray server arrays", () => {
+    const payload = JSON.stringify({
+      outbounds: [
+        {
+          tag: "Legacy Trojan",
+          protocol: "trojan",
+          settings: {
+            servers: [{ address: "trojan.example.com", port: 443, password: "secret" }],
+          },
+        },
+        {
+          tag: "Legacy Shadowsocks",
+          protocol: "shadowsocks",
+          settings: {
+            servers: [
+              {
+                address: "ss.example.com",
+                port: 8388,
+                method: "2022-blake3-aes-128-gcm",
+                password: "ss-secret",
+              },
+            ],
+          },
+        },
+        {
+          tag: "Legacy HTTP",
+          protocol: "http",
+          settings: {
+            servers: [
+              {
+                address: "http.example.com",
+                port: 8080,
+                users: [{ user: "alice", pass: "password" }],
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    const nodes = parseSubscription(payload);
+
+    expect(nodes).toHaveLength(3);
+    expect(nodes[0]).toMatchObject({
+      name: "Legacy Trojan",
+      protocol: "trojan",
+      address: "trojan.example.com",
+      port: 443,
+      credential: "secret",
+    });
+    expect(nodes[1]).toMatchObject({
+      name: "Legacy Shadowsocks",
+      protocol: "shadowsocks",
+      address: "ss.example.com",
+      port: 8388,
+      credential: "2022-blake3-aes-128-gcm:ss-secret",
+    });
+    expect(nodes[2]).toMatchObject({
+      name: "Legacy HTTP",
+      protocol: "http",
+      address: "http.example.com",
+      port: 8080,
+      credential: "alice:***",
+    });
+  });
+
+  it("parses common Clash/Mihomo YAML proxy lists", () => {
+    const payload = `
+proxies:
+  - name: Clash VLESS Reality
+    type: vless
+    server: vless.example.com
+    port: 443
+    uuid: vless-uuid
+    network: ws
+    tls: true
+    servername: www.cloudflare.com
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: reality-public-key
+      short-id: "01"
+    ws-opts:
+      path: /ws
+      headers:
+        Host: cdn.example.com
+  - name: Clash SS
+    type: ss
+    server: ss.example.com
+    port: 8388
+    cipher: 2022-blake3-aes-128-gcm
+    password: ss-secret
+proxy-groups:
+  - name: Selector
+    type: select
+    proxies:
+      - Clash VLESS Reality
+      - Clash SS
+`;
+
+    const nodes = parseSubscription(payload);
+
+    expect(nodes).toHaveLength(2);
+    expect(nodes[0]).toMatchObject({
+      name: "Clash VLESS Reality",
+      protocol: "vless",
+      address: "vless.example.com",
+      port: 443,
+      credential: "vless-uuid",
+      security: "reality",
+      transport: "websocket",
+      sni: "www.cloudflare.com",
+    });
+    expect(nodes[0].outbound?.streamSettings).toMatchObject({
+      security: "reality",
+      wsSettings: {
+        path: "/ws",
+        headers: { Host: "cdn.example.com" },
+      },
+    });
+    expect(nodes[1]).toMatchObject({
+      name: "Clash SS",
+      protocol: "shadowsocks",
+      address: "ss.example.com",
+      port: 8388,
+      credential: "2022-blake3-aes-128-gcm:ss-secret",
+    });
+  });
+
   it("deduplicates nodes with the same ID", () => {
     const uri = "vless://uuid@10.0.0.1:443\nvless://uuid@10.0.0.1:443";
     const nodes = parseSubscription(uri);

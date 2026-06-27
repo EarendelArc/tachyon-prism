@@ -134,6 +134,34 @@ describe("buildXrayClientConfigDraft", () => {
     const settings = inbounds[0].settings as Record<string, unknown>;
     expect(settings.udp).toBe(true);
   });
+
+  it("uses rule routing by default", () => {
+    const config = buildXrayClientConfigDraft(mockVMessNode);
+    const routing = config.routing as Record<string, unknown>;
+    const rules = routing.rules as Array<Record<string, unknown>>;
+
+    expect(routing.domainStrategy).toBe("IPIfNonMatch");
+    expect(rules.some((rule) => rule.outboundTag === "tachyon-direct")).toBe(true);
+    expect(rules.some((rule) => rule.outboundTag === "tachyon-block")).toBe(true);
+  });
+
+  it("can force all Xray traffic through proxy or direct mode", () => {
+    const globalConfig = buildXrayClientConfigDraft(mockVMessNode, {
+      routingMode: "global",
+    });
+    const directConfig = buildXrayClientConfigDraft(mockVMessNode, {
+      routingMode: "direct",
+    });
+    const globalRule = ((globalConfig.routing as Record<string, unknown>).rules as Array<
+      Record<string, unknown>
+    >)[0];
+    const directRule = ((directConfig.routing as Record<string, unknown>).rules as Array<
+      Record<string, unknown>
+    >)[0];
+
+    expect(globalRule.outboundTag).toBe("tachyon-proxy");
+    expect(directRule.outboundTag).toBe("tachyon-direct");
+  });
 });
 
 describe("buildCoreClientConfigDraft", () => {
