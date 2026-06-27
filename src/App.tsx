@@ -615,7 +615,6 @@ export function App() {
   const [expandedPolicyGroupId, setExpandedPolicyGroupId] = useState("node-selector");
   const [nodePickerOpen, setNodePickerOpen] = useState(false);
   const [controllerOpen, setControllerOpen] = useState(false);
-  const [alwaysOnTop, setAlwaysOnTop] = useState(false);
   const [language, setLanguage] = useState<Language>(loadLanguage);
   const [configPaths, setConfigPaths] = useState<ConfigDraftPaths | null>(null);
   const [runtimePaths, setRuntimePaths] = useState<RuntimePaths | null>(null);
@@ -1139,33 +1138,6 @@ export function App() {
     }
   }
 
-  async function handleWindowAction(action: "close" | "maximize" | "minimize" | "pin") {
-    if (!isTauriRuntime()) {
-      return;
-    }
-    try {
-      const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      const appWindow = getCurrentWindow();
-      if (action === "pin") {
-        const nextAlwaysOnTop = !alwaysOnTop;
-        await appWindow.setAlwaysOnTop(nextAlwaysOnTop);
-        setAlwaysOnTop(nextAlwaysOnTop);
-        return;
-      }
-      if (action === "minimize") {
-        await appWindow.minimize();
-        return;
-      }
-      if (action === "maximize") {
-        await appWindow.toggleMaximize();
-        return;
-      }
-      await appWindow.close();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Window action failed");
-    }
-  }
-
   useEffect(() => {
     const onHashChange = () => setActiveView(viewFromHash(globalThis.location?.hash ?? ""));
     globalThis.addEventListener?.("hashchange", onHashChange);
@@ -1228,25 +1200,6 @@ export function App() {
           <span className="app-cube">◆</span>
           <strong>Tachyon Prism v0.1.0</strong>
           <span>Rolling Preview</span>
-        </div>
-        <div className="window-actions">
-          <button
-            aria-pressed={alwaysOnTop}
-            className={alwaysOnTop ? "active" : ""}
-            type="button"
-            onClick={() => void handleWindowAction("pin")}
-          >
-            ⌖
-          </button>
-          <button type="button" onClick={() => void handleWindowAction("minimize")}>
-            ─
-          </button>
-          <button type="button" onClick={() => void handleWindowAction("maximize")}>
-            □
-          </button>
-          <button type="button" onClick={() => void handleWindowAction("close")}>
-            ×
-          </button>
         </div>
       </header>
 

@@ -139,34 +139,6 @@ a {
   width: 21px;
 }
 
-.window-actions {
-  align-items: center;
-  color: rgba(255, 255, 255, 0.78);
-  display: flex;
-  font-weight: 800;
-  gap: 12px;
-}
-
-.window-actions button {
-  background: transparent;
-  border: 0;
-  border-radius: 6px;
-  box-shadow: none;
-  color: rgba(255, 255, 255, 0.82);
-  font-weight: 900;
-  min-height: 24px;
-  min-width: 26px;
-  padding: 1px 6px;
-  transform: none;
-}
-
-.window-actions button:hover,
-.window-actions button.active {
-  background: rgba(0, 120, 255, 0.16);
-  color: #ffffff;
-  transform: none;
-}
-
 .top-nav {
   align-items: center;
   display: flex;
@@ -1192,11 +1164,6 @@ p,
 
   .title-left span:last-child {
     display: none;
-  }
-
-  .window-actions {
-    flex-shrink: 0;
-    gap: 14px;
   }
 
   .top-nav {
