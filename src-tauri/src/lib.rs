@@ -2245,6 +2245,14 @@ pub fn run() {
             start_tachyon_core,
             stop_tachyon_core
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Tachyon Prism");
+        .build(tauri::generate_context!())
+        .expect("failed to build Tachyon Prism")
+        .run(|handle, event| {
+            if matches!(event, tauri::RunEvent::Ready) {
+                if let Some(window) = handle.webview_windows().get("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        });
 }
