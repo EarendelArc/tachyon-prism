@@ -238,22 +238,162 @@ def import_sample_subscription(cdp: CDP) -> str:
             "hysteria2://secret@example.net:443?sni=game.example.net&insecure=1#Smoke Hysteria",
         ],
     )
+    return import_subscription_payload(cdp, "Smoke", sample)
+
+
+def import_clash_subscription(cdp: CDP) -> str:
+    sample = """
+proxies:
+  - name: Clash Smoke VLESS
+    type: vless
+    server: clash-vless.example.com
+    port: 443
+    uuid: clash-vless-uuid
+    network: ws
+    tls: true
+    servername: www.cloudflare.com
+    ws-opts:
+      path: /ws
+      headers:
+        Host: cdn.example.com
+  - name: Clash Smoke SS
+    type: ss
+    server: clash-ss.example.com
+    port: 8388
+    cipher: 2022-blake3-aes-128-gcm
+    password: ss-secret
+"""
+    return import_subscription_payload(cdp, "Clash Smoke", sample)
+
+
+def import_subscription_payload(cdp: CDP, name: str, payload: str) -> str:
     return str(
         cdp.evaluate(
             f"""
             new Promise((resolve) => {{
               const setValue = (element, value) => {{
+                if (!element) throw new Error('subscription form element missing');
                 const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value');
                 descriptor.set.call(element, value);
                 element.dispatchEvent(new Event('input', {{ bubbles: true }}));
               }};
-              setValue(document.querySelector('input[placeholder="订阅名称"], input[placeholder="Subscription name"]'), 'Smoke');
-              setValue(document.querySelector('textarea'), {json.dumps(sample)});
-              const button = Array.from(document.querySelectorAll('button')).find((item) =>
-                item.textContent.trim() === '导入' || item.textContent.trim() === 'Import'
-              );
+              const card = document.querySelector('.add-sub-card');
+              if (!card) throw new Error('subscription add card missing');
+              const inputs = card.querySelectorAll('input');
+              setValue(inputs[0], {json.dumps(name)});
+              setValue(inputs[1], '');
+              setValue(card.querySelector('textarea'), {json.dumps(payload)});
+              const button = card.querySelector('.row-actions button:last-child');
+              if (!button) throw new Error('import button missing');
               button.click();
               setTimeout(() => resolve(document.body.innerText), 600);
+            }})
+            """,
+            await_promise=True,
+        ),
+    )
+
+
+def click_add_subscription(cdp: CDP) -> dict[str, Any]:
+    return cdp.evaluate(
+        """
+        new Promise((resolve) => {
+          location.hash = 'subscriptions';
+          setTimeout(() => {
+            const add = document.querySelector('.section-toolbar .primary-action');
+            if (!add) throw new Error('top add subscription button missing');
+            add.click();
+            setTimeout(() => resolve({
+              activeTag: document.activeElement?.tagName ?? '',
+              activePlaceholder: document.activeElement?.getAttribute('placeholder') ?? '',
+              text: document.body.innerText
+            }), 350);
+          }, 350);
+        })
+        """,
+        await_promise=True,
+    )
+
+
+def choose_node(cdp: CDP, node_name: str) -> str:
+    return str(
+        cdp.evaluate(
+            f"""
+            new Promise((resolve) => {{
+              const node = Array.from(document.querySelectorAll('.node-tile')).find((item) =>
+                item.textContent.includes({json.dumps(node_name)})
+              );
+              if (!node) throw new Error('node tile not found: ' + {json.dumps(node_name)});
+              node.click();
+              setTimeout(() => resolve(document.body.innerText), 400);
+            }})
+            """,
+            await_promise=True,
+        ),
+    )
+
+
+def switch_routing_mode(cdp: CDP, mode: str) -> str:
+    return str(
+        cdp.evaluate(
+            f"""
+            new Promise((resolve) => {{
+              location.hash = 'overview';
+              setTimeout(() => {{
+                const button = document.querySelector('[data-routing-mode="{mode}"]');
+                if (!button) throw new Error('routing mode button missing: {mode}');
+                button.click();
+                setTimeout(() => resolve(document.body.innerText), 350);
+              }}, 350);
+            }})
+            """,
+            await_promise=True,
+        ),
+    )
+
+
+def active_routing_mode(cdp: CDP) -> str:
+    return str(
+        cdp.evaluate(
+            "document.querySelector('.work-mode-list .mode-option.active')?.dataset.routingMode ?? ''",
+        ),
+    )
+
+
+def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
+    return cdp.evaluate(
+        """
+        new Promise((resolve) => {
+          location.hash = 'settings';
+          setTimeout(() => {
+            document.querySelectorAll('.settings-sidebar button')[1]?.click();
+            setTimeout(() => {
+              const raw = document.querySelector('textarea[data-config-draft="xray"]')?.value ?? '{}';
+              const config = JSON.parse(raw);
+              const rules = config.routing?.rules ?? [];
+              resolve({
+                domainStrategy: config.routing?.domainStrategy ?? '',
+                firstOutboundTag: rules[0]?.outboundTag ?? '',
+                hasBlockRule: rules.some((rule) => rule.outboundTag === 'tachyon-block'),
+                ruleCount: rules.length
+              });
+            }, 350);
+          }, 350);
+        })
+        """,
+        await_promise=True,
+    )
+
+
+def select_settings_section(cdp: CDP, index: int) -> str:
+    return str(
+        cdp.evaluate(
+            f"""
+            new Promise((resolve) => {{
+              const button = document.querySelectorAll('.settings-sidebar button')[{index}];
+              if (!button) throw new Error('settings section button missing: {index}');
+              button.click();
+              setTimeout(() => resolve(document.body.innerText), 350);
             }})
             """,
             await_promise=True,
@@ -348,15 +488,47 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         text = navigate_hash(cdp, "subscriptions")
         assert_contains(text, "订阅", "节点选择")
         assert_no_runtime_error(text)
+        add_state = click_add_subscription(cdp)
+        if add_state["activeTag"] != "INPUT":
+            raise AssertionError(f"add subscription did not focus the form: {add_state}")
         text = import_sample_subscription(cdp)
         assert_contains(text, "Smoke", "Smoke VLESS", "Smoke Trojan", "Smoke Hysteria")
+        text = import_clash_subscription(cdp)
+        assert_contains(text, "Clash Smoke", "Clash Smoke VLESS", "Clash Smoke SS")
+        text = choose_node(cdp, "Clash Smoke SS")
+        assert_contains(text, "Clash Smoke SS", "Node selected")
         cdp.screenshot(output_dir / "subscriptions-desktop.png")
 
         text = navigate_hash(cdp, "configs")
-        assert_contains(text, "策略组", "节点选择", "自动选择", "漏网之鱼", "Smoke VLESS")
+        assert_contains(text, "策略组", "节点选择", "自动选择", "漏网之鱼", "Clash Smoke SS")
         assert_no_runtime_error(text)
         assert_no_horizontal_overflow(cdp)
         cdp.screenshot(output_dir / "configs-desktop.png")
+
+        text = switch_routing_mode(cdp, "global")
+        assert_contains(text, "mode selected")
+        if active_routing_mode(cdp) != "global":
+            raise AssertionError("global routing mode did not become active")
+        summary = xray_routing_summary(cdp)
+        if summary["firstOutboundTag"] != "tachyon-proxy":
+            raise AssertionError(f"global routing config mismatch: {summary}")
+
+        text = switch_routing_mode(cdp, "direct")
+        assert_contains(text, "mode selected")
+        if active_routing_mode(cdp) != "direct":
+            raise AssertionError("direct routing mode did not become active")
+        summary = xray_routing_summary(cdp)
+        if summary["firstOutboundTag"] != "tachyon-direct":
+            raise AssertionError(f"direct routing config mismatch: {summary}")
+
+        text = switch_routing_mode(cdp, "rule")
+        assert_contains(text, "mode selected")
+        if active_routing_mode(cdp) != "rule":
+            raise AssertionError("rule routing mode did not become active")
+        summary = xray_routing_summary(cdp)
+        if summary["domainStrategy"] != "IPIfNonMatch" or not summary["hasBlockRule"]:
+            raise AssertionError(f"rule routing config mismatch: {summary}")
+        cdp.screenshot(output_dir / "routing-modes-desktop.png")
 
         text = navigate_hash(cdp, "plugins")
         assert_contains(text, "插件中心", "滚动发行", "节点转换")
@@ -364,6 +536,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         cdp.screenshot(output_dir / "plugins-desktop.png")
 
         text = navigate_hash(cdp, "settings")
+        text = select_settings_section(cdp, 0)
         assert_contains(text, "个性化", "主题", "核心")
         assert_no_runtime_error(text)
         text = switch_to_english(cdp)

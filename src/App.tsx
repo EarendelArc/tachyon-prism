@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
@@ -661,6 +661,7 @@ export function App() {
     recentErrors: [],
   }));
   const telemetryClient = useMemo(() => new TelemetryClient(), []);
+  const subscriptionNameInputRef = useRef<HTMLInputElement | null>(null);
   const t = useMemo(() => createTranslator(language), [language]);
   const ui = language === "zh-CN" ? zh : en;
   const currentSubscription = useMemo(() => activeSubscription(subscription), [subscription]);
@@ -930,6 +931,15 @@ export function App() {
     setMessage(`${routingModeLabel(mode, ui)} mode selected`);
   }
 
+  function prepareSubscriptionAdd() {
+    navigateView("subscriptions");
+    setSubscriptionName("");
+    setSubscriptionUrl("");
+    setSubscriptionText("");
+    setMessage("Ready to add subscription");
+    globalThis.setTimeout?.(() => subscriptionNameInputRef.current?.focus(), 50);
+  }
+
   async function copyDraft(label: string, value: string) {
     if (!value) {
       setMessage("No config draft available");
@@ -1144,6 +1154,15 @@ export function App() {
     }
   }
 
+  async function toggleRuntime(kind: ManagedBinaryKind) {
+    const currentStatus = kind === "xray" ? runtimeStatus?.xray : runtimeStatus?.tachyonCore;
+    if (currentStatus?.state === "running") {
+      await stopRuntime(kind);
+      return;
+    }
+    await startRuntime(kind);
+  }
+
   async function startAllRuntime() {
     await startRuntime("xray");
     await startRuntime("tachyonCore");
@@ -1252,10 +1271,20 @@ export function App() {
 
       <section className="quick-strip">
         <div className="mode-pills">
-          <button className="pill active" type="button">
+          <button
+            aria-pressed={runtimeStatus?.xray.state === "running"}
+            className={runtimeStatus?.xray.state === "running" ? "pill active" : "pill"}
+            type="button"
+            onClick={() => void toggleRuntime("xray")}
+          >
             {ui.systemProxy}
           </button>
-          <button className="pill active" type="button">
+          <button
+            aria-pressed={runtimeStatus?.tachyonCore.state === "running"}
+            className={runtimeStatus?.tachyonCore.state === "running" ? "pill active" : "pill"}
+            type="button"
+            onClick={() => void toggleRuntime("tachyonCore")}
+          >
             {ui.tunMode}
           </button>
         </div>
@@ -1307,11 +1336,13 @@ export function App() {
             activeNode={activeNode}
             currentSubscription={currentSubscription}
             nodeCount={subscriptionNodeCount}
+            nameInputRef={subscriptionNameInputRef}
             onChooseNode={chooseNode}
             onChooseSubscription={chooseSubscription}
             onDeleteSubscription={deleteSubscription}
             onImportText={importSubscriptionText}
             onNameChange={setSubscriptionName}
+            onPrepareAdd={prepareSubscriptionAdd}
             onTextChange={setSubscriptionText}
             onUpdate={() => void updateSubscriptionFromUrl()}
             onUrlChange={setSubscriptionUrl}
@@ -1488,6 +1519,7 @@ function OverviewView({
             <button
               aria-pressed={routingMode === "global"}
               className={routingMode === "global" ? "mode-option active" : "mode-option"}
+              data-routing-mode="global"
               type="button"
               onClick={() => onRoutingModeChange("global")}
             >
@@ -1497,6 +1529,7 @@ function OverviewView({
             <button
               aria-pressed={routingMode === "rule"}
               className={routingMode === "rule" ? "mode-option active" : "mode-option"}
+              data-routing-mode="rule"
               type="button"
               onClick={() => onRoutingModeChange("rule")}
             >
@@ -1506,6 +1539,7 @@ function OverviewView({
             <button
               aria-pressed={routingMode === "direct"}
               className={routingMode === "direct" ? "mode-option active" : "mode-option"}
+              data-routing-mode="direct"
               type="button"
               onClick={() => onRoutingModeChange("direct")}
             >
@@ -1739,12 +1773,14 @@ function ConfigsView({
 function SubscriptionsView({
   activeNode,
   currentSubscription,
+  nameInputRef,
   nodeCount,
   onChooseNode,
   onChooseSubscription,
   onDeleteSubscription,
   onImportText,
   onNameChange,
+  onPrepareAdd,
   onTextChange,
   onUpdate,
   onUrlChange,
@@ -1758,12 +1794,14 @@ function SubscriptionsView({
 }: {
   activeNode: ProxyNode | undefined;
   currentSubscription: SubscriptionProfile | undefined;
+  nameInputRef: RefObject<HTMLInputElement | null>;
   nodeCount: number;
   onChooseNode: (id: string) => void;
   onChooseSubscription: (id: string) => void;
   onDeleteSubscription: (id: string) => void;
   onImportText: () => void;
   onNameChange: (value: string) => void;
+  onPrepareAdd: () => void;
   onTextChange: (value: string) => void;
   onUpdate: () => void;
   onUrlChange: (value: string) => void;
@@ -1798,7 +1836,7 @@ function SubscriptionsView({
           <button type="button" onClick={onUpdate}>
             {ui.updateAll}
           </button>
-          <button className="primary-action" type="button" onClick={onUpdate}>
+          <button className="primary-action" type="button" onClick={onPrepareAdd}>
             + {ui.add}
           </button>
         </div>
@@ -1809,6 +1847,7 @@ function SubscriptionsView({
           <article className="glass-card add-sub-card">
             <h2>{ui.subscriptions}</h2>
             <input
+              ref={nameInputRef}
               placeholder={ui.subscriptionName}
               value={subscriptionName}
               onChange={(event) => onNameChange(event.target.value)}
@@ -1865,9 +1904,9 @@ function SubscriptionsView({
               </p>
             </div>
             <div className="panel-icons">
-              <button type="button">⌯</button>
-              <button type="button">↻</button>
-              <button type="button">⌄</button>
+              <button type="button" title={ui.list} onClick={() => setViewMode(viewMode === "grid" ? "list" : "grid")}>⌯</button>
+              <button type="button" title={ui.refreshLatency} onClick={onUpdate}>↻</button>
+              <button type="button" title={ui.nodeSelector} onClick={() => setViewMode("grid")}>⌄</button>
             </div>
           </header>
           <div className={viewMode === "grid" ? "node-card-grid" : "node-list-view"}>
@@ -2251,8 +2290,8 @@ function SettingsView({
                 </div>
               ) : null}
               <div className="config-grid">
-                <label><span>Xray</span><textarea readOnly value={drafts.xray} /></label>
-                <label><span>Core</span><textarea readOnly value={drafts.core} /></label>
+                <label><span>Xray</span><textarea data-config-draft="xray" readOnly value={drafts.xray} /></label>
+                <label><span>Core</span><textarea data-config-draft="core" readOnly value={drafts.core} /></label>
               </div>
             </article>
           </div>
