@@ -96,9 +96,14 @@ describe("buildXrayClientConfigDraft", () => {
     const config = buildXrayClientConfigDraft(mockVMessNode);
     const inbounds = config.inbounds as Array<Record<string, unknown>>;
     const outbounds = config.outbounds as Array<Record<string, unknown>>;
-    expect(inbounds).toHaveLength(1);
+    expect(inbounds).toHaveLength(2);
     expect(inbounds[0].protocol).toBe("socks");
     expect(inbounds[0].port).toBe(10808);
+    expect(inbounds[1]).toMatchObject({
+      tag: "tachyon-http",
+      protocol: "http",
+      port: 10809,
+    });
     expect(outbounds).toHaveLength(3);
     const tags = outbounds.map((o) => o.tag);
     expect(tags).toContain("tachyon-proxy");
@@ -118,12 +123,16 @@ describe("buildXrayClientConfigDraft", () => {
 
   it("respects custom socks listen and port", () => {
     const config = buildXrayClientConfigDraft(mockVMessNode, {
+      httpListen: "127.0.0.3",
+      httpPort: 18080,
       socksListen: "0.0.0.0",
       socksPort: 9999,
     });
     const inbounds = config.inbounds as Array<Record<string, unknown>>;
     expect(inbounds[0].listen).toBe("0.0.0.0");
     expect(inbounds[0].port).toBe(9999);
+    expect(inbounds[1].listen).toBe("127.0.0.3");
+    expect(inbounds[1].port).toBe(18080);
   });
 
   it("can enable the Xray StatsService API inbound", () => {
@@ -164,6 +173,8 @@ describe("buildXrayClientConfigDraft", () => {
     expect(inbounds[0].port).toBe(10808);
     const settings = inbounds[0].settings as Record<string, unknown>;
     expect(settings.udp).toBe(true);
+    expect(inbounds[1].listen).toBe("127.0.0.1");
+    expect(inbounds[1].port).toBe(10809);
   });
 
   it("uses rule routing by default", () => {
@@ -192,6 +203,8 @@ describe("buildXrayClientConfigDraft", () => {
 
     expect(globalRule.outboundTag).toBe("tachyon-proxy");
     expect(directRule.outboundTag).toBe("tachyon-direct");
+    expect(globalRule.inboundTag).toEqual(["tachyon-socks", "tachyon-http"]);
+    expect(directRule.inboundTag).toEqual(["tachyon-socks", "tachyon-http"]);
   });
 });
 

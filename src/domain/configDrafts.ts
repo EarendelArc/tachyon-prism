@@ -5,6 +5,8 @@ import type { ProxyNode, XrayOutboundObject } from "./subscriptions";
 
 export interface XrayClientDraftOptions {
   enableStats?: boolean;
+  httpListen?: string;
+  httpPort?: number;
   routingMode?: XrayRoutingMode;
   socksListen?: string;
   socksPort?: number;
@@ -43,6 +45,15 @@ export function buildXrayClientConfigDraft(
       },
     },
   ];
+  inbounds.push({
+    tag: "tachyon-http",
+    listen: options.httpListen ?? "127.0.0.1",
+    port: options.httpPort ?? 10809,
+    protocol: "http",
+    settings: {
+      allowTransparent: false,
+    },
+  });
   const outbounds = [
     outbound,
     {
@@ -189,7 +200,7 @@ function xrayRouting(mode: XrayRoutingMode, enableStats = false): Record<string,
         ...apiRule,
         {
           type: "field",
-          inboundTag: ["tachyon-socks"],
+          inboundTag: ["tachyon-socks", "tachyon-http"],
           outboundTag: mode === "direct" ? "tachyon-direct" : "tachyon-proxy",
         },
       ],
@@ -202,16 +213,19 @@ function xrayRouting(mode: XrayRoutingMode, enableStats = false): Record<string,
       ...apiRule,
       {
         type: "field",
+        inboundTag: ["tachyon-socks", "tachyon-http"],
         ip: ["geoip:private"],
         outboundTag: "tachyon-direct",
       },
       {
         type: "field",
+        inboundTag: ["tachyon-socks", "tachyon-http"],
         domain: ["geosite:private"],
         outboundTag: "tachyon-direct",
       },
       {
         type: "field",
+        inboundTag: ["tachyon-socks", "tachyon-http"],
         protocol: ["bittorrent"],
         outboundTag: "tachyon-block",
       },

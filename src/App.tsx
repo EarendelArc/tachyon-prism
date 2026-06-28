@@ -37,6 +37,7 @@ import {
   stopTachyonCore,
   stopXray,
   testTcpLatency,
+  testXrayProxy,
   type ManagedBinaryInfo,
   type ManagedBinaryInventory,
   type ManagedBinaryKind,
@@ -133,6 +134,8 @@ const emptyRuntimeInputs = {
   tachyonTunAddress: "198.18.0.1/16",
   tachyonTunMtu: 9000,
   xrayBinaryPath: "",
+  xrayHttpListen: "127.0.0.1",
+  xrayHttpPort: 10809,
   xraySocksListen: "127.0.0.1",
   xraySocksPort: 10808,
   xrayStatsEnabled: true,
@@ -629,6 +632,8 @@ function draftText(
       xray: stringifyDraft(
         buildXrayClientConfigDraft(activeNode, {
           enableStats: runtimeSettings.xrayStatsEnabled,
+          httpListen: runtimeSettings.xrayHttpListen,
+          httpPort: runtimeSettings.xrayHttpPort,
           routingMode,
           socksListen: runtimeSettings.xraySocksListen,
           socksPort: runtimeSettings.xraySocksPort,
@@ -1229,6 +1234,29 @@ export function App() {
     }
   }
 
+  async function probeXrayProxy() {
+    try {
+      const settings = await saveRuntimeSettings(runtimeInputs);
+      setRuntimeInputs(settings);
+      const status = await getRuntimeStatus();
+      setRuntimeStatus(status);
+      if (status.xray.state !== "running") {
+        setMessage("Start Xray first, then run proxy probe");
+        return;
+      }
+      setMessage("Testing local Xray HTTP proxy...");
+      const result = await testXrayProxy();
+      const latency = result.latencyMs === null ? "n/a" : `${result.latencyMs}ms`;
+      if (result.ok) {
+        setMessage(`Proxy OK: HTTP ${result.statusCode ?? "?"} / ${latency}`);
+      } else {
+        setMessage(result.error ?? "Proxy probe failed");
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Proxy probe failed");
+    }
+  }
+
   async function startRuntime(kind: ManagedBinaryKind) {
     try {
       const paths = await writeDrafts();
@@ -1577,6 +1605,9 @@ export function App() {
           </button>
           <button type="button" onClick={() => void saveDrafts()}>
             ◫
+          </button>
+          <button aria-label="Test Xray proxy" type="button" onClick={() => void probeXrayProxy()}>
+            HTTP
           </button>
           <button type="button" onClick={() => void refreshRuntime()}>
             ↻
@@ -2535,6 +2566,26 @@ function SettingsView({
                       value={runtimeInputs.xraySocksPort}
                       onChange={(event) =>
                         setRuntimeInputs((current) => ({ ...current, xraySocksPort: Number(event.target.value) }))
+                      }
+                    />
+                  </div>
+                </label>
+                <label>
+                  <span>Xray HTTP</span>
+                  <div className="input-pair">
+                    <input
+                      value={runtimeInputs.xrayHttpListen}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({ ...current, xrayHttpListen: event.target.value }))
+                      }
+                    />
+                    <input
+                      min={1}
+                      max={65535}
+                      type="number"
+                      value={runtimeInputs.xrayHttpPort}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({ ...current, xrayHttpPort: Number(event.target.value) }))
                       }
                     />
                   </div>

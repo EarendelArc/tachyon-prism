@@ -28,8 +28,11 @@ sent through Tachyon Core for low-latency acceleration.
 - One-click saving of generated `client.json` and `xray-client.json` to the
   Tauri app config directory.
 - Persistent runtime binary path settings for Xray Core and Tachyon Core.
-- Runtime network settings for Xray SOCKS, Xray StatsService, Tachyon IPC,
-  Tachyon gRPC, TUN address/MTU, and telemetry interval.
+- Runtime network settings for Xray SOCKS, Xray HTTP probe inbound, Xray
+  StatsService, Tachyon IPC, Tachyon gRPC, TUN address/MTU, and telemetry
+  interval.
+- Local Xray proxy probe through the generated HTTP inbound, without changing
+  system proxy or enabling TUN.
 - Managed local binary installation into Prism's app config `bin` directory.
 - Online Xray Core and Tachyon Core latest-release discovery, download,
   SHA-256 verification, and managed install from GitHub release channels.
@@ -74,7 +77,9 @@ TGP relay endpoint needed for UDP game acceleration.
 
 The Config panel generates two JSON drafts from the selected node:
 
-- `xray-client.json`: a local SOCKS inbound plus the selected Xray outbound.
+- `xray-client.json`: local SOCKS and HTTP inbounds plus the selected Xray
+  outbound. The HTTP inbound is used by Prism's local proxy probe and can also
+  be used by applications that support explicit HTTP proxy configuration.
   When Xray stats are enabled, Prism also adds an official Xray API inbound
   using the `StatsService` so the Overview chart can show Xray traffic without
   involving Tachyon Core.
@@ -112,11 +117,16 @@ The Runtime panel stores binary paths in `runtime-settings.json`. `Start All`
 first writes the latest generated config files, then launches Xray with
 `xray-client.json` and Tachyon Core with `client.json`.
 The same Runtime panel stores local listen ports and Core transport settings:
-Xray SOCKS, Xray StatsService, Tachyon HTTP IPC, Tachyon gRPC, TUN address/MTU,
-and telemetry interval.
+Xray SOCKS, Xray HTTP probe inbound, Xray StatsService, Tachyon HTTP IPC,
+Tachyon gRPC, TUN address/MTU, and telemetry interval.
 On Windows, Tachyon Core also requires `wintun.dll` in the same directory as
 the configured `tachyon-core.exe`; Prism reports this in Runtime readiness and
 blocks Core start when the required sidecar is missing.
+
+The Overview quick actions include a local HTTP proxy probe. It sends an
+absolute-form HTTP request to the configured local Xray HTTP inbound and reports
+the returned status code and latency. This validates the selected Xray outbound
+path without touching OS system proxy settings or Tachyon TUN mode.
 
 The Overview traffic chart intentionally has two telemetry sources. Tachyon
 series come from Tachyon Core's SSE telemetry stream. Xray series are polled by

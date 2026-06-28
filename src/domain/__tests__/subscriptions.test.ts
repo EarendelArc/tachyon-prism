@@ -34,6 +34,21 @@ describe("parseSubscription", () => {
     expect(nodes[0].security).toBe("tls");
   });
 
+  it("maps SplitHTTP share parameters to Xray xhttp stream settings", () => {
+    const uri = "vless://uuid@example.com:443?type=splithttp&security=reality&sni=www.example.com&pbk=public-key&path=/xhttp&mode=auto#XHTTP";
+    const nodes = parseSubscription(uri);
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].transport).toBe("xhttp");
+    expect(nodes[0].outbound?.streamSettings).toMatchObject({
+      network: "xhttp",
+      security: "reality",
+      xhttpSettings: {
+        path: "/xhttp",
+        mode: "auto",
+      },
+    });
+  });
+
   it("parses Trojan URIs", () => {
     const uri = "trojan://password@example.com:8443#Trojan Node";
     const nodes = parseSubscription(uri);
@@ -229,6 +244,32 @@ describe("parseSubscription", () => {
       port: 8080,
       credential: "alice:***",
     });
+  });
+
+  it("keeps all built-in Xray outbound protocols from JSON configs", () => {
+    const payload = JSON.stringify({
+      outbounds: [
+        { tag: "Direct", protocol: "freedom", settings: { domainStrategy: "UseIP" } },
+        { tag: "Block", protocol: "blackhole", settings: { response: { type: "http" } } },
+        { tag: "DNS", protocol: "dns", settings: { address: "1.1.1.1", port: 53 } },
+        { tag: "Loop", protocol: "loopback", settings: { inboundTag: "tachyon-socks" } },
+      ],
+    });
+
+    const nodes = parseSubscription(payload);
+
+    expect(nodes.map((node) => node.protocol)).toEqual([
+      "freedom",
+      "blackhole",
+      "dns",
+      "loopback",
+    ]);
+    expect(buildXrayOutboundDraft(nodes[0])).toMatchObject({
+      protocol: "freedom",
+      settings: { domainStrategy: "UseIP" },
+    });
+    expect(nodes[1].name).toBe("Block");
+    expect(nodes[2]).toMatchObject({ address: "1.1.1.1", port: 53 });
   });
 
   it("parses common Clash/Mihomo YAML proxy lists", () => {

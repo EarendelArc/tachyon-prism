@@ -2,7 +2,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
-use std::io;
+use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -43,6 +43,10 @@ struct RuntimeSettings {
     tachyon_core_binary_path: String,
     #[serde(default)]
     xray_binary_path: String,
+    #[serde(default)]
+    xray_http_listen: String,
+    #[serde(default)]
+    xray_http_port: u16,
     #[serde(default)]
     tachyon_telemetry_interval_ms: u32,
     #[serde(default)]
@@ -167,6 +171,17 @@ struct XrayTrafficStats {
 struct TcpLatencyResult {
     ok: bool,
     latency_ms: Option<u32>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyProbeResult {
+    ok: bool,
+    status_code: Option<u16>,
+    latency_ms: Option<u32>,
+    via: String,
+    target_url: String,
     error: Option<String>,
 }
 
@@ -504,6 +519,26 @@ fn test_tcp_latency(
 }
 
 #[tauri::command]
+fn test_xray_proxy(
+    app: tauri::AppHandle,
+    target_url: Option<String>,
+    timeout_ms: Option<u64>,
+) -> Result<ProxyProbeResult, String> {
+    let settings = load_runtime_settings(&app)?;
+    let url = target_url
+        .map(|value| clean_url_input(&value))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "http://cp.cloudflare.com/generate_204".to_string());
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(5000).clamp(500, 30000));
+    probe_http_via_proxy(
+        &settings.xray_http_listen,
+        settings.xray_http_port,
+        &url,
+        timeout,
+    )
+}
+
+#[tauri::command]
 fn start_xray(
     state: tauri::State<RuntimeState>,
     binary_path: String,
@@ -578,7 +613,82 @@ fn run_xray_stats_query(binary: &Path, server: &str) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|err| format!("decode xray stats output: {err}"))
 }
 
+fn probe_http_via_proxy(
+    proxy_host: &str,
+    proxy_port: u16,
+    target_url: &str,
+    timeout: Duration,
+) -> Result<ProxyProbeResult, String> {
+    let target = parse_http_probe_url(target_url)?;
+    let proxy = format!("{}:{}", proxy_host.trim(), proxy_port);
+    let addrs: Vec<_> = proxy
+        .to_socket_addrs()
+        .map_err(|err| format!("resolve local proxy {proxy}: {err}"))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(format!("resolve local proxy {proxy}: no addresses"));
+    }
+
+    let started = Instant::now();
+    let mut last_error = String::new();
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(mut stream) => {
+                stream
+                    .set_read_timeout(Some(timeout))
+                    .map_err(|err| format!("set proxy read timeout: {err}"))?;
+                stream
+                    .set_write_timeout(Some(timeout))
+                    .map_err(|err| format!("set proxy write timeout: {err}"))?;
+                let request = format!(
+                    "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Tachyon-Prism/0.1\r\nAccept: */*\r\nProxy-Connection: close\r\nConnection: close\r\n\r\n",
+                    target.absolute_url, target.host_header
+                );
+                stream
+                    .write_all(request.as_bytes())
+                    .map_err(|err| format!("write proxy probe request: {err}"))?;
+                let mut response = Vec::new();
+                stream
+                    .read_to_end(&mut response)
+                    .map_err(|err| format!("read proxy probe response: {err}"))?;
+                let text = String::from_utf8_lossy(&response);
+                let status_code = parse_http_status_code(&text);
+                let ok = status_code.is_some_and(|code| (200..400).contains(&code));
+                return Ok(ProxyProbeResult {
+                    ok,
+                    status_code,
+                    latency_ms: Some(started.elapsed().as_millis().min(u32::MAX as u128) as u32),
+                    via: proxy,
+                    target_url: target.absolute_url,
+                    error: if ok {
+                        None
+                    } else {
+                        Some(
+                            first_response_line(&text)
+                                .unwrap_or("empty proxy response")
+                                .to_string(),
+                        )
+                    },
+                });
+            }
+            Err(err) => {
+                last_error = err.to_string();
+            }
+        }
+    }
+
+    Ok(ProxyProbeResult {
+        ok: false,
+        status_code: None,
+        latency_ms: None,
+        via: proxy,
+        target_url: target.absolute_url,
+        error: Some(last_error),
+    })
+}
+
 fn command_output_with_timeout(mut command: Command, timeout: Duration) -> Result<Output, String> {
+    hide_command_window(&mut command);
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -640,6 +750,44 @@ fn numeric_field(line: &str, marker: &str) -> Option<u64> {
         return None;
     }
     digits.parse().ok()
+}
+
+struct HttpProbeTarget {
+    absolute_url: String,
+    host_header: String,
+}
+
+fn parse_http_probe_url(input: &str) -> Result<HttpProbeTarget, String> {
+    let url = clean_url_input(input);
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| "proxy probe target must start with http://".to_string())?;
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, format!("/{path}")),
+        None => (rest, "/".to_string()),
+    };
+    if authority.trim().is_empty() {
+        return Err("proxy probe target host is required".to_string());
+    }
+    Ok(HttpProbeTarget {
+        absolute_url: format!("http://{authority}{path}"),
+        host_header: authority.to_string(),
+    })
+}
+
+fn parse_http_status_code(response: &str) -> Option<u16> {
+    let line = first_response_line(response)?;
+    let mut parts = line.split_whitespace();
+    let _version = parts.next()?;
+    parts.next()?.parse().ok()
+}
+
+fn first_response_line(response: &str) -> Option<&str> {
+    response
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
 }
 
 fn is_xray_internal_stat(name: &str) -> bool {
@@ -1068,6 +1216,8 @@ fn normalize_runtime_settings(
             576,
             9500,
         ),
+        xray_http_listen: non_empty_or(settings.xray_http_listen, defaults.xray_http_listen),
+        xray_http_port: non_zero_u16_or(settings.xray_http_port, defaults.xray_http_port),
         xray_socks_listen: non_empty_or(settings.xray_socks_listen, defaults.xray_socks_listen),
         xray_socks_port: non_zero_u16_or(settings.xray_socks_port, defaults.xray_socks_port),
         xray_stats_enabled: settings.xray_stats_enabled,
@@ -1093,6 +1243,8 @@ fn default_runtime_settings(app: &tauri::AppHandle) -> Result<RuntimeSettings, S
         tachyon_core_release_channel: "preview".to_string(),
         tachyon_tun_address: "198.18.0.1/16".to_string(),
         tachyon_tun_mtu: 9000,
+        xray_http_listen: "127.0.0.1".to_string(),
+        xray_http_port: 10809,
         xray_socks_listen: "127.0.0.1".to_string(),
         xray_socks_port: 10808,
         xray_stats_enabled: true,
@@ -1767,6 +1919,16 @@ fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+#[cfg(target_os = "windows")]
+fn hide_command_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_command_window(_command: &mut Command) {}
+
 impl RuntimeProcesses {
     fn status(&mut self) -> RuntimeStatus {
         RuntimeStatus {
@@ -1806,12 +1968,7 @@ impl ManagedProcess {
         if let Some(work_dir) = config.parent().or_else(|| binary.parent()) {
             command.current_dir(work_dir);
         }
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
+        hide_command_window(&mut command);
 
         let child = command
             .spawn()
@@ -2559,6 +2716,58 @@ stat: <
     }
 
     #[test]
+    fn proxy_probe_url_requires_http() {
+        assert!(parse_http_probe_url("https://example.com").is_err());
+        assert!(parse_http_probe_url("file:///tmp/test").is_err());
+    }
+
+    #[test]
+    fn proxy_probe_url_keeps_absolute_form() {
+        let target = parse_http_probe_url(" http://example.com:8080/path?q=1 ").unwrap();
+        assert_eq!(target.absolute_url, "http://example.com:8080/path?q=1");
+        assert_eq!(target.host_header, "example.com:8080");
+    }
+
+    #[test]
+    fn parses_http_status_code_from_proxy_response() {
+        assert_eq!(
+            parse_http_status_code("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"),
+            Some(204)
+        );
+        assert_eq!(parse_http_status_code(""), None);
+    }
+
+    #[test]
+    fn proxy_probe_uses_local_http_proxy_absolute_form() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 1024];
+            let size = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..size]).to_string();
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            request
+        });
+
+        let result = probe_http_via_proxy(
+            "127.0.0.1",
+            port,
+            "http://example.test/probe",
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let request = handle.join().unwrap();
+
+        assert!(result.ok);
+        assert_eq!(result.status_code, Some(204));
+        assert!(request.starts_with("GET http://example.test/probe HTTP/1.1"));
+        assert!(request.contains("Host: example.test"));
+    }
+
+    #[test]
     fn path_string_round_trips() {
         let path = Path::new(if cfg!(target_os = "windows") {
             "C:\\test"
@@ -2623,6 +2832,7 @@ pub fn run() {
             runtime_status,
             xray_traffic_stats,
             test_tcp_latency,
+            test_xray_proxy,
             start_xray,
             stop_xray,
             start_tachyon_core,

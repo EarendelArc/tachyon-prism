@@ -20,6 +20,8 @@ export interface RuntimeSettings {
   tachyonCoreReleaseChannel: ReleaseChannel;
   tachyonTunAddress: string;
   tachyonTunMtu: number;
+  xrayHttpListen: string;
+  xrayHttpPort: number;
   xraySocksListen: string;
   xraySocksPort: number;
   xrayStatsEnabled: boolean;
@@ -99,6 +101,15 @@ export interface XrayTrafficStats {
 export interface TcpLatencyResult {
   ok: boolean;
   latencyMs: number | null;
+  error: string | null;
+}
+
+export interface ProxyProbeResult {
+  ok: boolean;
+  statusCode: number | null;
+  latencyMs: number | null;
+  via: string;
+  targetUrl: string;
   error: string | null;
 }
 
@@ -187,6 +198,19 @@ export async function testTcpLatency(
   });
 }
 
+export async function testXrayProxy(
+  targetUrl = "http://cp.cloudflare.com/generate_204",
+  timeoutMs = 5000,
+): Promise<ProxyProbeResult> {
+  if (!isTauriRuntime()) {
+    return previewProxyProbe(targetUrl);
+  }
+  return invokeDesktop<ProxyProbeResult>("test_xray_proxy", {
+    targetUrl,
+    timeoutMs,
+  });
+}
+
 export async function startXray(
   binaryPath: string,
   configPath: string,
@@ -221,6 +245,8 @@ function previewRuntimeSettings(): RuntimeSettings {
     tachyonTunAddress: "198.18.0.1/16",
     tachyonTunMtu: 9000,
     xrayBinaryPath: "",
+    xrayHttpListen: "127.0.0.1",
+    xrayHttpPort: 10809,
     xraySocksListen: "127.0.0.1",
     xraySocksPort: 10808,
     xrayStatsEnabled: true,
@@ -296,6 +322,17 @@ function previewTcpLatency(address: string, port: number): TcpLatencyResult {
     error: null,
     latencyMs: 82 + (seed % 236),
     ok: true,
+  };
+}
+
+function previewProxyProbe(targetUrl: string): ProxyProbeResult {
+  return {
+    error: null,
+    latencyMs: 42,
+    ok: true,
+    statusCode: 204,
+    targetUrl,
+    via: "127.0.0.1:10809",
   };
 }
 
