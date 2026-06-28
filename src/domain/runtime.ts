@@ -114,6 +114,14 @@ export interface ProxyProbeResult {
   error: string | null;
 }
 
+export interface ConfigValidationResult {
+  ok: boolean;
+  target: string;
+  command: string;
+  details: string;
+  error: string | null;
+}
+
 export interface SystemProxyState {
   supported: boolean;
   enabled: boolean;
@@ -219,6 +227,32 @@ export async function testXrayProxy(
   return invokeDesktop<ProxyProbeResult>("test_xray_proxy", {
     targetUrl,
     timeoutMs,
+  });
+}
+
+export async function validateXrayConfig(
+  binaryPath?: string,
+  configPath?: string,
+): Promise<ConfigValidationResult> {
+  if (!isTauriRuntime()) {
+    return previewConfigValidation("xray");
+  }
+  return invokeDesktop<ConfigValidationResult>("validate_xray_config", {
+    binaryPath,
+    configPath,
+  });
+}
+
+export async function validateTachyonCoreConfig(
+  binaryPath?: string,
+  configPath?: string,
+): Promise<ConfigValidationResult> {
+  if (!isTauriRuntime()) {
+    return previewConfigValidation("tachyon-core");
+  }
+  return invokeDesktop<ConfigValidationResult>("validate_tachyon_core_config", {
+    binaryPath,
+    configPath,
   });
 }
 
@@ -366,6 +400,16 @@ function previewProxyProbe(targetUrl: string): ProxyProbeResult {
     statusCode: 204,
     targetUrl,
     via: "127.0.0.1:10809",
+  };
+}
+
+function previewConfigValidation(target: string): ConfigValidationResult {
+  return {
+    command: `${target} validate preview`,
+    details: "Preview runtime config looks valid.",
+    error: null,
+    ok: true,
+    target,
   };
 }
 

@@ -41,6 +41,9 @@ import {
   stopXray,
   testTcpLatency,
   testXrayProxy,
+  validateTachyonCoreConfig,
+  validateXrayConfig,
+  type ConfigValidationResult,
   type ManagedBinaryInfo,
   type ManagedBinaryInventory,
   type ManagedBinaryKind,
@@ -82,6 +85,7 @@ type PrismView = "overview" | "configs" | "subscriptions" | "plugins" | "setting
 type SettingsSection = "general" | "core" | "rules" | "plugins" | "about";
 type ReadinessState = "error" | "ok" | "warning";
 type SubscriptionViewMode = "grid" | "list";
+type ValidationResults = Partial<Record<ManagedBinaryKind, ConfigValidationResult>>;
 
 const prismViews: PrismView[] = ["overview", "configs", "subscriptions", "plugins", "settings"];
 const routingModeStorageKey = "tachyon.prism.routingMode.v1";
@@ -220,6 +224,7 @@ const zh = {
   color: "颜色",
   copyCore: "复制 Core",
   copyXray: "复制 Xray",
+  validateConfigs: "验证配置",
   custom: "自定义",
   dark: "深色",
   defaultColor: "默认",
@@ -358,6 +363,7 @@ const en: typeof zh = {
   color: "Color",
   copyCore: "Copy Core",
   copyXray: "Copy Xray",
+  validateConfigs: "Validate Configs",
   custom: "Custom",
   dark: "Dark",
   defaultColor: "Default",
@@ -787,6 +793,7 @@ export function App() {
   const [binaryReleases, setBinaryReleases] = useState<
     Partial<Record<ManagedBinaryKind, RuntimeReleaseInfo>>
   >({});
+  const [validationResults, setValidationResults] = useState<ValidationResults>({});
   const [binaryBusy, setBinaryBusy] = useState(false);
   const [message, setMessage] = useState("Ready");
   const [alwaysOnTop, setAlwaysOnTop] = useState(false);
@@ -1143,6 +1150,43 @@ export function App() {
     }
   }
 
+  async function runConfigValidation(
+    kind: ManagedBinaryKind,
+    paths: ConfigDraftPaths,
+    settings: RuntimeSettings,
+    announce = true,
+  ): Promise<ConfigValidationResult> {
+    const result =
+      kind === "xray"
+        ? await validateXrayConfig(settings.xrayBinaryPath, paths.xrayConfigPath)
+        : await validateTachyonCoreConfig(settings.tachyonCoreBinaryPath, paths.coreConfigPath);
+    setValidationResults((current) => ({ ...current, [kind]: result }));
+    if (!result.ok) {
+      throw new Error(result.error || `${managedBinaryDisplayName(kind)} config validation failed`);
+    }
+    if (announce) {
+      setMessage(`${managedBinaryDisplayName(kind)} config validated`);
+    }
+    return result;
+  }
+
+  async function validateAllConfigs() {
+    try {
+      const paths = await writeDrafts();
+      const settings = await saveRuntimeSettings(runtimeInputs);
+      setRuntimeInputs(settings);
+      const xray = await runConfigValidation("xray", paths, settings, false);
+      const tachyonCore = await runConfigValidation("tachyonCore", paths, settings, false);
+      setMessage(
+        xray.ok && tachyonCore.ok
+          ? "Xray and Tachyon Core configs validated"
+          : "Config validation finished with errors",
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Config validation failed");
+    }
+  }
+
   async function saveRuntimeInputs() {
     try {
       const settings = await saveRuntimeSettings(runtimeInputs);
@@ -1315,6 +1359,7 @@ export function App() {
       const paths = await writeDrafts();
       const settings = await saveRuntimeSettings(runtimeInputs);
       setRuntimeInputs(settings);
+      await runConfigValidation(kind, paths, settings, false);
       const status =
         kind === "xray"
           ? await startXray(settings.xrayBinaryPath, paths.xrayConfigPath)
@@ -1778,6 +1823,7 @@ export function App() {
             onStartRuntime={(kind) => void startRuntime(kind)}
             onStopRuntime={(kind) => void stopRuntime(kind)}
             onUseManaged={(kind) => void useManagedBinary(kind)}
+            onValidateConfigs={() => void validateAllConfigs()}
             profiles={profiles}
             releaseChannelForKind={releaseChannelForKind}
             runtimeInputs={runtimeInputs}
@@ -1790,6 +1836,7 @@ export function App() {
             setSteamRoot={setSteamRoot}
             suggestions={suggestions}
             ui={ui}
+            validationResults={validationResults}
             manualProfile={manualProfile}
             steamRoot={steamRoot}
             setReleaseChannelForKind={setReleaseChannelForKind}
@@ -2452,6 +2499,7 @@ function SettingsView({
   onStartRuntime,
   onStopRuntime,
   onUseManaged,
+  onValidateConfigs,
   profiles,
   releaseChannelForKind: releaseChannelForKindFn,
   runtimeInputs,
@@ -2467,6 +2515,7 @@ function SettingsView({
   suggestions,
   ui,
   updateSteamLauncherSetting,
+  validationResults,
 }: {
   binaryBusy: boolean;
   binaryInfo: (kind: ManagedBinaryKind) => ManagedBinaryInfo | null;
@@ -2497,6 +2546,7 @@ function SettingsView({
   onStartRuntime: (kind: ManagedBinaryKind) => void;
   onStopRuntime: (kind: ManagedBinaryKind) => void;
   onUseManaged: (kind: ManagedBinaryKind) => void;
+  onValidateConfigs: () => void;
   profiles: GameProfile[];
   releaseChannelForKind: (settings: RuntimeSettings, kind: ManagedBinaryKind) => ReleaseChannel;
   runtimeInputs: RuntimeSettings;
@@ -2519,6 +2569,7 @@ function SettingsView({
     key: K,
     value: LauncherSettings["steam"][K],
   ) => void;
+  validationResults: ValidationResults;
 }) {
   const sections: Array<{ id: SettingsSection; label: string }> = [
     { id: "general", label: ui.settingsGeneral },
@@ -2857,11 +2908,13 @@ function SettingsView({
                 <h1>{ui.configDrafts}</h1>
                 <div className="row-actions">
                   <button type="button" onClick={onSaveDrafts}>{ui.save}</button>
+                  <button type="button" onClick={onValidateConfigs}>{ui.validateConfigs}</button>
                   <button type="button" onClick={() => void copyDraft("Xray config", drafts.xray)}>{ui.copyXray}</button>
                   <button type="button" onClick={() => void copyDraft("Core config", drafts.core)}>{ui.copyCore}</button>
                 </div>
               </header>
               {drafts.error ? <div className="inline-error">{drafts.error}</div> : null}
+              <ValidationSummary results={validationResults} />
               {configPaths ? (
                 <div className="path-list">
                   <div><span>client.json</span><strong>{configPaths.coreConfigPath}</strong></div>
@@ -2970,6 +3023,33 @@ function SettingsView({
           </article>
         ) : null}
       </section>
+    </div>
+  );
+}
+
+function ValidationSummary({ results }: { results: ValidationResults }) {
+  const rows: Array<{ kind: ManagedBinaryKind; label: string }> = [
+    { kind: "xray", label: "Xray" },
+    { kind: "tachyonCore", label: "Tachyon Core" },
+  ];
+  if (!results.xray && !results.tachyonCore) {
+    return null;
+  }
+  return (
+    <div className="validation-summary">
+      {rows.map(({ kind, label }) => {
+        const result = results[kind];
+        if (!result) {
+          return null;
+        }
+        return (
+          <div className={result.ok ? "ok" : "error"} key={kind}>
+            <span>{label}</span>
+            <strong>{result.ok ? "OK" : "Failed"}</strong>
+            <small title={result.command}>{result.error || result.details}</small>
+          </div>
+        );
+      })}
     </div>
   );
 }

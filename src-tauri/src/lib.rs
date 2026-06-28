@@ -189,6 +189,16 @@ struct ProxyProbeResult {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ConfigValidationResult {
+    ok: bool,
+    target: String,
+    command: String,
+    details: String,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SystemProxyState {
     supported: bool,
     enabled: bool,
@@ -553,6 +563,52 @@ fn test_xray_proxy(
 }
 
 #[tauri::command]
+fn validate_xray_config(
+    app: tauri::AppHandle,
+    binary_path: Option<String>,
+    config_path: Option<String>,
+) -> Result<ConfigValidationResult, String> {
+    let settings = load_runtime_settings(&app)?;
+    let paths = draft_paths(&app)?;
+    let binary = PathBuf::from(clean_path_input(
+        binary_path
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&settings.xray_binary_path),
+    ));
+    let config = PathBuf::from(clean_path_input(
+        config_path
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&paths.xray_config_path),
+    ));
+    validate_xray_config_file(&binary, &config)
+}
+
+#[tauri::command]
+fn validate_tachyon_core_config(
+    app: tauri::AppHandle,
+    binary_path: Option<String>,
+    config_path: Option<String>,
+) -> Result<ConfigValidationResult, String> {
+    let settings = load_runtime_settings(&app)?;
+    let paths = draft_paths(&app)?;
+    let binary = PathBuf::from(clean_path_input(
+        binary_path
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&settings.tachyon_core_binary_path),
+    ));
+    let config = PathBuf::from(clean_path_input(
+        config_path
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&paths.core_config_path),
+    ));
+    validate_tachyon_core_config_file(&binary, &config)
+}
+
+#[tauri::command]
 fn system_proxy_status(app: tauri::AppHandle) -> Result<SystemProxyState, String> {
     let settings = load_runtime_settings(&app)?;
     Ok(platform_system_proxy_status(&settings))
@@ -624,6 +680,120 @@ fn stop_tachyon_core(state: tauri::State<RuntimeState>) -> Result<ProcessStatus,
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
     processes.tachyon_core.stop("tachyon-core")
+}
+
+fn validate_xray_config_file(
+    binary: &Path,
+    config: &Path,
+) -> Result<ConfigValidationResult, String> {
+    validate_config_with_command(
+        "xray",
+        binary,
+        config,
+        &["run", "-test", "-config"],
+        Duration::from_secs(8),
+    )
+}
+
+fn validate_tachyon_core_config_file(
+    binary: &Path,
+    config: &Path,
+) -> Result<ConfigValidationResult, String> {
+    validate_config_with_command(
+        "tachyon-core",
+        binary,
+        config,
+        &["validate", "--config"],
+        Duration::from_secs(8),
+    )
+}
+
+fn validate_config_with_command(
+    target: &str,
+    binary: &Path,
+    config: &Path,
+    args_before_config: &[&str],
+    timeout: Duration,
+) -> Result<ConfigValidationResult, String> {
+    if !binary.is_file() {
+        return Err(format!("{target} binary not found: {}", binary.display()));
+    }
+    if !config.is_file() {
+        return Err(format!("{target} config not found: {}", config.display()));
+    }
+
+    let command_line = validation_command_line(binary, args_before_config, config);
+    let mut command = Command::new(binary);
+    command.args(args_before_config);
+    command.arg(config);
+    if let Some(work_dir) = config.parent().or_else(|| binary.parent()) {
+        command.current_dir(work_dir);
+    }
+    let output = command_output_with_timeout(command, timeout);
+    Ok(config_validation_result(target, command_line, output))
+}
+
+fn validation_command_line(binary: &Path, args_before_config: &[&str], config: &Path) -> String {
+    let mut parts = Vec::with_capacity(args_before_config.len() + 2);
+    parts.push(path_string(binary));
+    parts.extend(args_before_config.iter().map(|arg| (*arg).to_string()));
+    parts.push(path_string(config));
+    parts
+        .into_iter()
+        .map(|part| quote_command_part(&part))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn quote_command_part(part: &str) -> String {
+    if part.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-' | '/' | '\\' | ':')
+    }) {
+        return part.to_string();
+    }
+    format!("\"{}\"", part.replace('"', "\\\""))
+}
+
+fn config_validation_result(
+    target: &str,
+    command: String,
+    output: Result<Output, String>,
+) -> ConfigValidationResult {
+    match output {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let details = validation_details(&stdout, &stderr);
+            let ok = output.status.success();
+            ConfigValidationResult {
+                ok,
+                target: target.to_string(),
+                command,
+                details,
+                error: if ok {
+                    None
+                } else {
+                    Some(validation_details(&stdout, &stderr))
+                },
+            }
+        }
+        Err(error) => ConfigValidationResult {
+            ok: false,
+            target: target.to_string(),
+            command,
+            details: String::new(),
+            error: Some(error),
+        },
+    }
+}
+
+fn validation_details(stdout: &str, stderr: &str) -> String {
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (false, false) => format!("{stdout}\n{stderr}"),
+        (false, true) => stdout.to_string(),
+        (true, false) => stderr.to_string(),
+        (true, true) => "validation command finished without output".to_string(),
+    }
 }
 
 fn run_xray_stats_query(binary: &Path, server: &str) -> Result<String, String> {
@@ -1205,7 +1375,7 @@ fn command_output_with_timeout(mut command: Command, timeout: Duration) -> Resul
         if started.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("xray stats query timed out".to_string());
+            return Err("command timed out".to_string());
         }
         thread::sleep(Duration::from_millis(20));
     }
@@ -3270,6 +3440,41 @@ stat: <
     }
 
     #[test]
+    fn validation_command_line_quotes_paths_with_spaces() {
+        let binary = Path::new("C:\\Program Files\\Xray\\xray.exe");
+        let config = Path::new("C:\\Users\\Test User\\xray-client.json");
+        let line = validation_command_line(binary, &["run", "-test", "-config"], config);
+        assert!(line.contains("\"C:\\Program Files\\Xray\\xray.exe\""));
+        assert!(line.contains("run -test -config"));
+        assert!(line.contains("\"C:\\Users\\Test User\\xray-client.json\""));
+    }
+
+    #[test]
+    fn validation_details_prefers_combined_output_when_available() {
+        assert_eq!(
+            validation_details("stdout ok", "stderr note"),
+            "stdout ok\nstderr note"
+        );
+        assert_eq!(validation_details("", "stderr only"), "stderr only");
+        assert_eq!(
+            validation_details("", ""),
+            "validation command finished without output"
+        );
+    }
+
+    #[test]
+    fn config_validation_result_reports_spawn_error() {
+        let result = config_validation_result(
+            "xray",
+            "xray run -test -config config.json".to_string(),
+            Err("spawn failed".to_string()),
+        );
+        assert!(!result.ok);
+        assert_eq!(result.target, "xray");
+        assert_eq!(result.error.as_deref(), Some("spawn failed"));
+    }
+
+    #[test]
     fn expected_system_proxy_server_uses_http_and_socks_inbounds() {
         let settings = RuntimeSettings {
             xray_http_listen: "127.0.0.2".to_string(),
@@ -3397,6 +3602,8 @@ pub fn run() {
             xray_traffic_stats,
             test_tcp_latency,
             test_xray_proxy,
+            validate_xray_config,
+            validate_tachyon_core_config,
             system_proxy_status,
             enable_system_proxy,
             disable_system_proxy,

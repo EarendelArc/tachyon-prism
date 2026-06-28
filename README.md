@@ -43,6 +43,9 @@ sent through Tachyon Core for low-latency acceleration.
   Tachyon Core managed downloads.
 - Runtime controls for launching and stopping Xray Core and Tachyon Core as
   separate subprocesses.
+- Startup-time config validation: Xray is checked with
+  `xray run -test -config`, and Tachyon Core is checked with
+  `tachyon-core validate --config` before each launch.
 - Windows runtime readiness detects Tachyon Core's required `wintun.dll`
   sidecar next to the configured Core binary.
 
@@ -118,7 +121,10 @@ alpha-stage.
 
 The Runtime panel stores binary paths in `runtime-settings.json`. `Start All`
 first writes the latest generated config files, then launches Xray with
-`xray-client.json` and Tachyon Core with `client.json`.
+`xray-client.json` and Tachyon Core with `client.json`. Each launch validates
+the just-written config first: Xray uses its native `run -test -config` mode,
+while Tachyon Core uses `validate --config`. The Config Drafts section also
+offers a manual validation action and keeps the latest result visible.
 The same Runtime panel stores local listen ports and Core transport settings:
 Xray SOCKS, Xray HTTP probe inbound, Xray StatsService, Tachyon HTTP IPC,
 Tachyon gRPC, TUN address/MTU, and telemetry interval.

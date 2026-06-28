@@ -248,6 +248,23 @@ def assert_content_fits_viewport(cdp: CDP) -> None:
         raise AssertionError(f"content vertical overflow detected: {overflow}")
 
 
+def assert_desktop_viewport(cdp: CDP) -> None:
+    viewport = cdp.evaluate(
+        """
+        (() => ({
+          width: window.innerWidth,
+          height: window.innerHeight,
+          shellWidth: Math.round(document.querySelector('.prism-shell')?.getBoundingClientRect().width ?? 0),
+          shellHeight: Math.round(document.querySelector('.prism-shell')?.getBoundingClientRect().height ?? 0)
+        }))()
+        """,
+    )
+    if int(viewport["width"]) != 800 or int(viewport["height"]) != 540:
+        raise AssertionError(f"desktop viewport changed unexpectedly: {viewport}")
+    if int(viewport["shellWidth"]) < 790 or int(viewport["shellHeight"]) < 530:
+        raise AssertionError(f"desktop shell is not filling the viewport: {viewport}")
+
+
 def assert_custom_window_chrome(cdp: CDP) -> None:
     chrome = cdp.evaluate(
         """
@@ -492,6 +509,24 @@ def select_settings_section(cdp: CDP, index: int) -> str:
     )
 
 
+def click_validate_configs(cdp: CDP) -> str:
+    return str(
+        cdp.evaluate(
+            """
+            new Promise((resolve) => {
+              const button = Array.from(document.querySelectorAll('button')).find((item) =>
+                item.textContent.trim() === 'Validate Configs'
+              );
+              if (!button) throw new Error('Validate Configs button missing');
+              button.click();
+              setTimeout(() => resolve(document.body.innerText), 500);
+            })
+            """,
+            await_promise=True,
+        ),
+    )
+
+
 def switch_to_english(cdp: CDP) -> str:
     return str(
         cdp.evaluate(
@@ -571,6 +606,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         assert_no_runtime_error(text)
         assert_no_horizontal_overflow(cdp)
         assert_content_fits_viewport(cdp)
+        assert_desktop_viewport(cdp)
         assert_custom_window_chrome(cdp)
         assert_dual_core_chart(cdp)
         cdp.screenshot(output_dir / "overview-desktop.png")
@@ -596,12 +632,14 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         assert_contains(text, "Clash Smoke", "Clash Smoke VLESS", "Clash Smoke SS")
         text = choose_node(cdp, "Clash Smoke SS")
         assert_contains(text, "Clash Smoke SS", "Node selected")
+        assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "subscriptions-desktop.png")
 
         text = navigate_hash(cdp, "configs")
         assert_contains(text, "策略组", "节点选择", "自动选择", "漏网之鱼", "Clash Smoke SS")
         assert_no_runtime_error(text)
         assert_no_horizontal_overflow(cdp)
+        assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "configs-desktop.png")
 
         text = switch_routing_mode(cdp, "global")
@@ -632,6 +670,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         text = navigate_hash(cdp, "plugins")
         assert_contains(text, "插件中心", "滚动发行", "节点转换")
         assert_no_runtime_error(text)
+        assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "plugins-desktop.png")
 
         text = navigate_hash(cdp, "settings")
@@ -640,6 +679,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         assert_no_runtime_error(text)
         text = switch_to_english(cdp)
         assert_contains(text, "Personalization", "Theme", "Core")
+        assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "settings-desktop-en.png")
         text = select_settings_section(cdp, 1)
         assert_contains(
@@ -650,8 +690,12 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
             "Tachyon gRPC",
             "TUN",
             "Telemetry",
+            "Validate Configs",
         )
         assert_no_runtime_error(text)
+        text = click_validate_configs(cdp)
+        assert_contains(text, "Xray and Tachyon Core configs validated", "Xray", "Tachyon Core", "OK")
+        assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "settings-core-desktop-en.png")
 
         print(f"Prism UI smoke test passed. Artifacts: {output_dir}")
