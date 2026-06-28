@@ -686,6 +686,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
             text,
             "Xray SOCKS",
             "Xray Stats API",
+            "TUN Privilege",
             "Tachyon IPC",
             "Tachyon gRPC",
             "TUN",

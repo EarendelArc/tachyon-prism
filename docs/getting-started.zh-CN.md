@@ -42,7 +42,7 @@
 3. **安装最新版 Tachyon Core** 对 Tachyon Core 执行同样流程。
 4. 点击 **使用托管**，让运行路径指向 Prism 管理的二进制文件。
 
-Windows 上 Prism 还会检查 Tachyon Core 所需的 `wintun.dll` sidecar。
+Windows 上 Prism 还会检查 Tachyon Core 所需的 `wintun.dll` sidecar。Prism 也会显示当前桌面进程是否具备创建 TUN 设备的权限；启动 Tachyon Core TUN 模式前，请以管理员/root 或等效网络权限运行 Prism。
 
 ## 6. 生成、验证并保存配置
 
@@ -70,5 +70,6 @@ Windows 上 Prism 还会检查 Tachyon Core 所需的 `wintun.dll` sidecar。
 
 - **概览** 页面会显示运行状态、已启用游戏规则和双核心流量曲线。
 - **就绪检查** 会提示缺失的节点、二进制、配置或 sidecar。
+- 启动 Tachyon Core 前，**TUN Privilege** 行应显示 `ready`。
 - 本地 HTTP 代理探测会通过生成的 Xray HTTP inbound 验证代理链路，不会修改系统代理，也不会启用 TUN。
 - 系统代理和 TUN 只建议在你准备接管系统流量时再启用。

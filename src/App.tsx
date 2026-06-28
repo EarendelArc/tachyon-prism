@@ -24,6 +24,7 @@ import {
   getLatestTachyonCoreRelease,
   getLatestXrayRelease,
   getManagedBinaries,
+  getRuntimePrivilegeStatus,
   getRuntimePaths,
   getRuntimeSettings,
   getRuntimeStatus,
@@ -50,6 +51,7 @@ import {
   type ProcessStatus,
   type ReleaseChannel,
   type RuntimePaths,
+  type RuntimePrivilegeStatus,
   type RuntimeReleaseInfo,
   type RuntimeSettings,
   type RuntimeStatus,
@@ -492,6 +494,13 @@ function systemProxyLabel(status: SystemProxyState | null): string {
   return status.enabled ? "other proxy" : "disabled";
 }
 
+function privilegeLabel(status: RuntimePrivilegeStatus | null): string {
+  if (!status) {
+    return "unknown";
+  }
+  return status.canManageTun ? "ready" : "needs admin";
+}
+
 function formatBytes(value: number | null): string {
   if (value === null) {
     return "--";
@@ -786,6 +795,7 @@ export function App() {
   const [configPaths, setConfigPaths] = useState<ConfigDraftPaths | null>(null);
   const [runtimePaths, setRuntimePaths] = useState<RuntimePaths | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [runtimePrivilege, setRuntimePrivilege] = useState<RuntimePrivilegeStatus | null>(null);
   const [systemProxy, setSystemProxy] = useState<SystemProxyState | null>(null);
   const [runtimeInputs, setRuntimeInputs] = useState(emptyRuntimeInputs);
   const [managedBinaries, setManagedBinaries] = useState<ManagedBinaryInventory | null>(null);
@@ -871,6 +881,21 @@ export function App() {
       items.push(...sidecarReadiness(coreBinary));
     }
     items.push(
+      runtimePrivilege?.canManageTun
+        ? {
+            detail: runtimePrivilege.message,
+            label: "TUN privilege",
+            state: "ok",
+          }
+        : {
+            detail:
+              runtimePrivilege?.message ||
+              "Privilege status is unknown. Refresh runtime status before starting TUN mode.",
+            label: "TUN privilege",
+            state: runtimePrivilege ? "error" : "warning",
+          },
+    );
+    items.push(
       activeProfiles > 0
         ? {
             detail: `${activeProfiles} game profile${activeProfiles === 1 ? "" : "s"} enabled.`,
@@ -891,6 +916,7 @@ export function App() {
     drafts.error,
     drafts.xray,
     managedBinaries,
+    runtimePrivilege,
     runtimeInputs.tachyonCoreBinaryPath,
     runtimeInputs.xrayBinaryPath,
   ]);
@@ -900,6 +926,7 @@ export function App() {
   );
   const runtimeRows = [
     { label: "System Proxy", value: systemProxyLabel(systemProxy) },
+    { label: "TUN Privilege", value: privilegeLabel(runtimePrivilege) },
     { label: "Xray Core", value: processStatusLabel(runtimeStatus?.xray) },
     { label: "Tachyon Core", value: processStatusLabel(runtimeStatus?.tachyonCore) },
   ];
@@ -1298,6 +1325,17 @@ export function App() {
     }
   }
 
+  async function refreshRuntimePrivilege() {
+    try {
+      const status = await getRuntimePrivilegeStatus();
+      setRuntimePrivilege(status);
+      return status;
+    } catch {
+      // Privilege probing is desktop-only and platform-dependent.
+      return null;
+    }
+  }
+
   async function refreshSystemProxy() {
     try {
       const status = await getSystemProxyStatus();
@@ -1356,6 +1394,12 @@ export function App() {
 
   async function startRuntime(kind: ManagedBinaryKind) {
     try {
+      if (kind === "tachyonCore") {
+        const privilege = runtimePrivilege ?? (await refreshRuntimePrivilege());
+        if (privilege && !privilege.canManageTun) {
+          throw new Error(privilege.message);
+        }
+      }
       const paths = await writeDrafts();
       const settings = await saveRuntimeSettings(runtimeInputs);
       setRuntimeInputs(settings);
@@ -1528,6 +1572,7 @@ export function App() {
       .catch(() => undefined);
     void refreshManagedBinaries();
     void refreshRuntime();
+    void refreshRuntimePrivilege();
     void refreshSystemProxy();
   }, []);
 
@@ -1721,6 +1766,7 @@ export function App() {
             type="button"
             onClick={() => {
               void refreshRuntime();
+              void refreshRuntimePrivilege();
               void refreshSystemProxy();
             }}
           >

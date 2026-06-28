@@ -160,6 +160,15 @@ struct RuntimeStatus {
     xray: ProcessStatus,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimePrivilegeStatus {
+    platform: String,
+    elevated: bool,
+    can_manage_tun: bool,
+    message: String,
+}
+
 #[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct XrayTrafficStats {
@@ -470,6 +479,11 @@ fn runtime_status(state: tauri::State<RuntimeState>) -> Result<RuntimeStatus, St
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
     Ok(processes.status())
+}
+
+#[tauri::command]
+fn runtime_privilege_status() -> RuntimePrivilegeStatus {
+    platform_runtime_privilege_status()
 }
 
 #[tauri::command]
@@ -1339,6 +1353,67 @@ fn platform_enable_system_proxy(_settings: &RuntimeSettings) -> Result<(), Strin
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn platform_disable_system_proxy(_settings: &RuntimeSettings) -> Result<(), String> {
     Err("system proxy is unsupported on this platform".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn platform_runtime_privilege_status() -> RuntimePrivilegeStatus {
+    let mut command = Command::new("net");
+    command.arg("session");
+    let elevated = command_output_with_timeout(command, Duration::from_secs(2))
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    runtime_privilege_status_from_flag(
+        "windows",
+        elevated,
+        if elevated {
+            "Administrator privileges detected. Tachyon Core can create Wintun devices."
+        } else {
+            "Administrator privileges are required before Prism can start Tachyon Core TUN mode."
+        },
+    )
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn platform_runtime_privilege_status() -> RuntimePrivilegeStatus {
+    let mut command = Command::new("id");
+    command.arg("-u");
+    let elevated = command_output_with_timeout(command, Duration::from_secs(2))
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|uid| uid.trim() == "0")
+        .unwrap_or(false);
+    runtime_privilege_status_from_flag(
+        std::env::consts::OS,
+        elevated,
+        if elevated {
+            "Root privileges detected. Tachyon Core can create TUN devices."
+        } else {
+            "Root or CAP_NET_ADMIN privileges are required before Prism can start Tachyon Core TUN mode."
+        },
+    )
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn platform_runtime_privilege_status() -> RuntimePrivilegeStatus {
+    RuntimePrivilegeStatus {
+        platform: std::env::consts::OS.to_string(),
+        elevated: false,
+        can_manage_tun: false,
+        message: "TUN privilege detection is unsupported on this platform.".to_string(),
+    }
+}
+
+fn runtime_privilege_status_from_flag(
+    platform: &str,
+    elevated: bool,
+    message: &str,
+) -> RuntimePrivilegeStatus {
+    RuntimePrivilegeStatus {
+        platform: platform.to_string(),
+        elevated,
+        can_manage_tun: elevated,
+        message: message.to_string(),
+    }
 }
 
 fn run_command(program: &str, args: &[&str]) -> Result<String, String> {
@@ -3475,6 +3550,19 @@ stat: <
     }
 
     #[test]
+    fn runtime_privilege_status_from_flag_marks_tun_capability() {
+        let elevated = runtime_privilege_status_from_flag("windows", true, "ok");
+        assert!(elevated.elevated);
+        assert!(elevated.can_manage_tun);
+        assert_eq!(elevated.platform, "windows");
+
+        let limited = runtime_privilege_status_from_flag("windows", false, "needs admin");
+        assert!(!limited.elevated);
+        assert!(!limited.can_manage_tun);
+        assert_eq!(limited.message, "needs admin");
+    }
+
+    #[test]
     fn expected_system_proxy_server_uses_http_and_socks_inbounds() {
         let settings = RuntimeSettings {
             xray_http_listen: "127.0.0.2".to_string(),
@@ -3599,6 +3687,7 @@ pub fn run() {
             install_latest_tachyon_core,
             fetch_subscription_text,
             runtime_status,
+            runtime_privilege_status,
             xray_traffic_stats,
             test_tcp_latency,
             test_xray_proxy,

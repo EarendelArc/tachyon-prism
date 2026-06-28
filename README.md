@@ -46,6 +46,9 @@ sent through Tachyon Core for low-latency acceleration.
 - Startup-time config validation: Xray is checked with
   `xray run -test -config`, and Tachyon Core is checked with
   `tachyon-core validate --config` before each launch.
+- Runtime privilege detection for Tachyon Core TUN mode. Prism reports whether
+  the current desktop process can create TUN/Wintun devices and blocks
+  Tachyon Core launch with a clear message when privileges are insufficient.
 - Windows runtime readiness detects Tachyon Core's required `wintun.dll`
   sidecar next to the configured Core binary.
 
@@ -131,6 +134,10 @@ Tachyon gRPC, TUN address/MTU, and telemetry interval.
 On Windows, Tachyon Core also requires `wintun.dll` in the same directory as
 the configured `tachyon-core.exe`; Prism reports this in Runtime readiness and
 blocks Core start when the required sidecar is missing.
+Prism also checks whether the current process has enough privilege to manage
+TUN devices. Windows requires Administrator; macOS/Linux usually require root
+or equivalent network capabilities. This is a read-only preflight check and does
+not enable TUN by itself.
 
 The Overview quick actions include a local HTTP proxy probe. It sends an
 absolute-form HTTP request to the configured local Xray HTTP inbound and reports

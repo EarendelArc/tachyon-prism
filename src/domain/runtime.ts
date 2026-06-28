@@ -93,6 +93,13 @@ export interface RuntimeStatus {
   xray: ProcessStatus;
 }
 
+export interface RuntimePrivilegeStatus {
+  platform: string;
+  elevated: boolean;
+  canManageTun: boolean;
+  message: string;
+}
+
 export interface XrayTrafficStats {
   bytesSent: number;
   bytesReceived: number;
@@ -193,6 +200,13 @@ export async function getRuntimeStatus(): Promise<RuntimeStatus> {
     return previewRuntimeStatus();
   }
   return invokeDesktop<RuntimeStatus>("runtime_status");
+}
+
+export async function getRuntimePrivilegeStatus(): Promise<RuntimePrivilegeStatus> {
+  if (!isTauriRuntime()) {
+    return previewRuntimePrivilegeStatus();
+  }
+  return invokeDesktop<RuntimePrivilegeStatus>("runtime_privilege_status");
 }
 
 export async function getXrayTrafficStats(): Promise<XrayTrafficStats> {
@@ -362,6 +376,15 @@ function previewRuntimeStatus(): RuntimeStatus {
   return {
     tachyonCore: stoppedPreviewProcess(),
     xray: stoppedPreviewProcess(),
+  };
+}
+
+function previewRuntimePrivilegeStatus(): RuntimePrivilegeStatus {
+  return {
+    canManageTun: true,
+    elevated: true,
+    message: "Preview runtime can manage TUN.",
+    platform: "preview",
   };
 }
 

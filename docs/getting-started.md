@@ -43,6 +43,9 @@ Go to **Settings > Core** and scroll to **Binaries**:
 4. Click **Use Managed** to point the runtime path at the installed binary.
 
 On Windows, Prism also checks the required `wintun.dll` sidecar for Tachyon Core.
+Prism also shows whether the current desktop process has enough privilege to
+create TUN devices. Run Prism as Administrator/root before starting Tachyon Core
+TUN mode.
 
 ## 6. Generate, validate, and save configs
 
@@ -70,5 +73,6 @@ Game UDP traffic matching your profiles will be accelerated through TGP. Other p
 
 - The **Overview** view shows runtime status, enabled game profiles, and dual-core traffic curves.
 - The **Readiness** panel flags missing nodes, binaries, configs, and sidecars.
+- The **TUN Privilege** row should show `ready` before you start Tachyon Core.
 - The local HTTP proxy probe validates Xray through the generated HTTP inbound without changing system proxy or enabling TUN.
 - System proxy and TUN should only be enabled when you are ready for OS-level traffic takeover.
