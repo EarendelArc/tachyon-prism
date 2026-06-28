@@ -425,13 +425,21 @@ p,
   padding: 0 16px 10px;
 }
 
+.traffic-card-header {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 8px 0 2px;
+}
+
 .legend {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
   justify-content: center;
-  padding: 8px 0 2px;
+  min-width: 0;
 }
 
 .legend-item {
@@ -454,6 +462,67 @@ p,
 
 .legend-item.xray-down {
   color: #35e0a1;
+}
+
+.traffic-source-list {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  max-width: 250px;
+}
+
+.traffic-source-pill {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.055);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 999px;
+  display: inline-flex;
+  gap: 6px;
+  min-height: 24px;
+  min-width: 0;
+  padding: 3px 8px;
+}
+
+.traffic-source-pill strong {
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.traffic-source-pill span {
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 11px;
+  line-height: 1;
+  max-width: 112px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.traffic-source-pill.ok {
+  border-color: rgba(0, 200, 139, 0.28);
+}
+
+.traffic-source-pill.ok span {
+  color: #00c88b;
+}
+
+.traffic-source-pill.checking {
+  border-color: rgba(255, 196, 72, 0.24);
+}
+
+.traffic-source-pill.checking span {
+  color: #ffca57;
+}
+
+.traffic-source-pill.error {
+  border-color: rgba(255, 80, 72, 0.28);
+}
+
+.traffic-source-pill.error span {
+  color: #ff6c62;
 }
 
 .up-dot {
@@ -509,6 +578,13 @@ p,
   fill: rgba(255, 255, 255, 0.46);
   font-size: 13px;
   text-anchor: middle;
+}
+
+.chart-empty-detail {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  margin: -2px 0 0;
+  text-align: center;
 }
 
 .work-mode-list {

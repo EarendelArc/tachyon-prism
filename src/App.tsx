@@ -114,6 +114,12 @@ interface TrafficTotals {
   xrayUp: number;
 }
 
+interface TrafficSourceBadge {
+  detail: string;
+  label: string;
+  state: "checking" | "error" | "idle" | "ok";
+}
+
 type NodeLatencyMap = Record<string, TcpLatencyResult>;
 
 interface PolicyGroup {
@@ -212,6 +218,8 @@ const zh = {
   subscriptions: "订阅",
   tachyon: "Tachyon",
   traffic: "流量",
+  trafficNoSamplesHint: "启动 Xray 或 Tachyon Core 后，这里会显示真实的双核心流量曲线。",
+  trafficSource: "数据源",
   update: "更新",
   updateAll: "更新全部",
   upload: "上传",
@@ -298,6 +306,13 @@ const zh = {
   uploadRate: "上传速率",
   urlTest: "URLTest",
   waitingTelemetry: "等待遥测流...",
+  xrayStatsActive: "Stats 已连接",
+  xrayStatsDisabled: "Stats 已关闭",
+  xrayStatsError: "Stats 错误",
+  xrayStatsWaiting: "等待 Stats",
+  xrayStopped: "Xray 未运行",
+  tachyonTelemetryActive: "遥测已连接",
+  tachyonTelemetryWaiting: "等待遥测",
   workMode: "工作模式",
 };
 
@@ -351,6 +366,8 @@ const en: typeof zh = {
   subscriptions: "Subscriptions",
   tachyon: "Tachyon",
   traffic: "Traffic",
+  trafficNoSamplesHint: "Start Xray or Tachyon Core to draw real dual-core traffic curves here.",
+  trafficSource: "Source",
   update: "Update",
   updateAll: "Update All",
   upload: "Upload",
@@ -437,6 +454,13 @@ const en: typeof zh = {
   uploadRate: "Upload rate",
   urlTest: "URLTest",
   waitingTelemetry: "Waiting for telemetry stream...",
+  xrayStatsActive: "Stats connected",
+  xrayStatsDisabled: "Stats disabled",
+  xrayStatsError: "Stats error",
+  xrayStatsWaiting: "Waiting for Stats",
+  xrayStopped: "Xray stopped",
+  tachyonTelemetryActive: "Telemetry connected",
+  tachyonTelemetryWaiting: "Waiting telemetry",
   workMode: "Work Mode",
 };
 
@@ -817,6 +841,7 @@ export function App() {
   }));
   const telemetryClient = useMemo(() => new TelemetryClient(), []);
   const [xrayTrafficStats, setXrayTrafficStats] = useState<XrayTrafficStats>(emptyXrayTrafficStats);
+  const [xrayTrafficError, setXrayTrafficError] = useState<string | null>(null);
   const [trafficSamples, setTrafficSamples] = useState<TrafficSample[]>([]);
   const previousTrafficRef = useRef<{ at: number; totals: TrafficTotals } | null>(null);
   const subscriptionNameInputRef = useRef<HTMLInputElement | null>(null);
@@ -1627,6 +1652,7 @@ export function App() {
     const xrayRunning = runtimeStatus?.xray.state === "running";
     if (!runtimeInputs.xrayStatsEnabled || !xrayRunning) {
       setXrayTrafficStats(emptyXrayTrafficStats());
+      setXrayTrafficError(null);
       return;
     }
 
@@ -1636,10 +1662,11 @@ export function App() {
         const stats = await getXrayTrafficStats();
         if (!cancelled) {
           setXrayTrafficStats(stats);
+          setXrayTrafficError(null);
         }
-      } catch {
+      } catch (error) {
         if (!cancelled) {
-          setXrayTrafficStats(emptyXrayTrafficStats());
+          setXrayTrafficError(error instanceof Error ? error.message : "Xray Stats query failed");
         }
       }
     };
@@ -1814,6 +1841,10 @@ export function App() {
             trafficRates={trafficRates}
             trafficSamples={trafficSamples}
             trafficTotals={trafficTotals}
+            xrayStatsEnabled={runtimeInputs.xrayStatsEnabled}
+            xrayStatsError={xrayTrafficError}
+            xrayStatsQueriedAt={xrayTrafficStats.queriedAt}
+            xrayRunning={runtimeStatus?.xray.state === "running"}
             ui={ui}
           />
         ) : null}
@@ -1965,6 +1996,10 @@ function OverviewView({
   trafficRates,
   trafficSamples,
   trafficTotals,
+  xrayRunning,
+  xrayStatsEnabled,
+  xrayStatsError,
+  xrayStatsQueriedAt,
   ui,
 }: {
   nodeCount: number;
@@ -1974,6 +2009,10 @@ function OverviewView({
   trafficRates: TrafficSample;
   trafficSamples: TrafficSample[];
   trafficTotals: TrafficTotals;
+  xrayRunning: boolean;
+  xrayStatsEnabled: boolean;
+  xrayStatsError: string | null;
+  xrayStatsQueriedAt: number | null;
   ui: typeof zh;
 }) {
   const width = 560;
@@ -1987,6 +2026,42 @@ function OverviewView({
   ];
   const maxTraffic = Math.max(...trafficSeries.flatMap((item) => item.values), 1);
   const hasTrafficSamples = trafficSamples.length > 0 && maxTraffic > 0;
+  const trafficSources: TrafficSourceBadge[] = [
+    {
+      detail: telemetry.connection === "connected" ? ui.tachyonTelemetryActive : ui.tachyonTelemetryWaiting,
+      label: ui.tachyon,
+      state: telemetry.connection === "connected" ? "ok" : "checking",
+    },
+    xrayStatsError
+      ? {
+          detail: xrayStatsError,
+          label: ui.xray,
+          state: "error",
+        }
+      : !xrayStatsEnabled
+        ? {
+            detail: ui.xrayStatsDisabled,
+            label: ui.xray,
+            state: "idle",
+          }
+        : !xrayRunning
+          ? {
+              detail: ui.xrayStopped,
+              label: ui.xray,
+              state: "idle",
+            }
+          : xrayStatsQueriedAt
+            ? {
+                detail: ui.xrayStatsActive,
+                label: ui.xray,
+                state: "ok",
+              }
+            : {
+                detail: ui.xrayStatsWaiting,
+                label: ui.xray,
+                state: "checking",
+              },
+  ];
 
   return (
     <div className="overview-page page-enter">
@@ -2001,12 +2076,22 @@ function OverviewView({
         <section className="traffic-section">
           <h2>{ui.traffic}</h2>
           <article className="glass-card traffic-card">
-            <div className="legend">
-              {trafficSeries.map((series) => (
-                <span className={`legend-item ${series.className.replace(" ", "-")}`} key={series.label}>
-                  ● {series.label}
-                </span>
-              ))}
+            <div className="traffic-card-header">
+              <div className="legend">
+                {trafficSeries.map((series) => (
+                  <span className={`legend-item ${series.className.replace(" ", "-")}`} key={series.label}>
+                    ● {series.label}
+                  </span>
+                ))}
+              </div>
+              <div className="traffic-source-list" aria-label={ui.trafficSource}>
+                {trafficSources.map((source) => (
+                  <span className={`traffic-source-pill ${source.state}`} key={`${source.label}-${source.state}`}>
+                    <strong>{source.label}</strong>
+                    <span>{source.detail}</span>
+                  </span>
+                ))}
+              </div>
             </div>
             <svg className="traffic-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Traffic chart">
             {Array.from({ length: 7 }, (_, index) => (
@@ -2037,6 +2122,7 @@ function OverviewView({
               </text>
             )}
             </svg>
+            {!hasTrafficSamples ? <p className="chart-empty-detail">{ui.trafficNoSamplesHint}</p> : null}
           </article>
         </section>
 
