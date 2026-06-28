@@ -10,7 +10,8 @@
         "build": "tauri build --features custom-protocol",
         "typecheck": "tsc --noEmit",
         "test": "vitest run",
-        "test:ui": "python scripts/prism_ui_smoke.py"
+        "test:ui": "python scripts/prism_ui_smoke.py",
+        "test:native-window": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prism_native_window_smoke.ps1"
     },
     "dependencies": {
         "@tauri-apps/api": "2.11.0",
