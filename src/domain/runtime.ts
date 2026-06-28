@@ -10,9 +10,21 @@ export interface RuntimePaths {
 }
 
 export interface RuntimeSettings {
+  tachyonGrpcListen: string;
+  tachyonGrpcPort: number;
+  tachyonIpcListen: string;
+  tachyonIpcPort: number;
   tachyonCoreBinaryPath: string;
   xrayBinaryPath: string;
+  tachyonTelemetryIntervalMs: number;
   tachyonCoreReleaseChannel: ReleaseChannel;
+  tachyonTunAddress: string;
+  tachyonTunMtu: number;
+  xraySocksListen: string;
+  xraySocksPort: number;
+  xrayStatsEnabled: boolean;
+  xrayStatsListen: string;
+  xrayStatsPort: number;
   xrayReleaseChannel: ReleaseChannel;
 }
 
@@ -78,6 +90,18 @@ export interface RuntimeStatus {
   xray: ProcessStatus;
 }
 
+export interface XrayTrafficStats {
+  bytesSent: number;
+  bytesReceived: number;
+  queriedAt: number | null;
+}
+
+export interface TcpLatencyResult {
+  ok: boolean;
+  latencyMs: number | null;
+  error: string | null;
+}
+
 export async function getRuntimePaths(): Promise<RuntimePaths> {
   if (!isTauriRuntime()) {
     return previewRuntimePaths();
@@ -141,6 +165,28 @@ export async function getRuntimeStatus(): Promise<RuntimeStatus> {
   return invokeDesktop<RuntimeStatus>("runtime_status");
 }
 
+export async function getXrayTrafficStats(): Promise<XrayTrafficStats> {
+  if (!isTauriRuntime()) {
+    return previewXrayTrafficStats();
+  }
+  return invokeDesktop<XrayTrafficStats>("xray_traffic_stats");
+}
+
+export async function testTcpLatency(
+  address: string,
+  port: number,
+  timeoutMs = 2500,
+): Promise<TcpLatencyResult> {
+  if (!isTauriRuntime()) {
+    return previewTcpLatency(address, port);
+  }
+  return invokeDesktop<TcpLatencyResult>("test_tcp_latency", {
+    address,
+    port,
+    timeoutMs,
+  });
+}
+
 export async function startXray(
   binaryPath: string,
   configPath: string,
@@ -165,9 +211,21 @@ export async function stopTachyonCore(): Promise<ProcessStatus> {
 
 function previewRuntimeSettings(): RuntimeSettings {
   return {
+    tachyonGrpcListen: "127.0.0.1",
+    tachyonGrpcPort: 50051,
+    tachyonIpcListen: "127.0.0.1",
+    tachyonIpcPort: 55123,
     tachyonCoreBinaryPath: "",
     tachyonCoreReleaseChannel: "preview",
+    tachyonTelemetryIntervalMs: 500,
+    tachyonTunAddress: "198.18.0.1/16",
+    tachyonTunMtu: 9000,
     xrayBinaryPath: "",
+    xraySocksListen: "127.0.0.1",
+    xraySocksPort: 10808,
+    xrayStatsEnabled: true,
+    xrayStatsListen: "127.0.0.1",
+    xrayStatsPort: 10085,
     xrayReleaseChannel: "stable",
   };
 }
@@ -211,6 +269,33 @@ function previewRuntimeStatus(): RuntimeStatus {
   return {
     tachyonCore: stoppedPreviewProcess(),
     xray: stoppedPreviewProcess(),
+  };
+}
+
+function previewXrayTrafficStats(): XrayTrafficStats {
+  return {
+    bytesReceived: 0,
+    bytesSent: 0,
+    queriedAt: null,
+  };
+}
+
+function previewTcpLatency(address: string, port: number): TcpLatencyResult {
+  if (!address || port <= 0) {
+    return {
+      error: "endpoint unavailable",
+      latencyMs: null,
+      ok: false,
+    };
+  }
+  const seed = Array.from(`${address}:${port}`).reduce(
+    (sum, char) => sum + char.charCodeAt(0),
+    0,
+  );
+  return {
+    error: null,
+    latencyMs: 82 + (seed % 236),
+    ok: true,
   };
 }
 

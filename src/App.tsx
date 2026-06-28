@@ -27,6 +27,7 @@ import {
   getRuntimePaths,
   getRuntimeSettings,
   getRuntimeStatus,
+  getXrayTrafficStats,
   installLatestTachyonCore,
   installLatestXray,
   installManagedBinary,
@@ -35,6 +36,7 @@ import {
   startXray,
   stopTachyonCore,
   stopXray,
+  testTcpLatency,
   type ManagedBinaryInfo,
   type ManagedBinaryInventory,
   type ManagedBinaryKind,
@@ -44,6 +46,8 @@ import {
   type RuntimeReleaseInfo,
   type RuntimeSettings,
   type RuntimeStatus,
+  type TcpLatencyResult,
+  type XrayTrafficStats,
 } from "./domain/runtime";
 import {
   activeSubscription,
@@ -66,6 +70,7 @@ import {
 } from "./domain/i18n";
 import { TelemetryClient } from "./domain/telemetry";
 import type { TelemetryData, TelemetryState } from "./domain/telemetry";
+import { invokeDesktop, isTauriRuntime } from "./domain/tauri";
 
 type ConnectionState = "checking" | "connected" | "disconnected";
 type PrismView = "overview" | "configs" | "subscriptions" | "plugins" | "settings";
@@ -83,9 +88,22 @@ interface ReadinessItem {
 }
 
 interface TrafficSample {
-  down: number;
-  up: number;
+  tachyonDown: number;
+  tachyonUp: number;
+  xrayDown: number;
+  xrayUp: number;
 }
+
+interface TrafficTotals {
+  tachyonDown: number;
+  tachyonUp: number;
+  totalDown: number;
+  totalUp: number;
+  xrayDown: number;
+  xrayUp: number;
+}
+
+type NodeLatencyMap = Record<string, TcpLatencyResult>;
 
 interface PolicyGroup {
   active: string;
@@ -105,9 +123,21 @@ const emptyProfile = {
 };
 
 const emptyRuntimeInputs = {
+  tachyonGrpcListen: "127.0.0.1",
+  tachyonGrpcPort: 50051,
+  tachyonIpcListen: "127.0.0.1",
+  tachyonIpcPort: 55123,
   tachyonCoreBinaryPath: "",
   tachyonCoreReleaseChannel: "preview" as ReleaseChannel,
+  tachyonTelemetryIntervalMs: 500,
+  tachyonTunAddress: "198.18.0.1/16",
+  tachyonTunMtu: 9000,
   xrayBinaryPath: "",
+  xraySocksListen: "127.0.0.1",
+  xraySocksPort: 10808,
+  xrayStatsEnabled: true,
+  xrayStatsListen: "127.0.0.1",
+  xrayStatsPort: 10085,
   xrayReleaseChannel: "stable" as ReleaseChannel,
 };
 
@@ -402,17 +432,30 @@ function nodeEndpoint(node: ProxyNode): string {
   return node.port > 0 ? `${node.address}:${node.port}` : node.address;
 }
 
-function nodeLatency(node: ProxyNode): number {
+function fallbackNodeLatency(node: ProxyNode): number {
   const seed = Array.from(node.id).reduce((sum, char) => sum + char.charCodeAt(0), 0);
   return 82 + (seed % 236);
 }
 
-function nodeAvailable(node: ProxyNode): boolean {
-  return nodeLatency(node) < 285;
+function nodeLatency(node: ProxyNode, latencyMap: NodeLatencyMap): number {
+  const measured = latencyMap[node.id];
+  return measured?.ok && measured.latencyMs !== null ? measured.latencyMs : fallbackNodeLatency(node);
 }
 
-function nodeLatencyLabel(node: ProxyNode, ui: typeof zh): string {
-  return nodeAvailable(node) ? `${nodeLatency(node)}ms` : ui.unavailable;
+function nodeAvailable(node: ProxyNode, latencyMap: NodeLatencyMap): boolean {
+  const measured = latencyMap[node.id];
+  if (measured && !measured.ok) {
+    return false;
+  }
+  return nodeLatency(node, latencyMap) < 285;
+}
+
+function nodeLatencyLabel(node: ProxyNode, ui: typeof zh, latencyMap: NodeLatencyMap): string {
+  const measured = latencyMap[node.id];
+  if (measured && !measured.ok) {
+    return ui.unavailable;
+  }
+  return `${nodeLatency(node, latencyMap)}ms`;
 }
 
 function processStatusLabel(status: ProcessStatus | undefined): string {
@@ -562,6 +605,7 @@ function draftText(
   profiles: GameProfile[],
   launcherSettings: LauncherSettings,
   routingMode: XrayRoutingMode,
+  runtimeSettings: RuntimeSettings,
 ): { core: string; error: string; xray: string } {
   if (!activeNode) {
     return { core: "", error: "", xray: "" };
@@ -571,11 +615,27 @@ function draftText(
       core: stringifyDraft(
         buildCoreClientConfigDraft(activeNode, {
           gameProfiles: profiles,
+          grpcListen: runtimeSettings.tachyonGrpcListen,
+          grpcPort: runtimeSettings.tachyonGrpcPort,
+          ipcListen: runtimeSettings.tachyonIpcListen,
+          ipcPort: runtimeSettings.tachyonIpcPort,
           launchers: launcherSettings,
+          telemetryIntervalMs: runtimeSettings.tachyonTelemetryIntervalMs,
+          tunAddress: runtimeSettings.tachyonTunAddress,
+          tunMtu: runtimeSettings.tachyonTunMtu,
         }),
       ),
       error: "",
-      xray: stringifyDraft(buildXrayClientConfigDraft(activeNode, { routingMode })),
+      xray: stringifyDraft(
+        buildXrayClientConfigDraft(activeNode, {
+          enableStats: runtimeSettings.xrayStatsEnabled,
+          routingMode,
+          socksListen: runtimeSettings.xraySocksListen,
+          socksPort: runtimeSettings.xraySocksPort,
+          statsListen: runtimeSettings.xrayStatsListen,
+          statsPort: runtimeSettings.xrayStatsPort,
+        }),
+      ),
     };
   } catch (error) {
     return {
@@ -586,28 +646,79 @@ function draftText(
   }
 }
 
-function telemetryBytes(data: TelemetryData | null): { down: number; total: number; up: number } {
-  if (!data) {
-    return { down: 0, total: 0, up: 0 };
+function telemetryBytes(data: TelemetryData | null, xrayStats: XrayTrafficStats): TrafficTotals {
+  if (!data && !xrayStats.queriedAt && xrayStats.bytesSent === 0 && xrayStats.bytesReceived === 0) {
+    return emptyTrafficTotals();
   }
-  const down = data.decided_tgp * 168 + data.decided_direct * 96;
-  const up = data.packets_read * 76;
-  return { down, total: down + up, up };
+  const tachyonUp = data?.tgp_bytes_sent ?? data?.bytes_tgp ?? 0;
+  const tachyonDown = data?.tgp_bytes_received ?? 0;
+  const xrayUp = xrayStats.bytesSent || data?.xray_bytes_sent || 0;
+  const xrayDown = xrayStats.bytesReceived || data?.xray_bytes_received || 0;
+  return {
+    tachyonDown,
+    tachyonUp,
+    totalDown: tachyonDown + xrayDown,
+    totalUp: tachyonUp + xrayUp,
+    xrayDown,
+    xrayUp,
+  };
 }
 
-function trafficSeries(data: TelemetryData | null): TrafficSample[] {
-  const base = data?.packets_read ?? 3;
-  return Array.from({ length: 34 }, (_, index) => {
-    const pulse = index > 27 ? (index - 27) * 800 : 0;
-    return {
-      down: Math.max(80, (Math.sin(index / 2.5) + 1.2) * 280 + pulse + base * 3),
-      up: Math.max(36, (Math.cos(index / 2.1) + 1.1) * 140 + pulse * 0.42 + base),
-    };
-  });
+function emptyTrafficTotals(): TrafficTotals {
+  return {
+    tachyonDown: 0,
+    tachyonUp: 0,
+    totalDown: 0,
+    totalUp: 0,
+    xrayDown: 0,
+    xrayUp: 0,
+  };
 }
 
-function polyline(points: number[], width: number, height: number, padding = 0): string {
-  const max = Math.max(...points, 1);
+function isEmptyTrafficTotals(totals: TrafficTotals): boolean {
+  return (
+    totals.tachyonDown === 0 &&
+    totals.tachyonUp === 0 &&
+    totals.totalDown === 0 &&
+    totals.totalUp === 0 &&
+    totals.xrayDown === 0 &&
+    totals.xrayUp === 0
+  );
+}
+
+function emptyTrafficSample(): TrafficSample {
+  return {
+    tachyonDown: 0,
+    tachyonUp: 0,
+    xrayDown: 0,
+    xrayUp: 0,
+  };
+}
+
+function emptyXrayTrafficStats(): XrayTrafficStats {
+  return {
+    bytesReceived: 0,
+    bytesSent: 0,
+    queriedAt: null,
+  };
+}
+
+function trafficRateSample(previous: TrafficTotals, current: TrafficTotals, elapsedMs: number): TrafficSample {
+  const seconds = Math.max(elapsedMs / 1000, 0.1);
+  return {
+    tachyonDown: rateDelta(previous.tachyonDown, current.tachyonDown, seconds),
+    tachyonUp: rateDelta(previous.tachyonUp, current.tachyonUp, seconds),
+    xrayDown: rateDelta(previous.xrayDown, current.xrayDown, seconds),
+    xrayUp: rateDelta(previous.xrayUp, current.xrayUp, seconds),
+  };
+}
+
+function rateDelta(previous: number, current: number, seconds: number): number {
+  return Math.max(0, current - previous) / seconds;
+}
+
+function polyline(points: number[], width: number, height: number, padding = 0, maxValue?: number): string {
+  const max = Math.max(maxValue ?? Math.max(...points, 1), 1);
   const step = (width - padding) / Math.max(points.length - 1, 1);
   return points
     .map((value, index) => {
@@ -639,6 +750,7 @@ export function App() {
   const [showUnavailableNodes, setShowUnavailableNodes] = useState(false);
   const [sortPolicyNodesByDelay, setSortPolicyNodesByDelay] = useState(true);
   const [expandedPolicyGroupId, setExpandedPolicyGroupId] = useState("node-selector");
+  const [nodeLatencies, setNodeLatencies] = useState<NodeLatencyMap>({});
   const [nodePickerOpen, setNodePickerOpen] = useState(false);
   const [controllerOpen, setControllerOpen] = useState(false);
   const [language, setLanguage] = useState<Language>(loadLanguage);
@@ -653,6 +765,8 @@ export function App() {
   >({});
   const [binaryBusy, setBinaryBusy] = useState(false);
   const [message, setMessage] = useState("Ready");
+  const [alwaysOnTop, setAlwaysOnTop] = useState(false);
+  const [windowMaximized, setWindowMaximized] = useState(false);
   const [telemetry, setTelemetry] = useState<TelemetryState>(() => ({
     connection: "disconnected",
     hello: null,
@@ -661,6 +775,9 @@ export function App() {
     recentErrors: [],
   }));
   const telemetryClient = useMemo(() => new TelemetryClient(), []);
+  const [xrayTrafficStats, setXrayTrafficStats] = useState<XrayTrafficStats>(emptyXrayTrafficStats);
+  const [trafficSamples, setTrafficSamples] = useState<TrafficSample[]>([]);
+  const previousTrafficRef = useRef<{ at: number; totals: TrafficTotals } | null>(null);
   const subscriptionNameInputRef = useRef<HTMLInputElement | null>(null);
   const t = useMemo(() => createTranslator(language), [language]);
   const ui = language === "zh-CN" ? zh : en;
@@ -672,14 +789,14 @@ export function App() {
   );
   const activeNode = useMemo(() => selectedNode(subscription), [subscription]);
   const drafts = useMemo(
-    () => draftText(activeNode, profiles, launcherSettings, routingMode),
-    [activeNode, launcherSettings, profiles, routingMode],
+    () => draftText(activeNode, profiles, launcherSettings, routingMode, runtimeInputs),
+    [activeNode, launcherSettings, profiles, routingMode, runtimeInputs],
   );
-  const traffic = useMemo(() => telemetryBytes(telemetry.latestTelemetry), [telemetry.latestTelemetry]);
-  const trafficSamples = useMemo(
-    () => trafficSeries(telemetry.latestTelemetry),
-    [telemetry.latestTelemetry],
+  const trafficTotals = useMemo(
+    () => telemetryBytes(telemetry.latestTelemetry, xrayTrafficStats),
+    [telemetry.latestTelemetry, xrayTrafficStats],
   );
+  const trafficRates = trafficSamples[trafficSamples.length - 1] ?? emptyTrafficSample();
   const readinessItems = useMemo<ReadinessItem[]>(() => {
     const items: ReadinessItem[] = [];
     items.push(
@@ -868,8 +985,37 @@ export function App() {
       saveSubscriptionSnapshot(snapshot);
       setSubscription(snapshot);
       setMessage(`${nodes.length} nodes imported`);
+      void refreshNodeLatencies(nodes);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Subscription update failed");
+    }
+  }
+
+  async function refreshNodeLatencies(nodes = subscription.nodes, announce = true) {
+    if (nodes.length === 0) {
+      setNodeLatencies({});
+      return;
+    }
+    const results = await Promise.all(
+      nodes.map(async (node) => {
+        try {
+          const result = await testTcpLatency(node.address, node.port, 2500);
+          return [node.id, result] as const;
+        } catch (error) {
+          return [
+            node.id,
+            {
+              error: error instanceof Error ? error.message : "latency test failed",
+              latencyMs: null,
+              ok: false,
+            },
+          ] as const;
+        }
+      }),
+    );
+    setNodeLatencies(Object.fromEntries(results));
+    if (announce) {
+      setMessage("Latency refreshed");
     }
   }
 
@@ -886,6 +1032,7 @@ export function App() {
       setSubscription(snapshot);
       setSubscriptionText("");
       setMessage(`${nodes.length} nodes imported`);
+      void refreshNodeLatencies(nodes);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Subscription import failed");
     }
@@ -1175,6 +1322,35 @@ export function App() {
     await refreshRuntime();
   }
 
+  async function handleWindowAction(action: "pin" | "minimize" | "maximize" | "close") {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    try {
+      if (action === "pin") {
+        const enabled = await invokeDesktop<boolean>("window_set_always_on_top", {
+          value: !alwaysOnTop,
+        });
+        setAlwaysOnTop(enabled);
+        return;
+      }
+      if (action === "minimize") {
+        await invokeDesktop<void>("window_minimize");
+        return;
+      }
+      if (action === "maximize") {
+        const maximized = await invokeDesktop<boolean>("window_set_maximized", {
+          value: !windowMaximized,
+        });
+        setWindowMaximized(maximized);
+        return;
+      }
+      await invokeDesktop<void>("window_close");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Window action failed");
+    }
+  }
+
   function changeLanguage(nextLanguage: Language) {
     saveLanguage(nextLanguage);
     setLanguage(nextLanguage);
@@ -1204,6 +1380,7 @@ export function App() {
       .then((paths) => {
         setRuntimePaths(paths);
         setRuntimeInputs({
+          ...emptyRuntimeInputs,
           tachyonCoreBinaryPath: paths.tachyonCoreBinaryPath,
           tachyonCoreReleaseChannel: "preview",
           xrayBinaryPath: paths.xrayBinaryPath,
@@ -1228,6 +1405,14 @@ export function App() {
   }, [currentSubscription]);
 
   useEffect(() => {
+    if (subscription.nodes.length === 0) {
+      setNodeLatencies({});
+      return;
+    }
+    void refreshNodeLatencies(subscription.nodes, false);
+  }, [subscription.nodes]);
+
+  useEffect(() => {
     const unsub = telemetryClient.subscribe(setTelemetry);
     telemetryClient.connect();
     return () => {
@@ -1235,6 +1420,61 @@ export function App() {
       telemetryClient.disconnect();
     };
   }, [telemetryClient]);
+
+  useEffect(() => {
+    const xrayRunning = runtimeStatus?.xray.state === "running";
+    if (!runtimeInputs.xrayStatsEnabled || !xrayRunning) {
+      setXrayTrafficStats(emptyXrayTrafficStats());
+      return;
+    }
+
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const stats = await getXrayTrafficStats();
+        if (!cancelled) {
+          setXrayTrafficStats(stats);
+        }
+      } catch {
+        if (!cancelled) {
+          setXrayTrafficStats(emptyXrayTrafficStats());
+        }
+      }
+    };
+    void poll();
+    const timer = window.setInterval(
+      () => void poll(),
+      Math.max(runtimeInputs.tachyonTelemetryIntervalMs, 1000),
+    );
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    runtimeInputs.tachyonTelemetryIntervalMs,
+    runtimeInputs.xrayBinaryPath,
+    runtimeInputs.xrayStatsEnabled,
+    runtimeInputs.xrayStatsListen,
+    runtimeInputs.xrayStatsPort,
+    runtimeStatus?.xray.state,
+  ]);
+
+  useEffect(() => {
+    if (!telemetry.latestTelemetry && isEmptyTrafficTotals(trafficTotals)) {
+      previousTrafficRef.current = null;
+      setTrafficSamples([]);
+      return;
+    }
+    const now = Date.now();
+    const totals = trafficTotals;
+    const previous = previousTrafficRef.current;
+    previousTrafficRef.current = { at: now, totals };
+    if (!previous) {
+      return;
+    }
+    const sample = trafficRateSample(previous.totals, totals, now - previous.at);
+    setTrafficSamples((current) => [...current, sample].slice(-34));
+  }, [telemetry.latestTelemetry, trafficTotals]);
 
   const navItems: Array<{ icon: string; id: PrismView; label: string }> = [
     { icon: "⌘", id: "overview", label: ui.overview },
@@ -1246,11 +1486,47 @@ export function App() {
 
   return (
     <main className="prism-shell">
-      <header className="app-titlebar" data-tauri-drag-region>
-        <div className="title-left">
+      <header className="app-titlebar">
+        <div className="title-left" data-tauri-drag-region>
           <span className="app-cube">◆</span>
           <strong>Tachyon Prism v0.1.0</strong>
           <span>Rolling Preview</span>
+        </div>
+        <div className="title-drag-fill" data-tauri-drag-region />
+        <div className="window-actions" aria-label="Window controls">
+          <button
+            aria-label="Pin window"
+            aria-pressed={alwaysOnTop}
+            className={alwaysOnTop ? "active" : ""}
+            type="button"
+            onClick={() => void handleWindowAction("pin")}
+          >
+            ⌖
+          </button>
+          <button
+            aria-label="Minimize window"
+            type="button"
+            onClick={() => void handleWindowAction("minimize")}
+          >
+            −
+          </button>
+          <button
+            aria-label="Maximize window"
+            aria-pressed={windowMaximized}
+            className={windowMaximized ? "active" : ""}
+            type="button"
+            onClick={() => void handleWindowAction("maximize")}
+          >
+            □
+          </button>
+          <button
+            aria-label="Close window"
+            className="close"
+            type="button"
+            onClick={() => void handleWindowAction("close")}
+          >
+            ×
+          </button>
         </div>
       </header>
 
@@ -1289,6 +1565,16 @@ export function App() {
           </button>
         </div>
         <div className="strip-actions">
+          <button
+            aria-label={ui.coreSettings}
+            type="button"
+            onClick={() => {
+              setSettingsSection("core");
+              navigateView("settings");
+            }}
+          >
+            ⚙
+          </button>
           <button type="button" onClick={() => void saveDrafts()}>
             ◫
           </button>
@@ -1308,8 +1594,9 @@ export function App() {
             onRoutingModeChange={changeRoutingMode}
             routingMode={routingMode}
             telemetry={telemetry}
-            traffic={traffic}
+            trafficRates={trafficRates}
             trafficSamples={trafficSamples}
+            trafficTotals={trafficTotals}
             ui={ui}
           />
         ) : null}
@@ -1318,8 +1605,10 @@ export function App() {
           <ConfigsView
             activeNode={activeNode}
             expandedGroupId={expandedPolicyGroupId}
+            latencyMap={nodeLatencies}
             onChooseNode={chooseNode}
             onExpandGroup={setExpandedPolicyGroupId}
+            onRefreshLatency={() => void refreshNodeLatencies()}
             onSetShowUnavailable={setShowUnavailableNodes}
             onSetSortByDelay={setSortPolicyNodesByDelay}
             onSetViewMode={setPolicyGroupViewMode}
@@ -1335,6 +1624,7 @@ export function App() {
           <SubscriptionsView
             activeNode={activeNode}
             currentSubscription={currentSubscription}
+            latencyMap={nodeLatencies}
             nodeCount={subscriptionNodeCount}
             nameInputRef={subscriptionNameInputRef}
             onChooseNode={chooseNode}
@@ -1343,6 +1633,7 @@ export function App() {
             onImportText={importSubscriptionText}
             onNameChange={setSubscriptionName}
             onPrepareAdd={prepareSubscriptionAdd}
+            onRefreshLatency={() => void refreshNodeLatencies()}
             onTextChange={setSubscriptionText}
             onUpdate={() => void updateSubscriptionFromUrl()}
             onUrlChange={setSubscriptionUrl}
@@ -1417,9 +1708,11 @@ export function App() {
         <ControllerDrawer
           activeNode={activeNode}
           expandedGroupId={expandedPolicyGroupId}
+          latencyMap={nodeLatencies}
           onChooseNode={chooseNode}
           onClose={() => setControllerOpen(false)}
           onExpandGroup={setExpandedPolicyGroupId}
+          onRefreshLatency={() => void refreshNodeLatencies()}
           onSetShowUnavailable={setShowUnavailableNodes}
           onSetSortByDelay={setSortPolicyNodesByDelay}
           onSetViewMode={setPolicyGroupViewMode}
@@ -1434,6 +1727,7 @@ export function App() {
       {nodePickerOpen ? (
         <NodeDrawer
           activeNode={activeNode}
+          latencyMap={nodeLatencies}
           onChooseNode={chooseNode}
           onClose={() => setNodePickerOpen(false)}
           subscription={subscription}
@@ -1449,29 +1743,37 @@ function OverviewView({
   onRoutingModeChange,
   routingMode,
   telemetry,
-  traffic,
+  trafficRates,
   trafficSamples,
+  trafficTotals,
   ui,
 }: {
   nodeCount: number;
   onRoutingModeChange: (mode: XrayRoutingMode) => void;
   routingMode: XrayRoutingMode;
   telemetry: TelemetryState;
-  traffic: { down: number; total: number; up: number };
+  trafficRates: TrafficSample;
   trafficSamples: TrafficSample[];
+  trafficTotals: TrafficTotals;
   ui: typeof zh;
 }) {
   const width = 560;
   const height = 220;
   const chartPadding = 48;
-  const upPoints = polyline(trafficSamples.map((item) => item.up), width, height, chartPadding);
-  const downPoints = polyline(trafficSamples.map((item) => item.down), width, height, chartPadding);
+  const trafficSeries = [
+    { className: "tachyon up", label: "Tachyon ↑", values: trafficSamples.map((item) => item.tachyonUp) },
+    { className: "tachyon down", label: "Tachyon ↓", values: trafficSamples.map((item) => item.tachyonDown) },
+    { className: "xray up", label: "Xray ↑", values: trafficSamples.map((item) => item.xrayUp) },
+    { className: "xray down", label: "Xray ↓", values: trafficSamples.map((item) => item.xrayDown) },
+  ];
+  const maxTraffic = Math.max(...trafficSeries.flatMap((item) => item.values), 1);
+  const hasTrafficSamples = trafficSamples.length > 0 && maxTraffic > 0;
 
   return (
     <div className="overview-page page-enter">
       <div className="overview-metrics">
-        <MetricCard label={ui.realTimeTraffic} primary={`↑ ${formatRate(traffic.up)}`} secondary={`↓ ${formatRate(traffic.down)}`} />
-        <MetricCard label={ui.totalTraffic} primary={`↑ ${formatBytes(traffic.up)}`} secondary={`↓ ${formatBytes(traffic.total)}`} />
+        <MetricCard label={ui.realTimeTraffic} primary={`↑ ${formatRate(trafficRates.tachyonUp + trafficRates.xrayUp)}`} secondary={`↓ ${formatRate(trafficRates.tachyonDown + trafficRates.xrayDown)}`} />
+        <MetricCard label={ui.totalTraffic} primary={`↑ ${formatBytes(trafficTotals.totalUp)}`} secondary={`↓ ${formatBytes(trafficTotals.totalDown)}`} />
         <MetricCard label={ui.activeConnections} primary={`${telemetry.latestTelemetry?.tgp_sessions ?? 0}`} secondary={`${nodeCount} nodes`} />
         <MetricCard label={ui.memory} primary={`${telemetry.latestTelemetry?.goroutines ?? 0}`} secondary="goroutines" />
       </div>
@@ -1481,20 +1783,17 @@ function OverviewView({
           <h2>{ui.traffic}</h2>
           <article className="glass-card traffic-card">
             <div className="legend">
-              <span className="up-dot">● {ui.uploadRate}</span>
-              <span className="down-dot">● {ui.downloadRate}</span>
+              {trafficSeries.map((series) => (
+                <span className={`legend-item ${series.className.replace(" ", "-")}`} key={series.label}>
+                  ● {series.label}
+                </span>
+              ))}
             </div>
             <svg className="traffic-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Traffic chart">
-              <defs>
-                <linearGradient id="down-fill" x1="0" x2="0" y1="0" y2="1">
-                  <stop offset="0" stopColor="#008cff" stopOpacity="0.38" />
-                  <stop offset="1" stopColor="#008cff" stopOpacity="0.02" />
-                </linearGradient>
-              </defs>
             {Array.from({ length: 7 }, (_, index) => (
               <g key={index}>
                 <text className="chart-axis-label" x="4" y={Math.max(10, (height / 6) * index - 4)}>
-                  {formatBytes(Math.round(((6 - index) / 6) * Math.max(...trafficSamples.map((item) => item.down), 1)))}
+                  {formatBytes(Math.round(((6 - index) / 6) * maxTraffic))}
                 </text>
                 <line
                   className="chart-grid"
@@ -1505,10 +1804,19 @@ function OverviewView({
                 />
               </g>
             ))}
-            <polyline className="traffic-fill down" points={`48,${height - 6} ${downPoints} ${width},${height - 6}`} />
-            <polyline className="traffic-fill up" points={`48,${height - 6} ${upPoints} ${width},${height - 6}`} />
-            <polyline className="traffic-line down" points={downPoints} />
-            <polyline className="traffic-line up" points={upPoints} />
+            {hasTrafficSamples ? (
+              trafficSeries.map((series) => (
+                <polyline
+                  className={`traffic-line ${series.className}`}
+                  key={series.label}
+                  points={polyline(series.values, width, height, chartPadding, maxTraffic)}
+                />
+              ))
+            ) : (
+              <text className="chart-empty" x={width / 2} y={height / 2}>
+                {ui.waitingTelemetry}
+              </text>
+            )}
             </svg>
           </article>
         </section>
@@ -1574,8 +1882,10 @@ function MetricCard({
 function ConfigsView({
   activeNode,
   expandedGroupId,
+  latencyMap,
   onChooseNode,
   onExpandGroup,
+  onRefreshLatency,
   onSetShowUnavailable,
   onSetSortByDelay,
   onSetViewMode,
@@ -1587,8 +1897,10 @@ function ConfigsView({
 }: {
   activeNode: ProxyNode | undefined;
   expandedGroupId: string;
+  latencyMap: NodeLatencyMap;
   onChooseNode: (id: string) => void;
   onExpandGroup: (id: string) => void;
+  onRefreshLatency: () => void;
   onSetShowUnavailable: (value: boolean) => void;
   onSetSortByDelay: (value: boolean) => void;
   onSetViewMode: (mode: SubscriptionViewMode) => void;
@@ -1601,10 +1913,10 @@ function ConfigsView({
   const sortedNodes = useMemo(() => {
     const nodes = [...subscription.nodes];
     if (sortByDelay) {
-      nodes.sort((left, right) => nodeLatency(left) - nodeLatency(right));
+      nodes.sort((left, right) => nodeLatency(left, latencyMap) - nodeLatency(right, latencyMap));
     }
-    return showUnavailable ? nodes : nodes.filter(nodeAvailable);
-  }, [showUnavailable, sortByDelay, subscription.nodes]);
+    return showUnavailable ? nodes : nodes.filter((node) => nodeAvailable(node, latencyMap));
+  }, [latencyMap, showUnavailable, sortByDelay, subscription.nodes]);
 
   const activeName = activeNode?.name ?? ui.noNodeSelected;
   const activeProtocol = activeNode ? activeNode.protocol.toUpperCase() : "--";
@@ -1690,7 +2002,7 @@ function ConfigsView({
         </div>
         <div className="strip-actions">
           <button type="button" title={ui.filter}>⌯</button>
-          <button type="button" title={ui.refreshLatency}>↻</button>
+          <button type="button" title={ui.refreshLatency} onClick={onRefreshLatency}>↻</button>
           <button type="button" title={ui.collapseAll} onClick={() => onExpandGroup("")}>⌄</button>
         </div>
       </div>
@@ -1719,7 +2031,7 @@ function ConfigsView({
                 </button>
                 <div className="panel-icons">
                   <button type="button" title={ui.filter}>⌯</button>
-                  <button type="button" title={ui.refreshLatency}>⏻</button>
+                  <button type="button" title={ui.refreshLatency} onClick={onRefreshLatency}>⏻</button>
                   <button type="button" onClick={() => onExpandGroup(expanded ? "" : group.id)}>
                     {expanded ? "⌄" : "›"}
                   </button>
@@ -1738,8 +2050,8 @@ function ConfigsView({
                           onClick={() => onChooseNode(node.id)}
                         >
                           <strong>{node.name}</strong>
-                          <span className={nodeAvailable(node) ? "" : "unavailable"}>
-                            {nodeLatencyLabel(node, ui)}
+                          <span className={nodeAvailable(node, latencyMap) ? "" : "unavailable"}>
+                            {nodeLatencyLabel(node, ui, latencyMap)}
                           </span>
                           <small>
                             {node.protocol.toUpperCase()} :: {node.transport || "udp"}
@@ -1773,6 +2085,7 @@ function ConfigsView({
 function SubscriptionsView({
   activeNode,
   currentSubscription,
+  latencyMap,
   nameInputRef,
   nodeCount,
   onChooseNode,
@@ -1781,6 +2094,7 @@ function SubscriptionsView({
   onImportText,
   onNameChange,
   onPrepareAdd,
+  onRefreshLatency,
   onTextChange,
   onUpdate,
   onUrlChange,
@@ -1794,6 +2108,7 @@ function SubscriptionsView({
 }: {
   activeNode: ProxyNode | undefined;
   currentSubscription: SubscriptionProfile | undefined;
+  latencyMap: NodeLatencyMap;
   nameInputRef: RefObject<HTMLInputElement | null>;
   nodeCount: number;
   onChooseNode: (id: string) => void;
@@ -1802,6 +2117,7 @@ function SubscriptionsView({
   onImportText: () => void;
   onNameChange: (value: string) => void;
   onPrepareAdd: () => void;
+  onRefreshLatency: () => void;
   onTextChange: (value: string) => void;
   onUpdate: () => void;
   onUrlChange: (value: string) => void;
@@ -1905,7 +2221,7 @@ function SubscriptionsView({
             </div>
             <div className="panel-icons">
               <button type="button" title={ui.list} onClick={() => setViewMode(viewMode === "grid" ? "list" : "grid")}>⌯</button>
-              <button type="button" title={ui.refreshLatency} onClick={onUpdate}>↻</button>
+              <button type="button" title={ui.refreshLatency} onClick={onRefreshLatency}>↻</button>
               <button type="button" title={ui.nodeSelector} onClick={() => setViewMode("grid")}>⌄</button>
             </div>
           </header>
@@ -1918,7 +2234,9 @@ function SubscriptionsView({
                 onClick={() => onChooseNode(node.id)}
               >
                 <strong>{node.name}</strong>
-                <span className={nodeAvailable(node) ? "" : "unavailable"}>{nodeLatencyLabel(node, ui)}</span>
+                <span className={nodeAvailable(node, latencyMap) ? "" : "unavailable"}>
+                  {nodeLatencyLabel(node, ui, latencyMap)}
+                </span>
                 <small>
                   {node.protocol.toUpperCase()} :: {node.transport || "udp"}
                 </small>
@@ -2200,6 +2518,138 @@ function SettingsView({
                   <div key={row.label}><span>{row.label}</span><strong>{row.value}</strong></div>
                 ))}
               </div>
+              <div className="core-settings-grid">
+                <label>
+                  <span>Xray SOCKS</span>
+                  <div className="input-pair">
+                    <input
+                      value={runtimeInputs.xraySocksListen}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({ ...current, xraySocksListen: event.target.value }))
+                      }
+                    />
+                    <input
+                      min={1}
+                      max={65535}
+                      type="number"
+                      value={runtimeInputs.xraySocksPort}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({ ...current, xraySocksPort: Number(event.target.value) }))
+                      }
+                    />
+                  </div>
+                </label>
+                <label>
+                  <span>Xray Stats API</span>
+                  <div className="input-pair">
+                    <input
+                      value={runtimeInputs.xrayStatsListen}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({ ...current, xrayStatsListen: event.target.value }))
+                      }
+                    />
+                    <input
+                      min={1}
+                      max={65535}
+                      type="number"
+                      value={runtimeInputs.xrayStatsPort}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({ ...current, xrayStatsPort: Number(event.target.value) }))
+                      }
+                    />
+                  </div>
+                </label>
+                <label>
+                  <span>Tachyon IPC</span>
+                  <div className="input-pair">
+                    <input
+                      value={runtimeInputs.tachyonIpcListen}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({ ...current, tachyonIpcListen: event.target.value }))
+                      }
+                    />
+                    <input
+                      min={1}
+                      max={65535}
+                      type="number"
+                      value={runtimeInputs.tachyonIpcPort}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({ ...current, tachyonIpcPort: Number(event.target.value) }))
+                      }
+                    />
+                  </div>
+                </label>
+                <label>
+                  <span>Tachyon gRPC</span>
+                  <div className="input-pair">
+                    <input
+                      value={runtimeInputs.tachyonGrpcListen}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({ ...current, tachyonGrpcListen: event.target.value }))
+                      }
+                    />
+                    <input
+                      min={1}
+                      max={65535}
+                      type="number"
+                      value={runtimeInputs.tachyonGrpcPort}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({ ...current, tachyonGrpcPort: Number(event.target.value) }))
+                      }
+                    />
+                  </div>
+                </label>
+                <label>
+                  <span>TUN</span>
+                  <div className="input-pair">
+                    <input
+                      value={runtimeInputs.tachyonTunAddress}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({ ...current, tachyonTunAddress: event.target.value }))
+                      }
+                    />
+                    <input
+                      min={576}
+                      max={9500}
+                      type="number"
+                      value={runtimeInputs.tachyonTunMtu}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({ ...current, tachyonTunMtu: Number(event.target.value) }))
+                      }
+                    />
+                  </div>
+                </label>
+                <label>
+                  <span>Telemetry</span>
+                  <div className="input-pair">
+                    <input
+                      min={100}
+                      max={10000}
+                      type="number"
+                      value={runtimeInputs.tachyonTelemetryIntervalMs}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({
+                          ...current,
+                          tachyonTelemetryIntervalMs: Number(event.target.value),
+                        }))
+                      }
+                    />
+                    <label className="mini-check">
+                      <input
+                        checked={runtimeInputs.xrayStatsEnabled}
+                        type="checkbox"
+                        onChange={(event) =>
+                          setRuntimeInputs((current) => ({
+                            ...current,
+                            xrayStatsEnabled: event.target.checked,
+                          }))
+                        }
+                      />
+                      Xray Stats
+                    </label>
+                  </div>
+                </label>
+              </div>
               <div className="runtime-grid">
                 <RuntimePathRow
                   label="Xray Core"
@@ -2443,9 +2893,11 @@ function RuntimePathRow({
 function ControllerDrawer({
   activeNode,
   expandedGroupId,
+  latencyMap,
   onChooseNode,
   onClose,
   onExpandGroup,
+  onRefreshLatency,
   onSetShowUnavailable,
   onSetSortByDelay,
   onSetViewMode,
@@ -2457,9 +2909,11 @@ function ControllerDrawer({
 }: {
   activeNode: ProxyNode | undefined;
   expandedGroupId: string;
+  latencyMap: NodeLatencyMap;
   onChooseNode: (id: string) => void;
   onClose: () => void;
   onExpandGroup: (id: string) => void;
+  onRefreshLatency: () => void;
   onSetShowUnavailable: (value: boolean) => void;
   onSetSortByDelay: (value: boolean) => void;
   onSetViewMode: (mode: SubscriptionViewMode) => void;
@@ -2475,8 +2929,10 @@ function ControllerDrawer({
         <ConfigsView
           activeNode={activeNode}
           expandedGroupId={expandedGroupId}
+          latencyMap={latencyMap}
           onChooseNode={onChooseNode}
           onExpandGroup={onExpandGroup}
+          onRefreshLatency={onRefreshLatency}
           onSetShowUnavailable={onSetShowUnavailable}
           onSetSortByDelay={onSetSortByDelay}
           onSetViewMode={onSetViewMode}
@@ -2494,12 +2950,14 @@ function ControllerDrawer({
 
 function NodeDrawer({
   activeNode,
+  latencyMap,
   onChooseNode,
   onClose,
   subscription,
   ui,
 }: {
   activeNode: ProxyNode | undefined;
+  latencyMap: NodeLatencyMap;
   onChooseNode: (id: string) => void;
   onClose: () => void;
   subscription: SubscriptionSnapshot;
@@ -2524,7 +2982,9 @@ function NodeDrawer({
               onClick={() => onChooseNode(node.id)}
             >
               <strong>{node.name}</strong>
-              <span className={nodeAvailable(node) ? "" : "unavailable"}>{nodeLatencyLabel(node, ui)}</span>
+              <span className={nodeAvailable(node, latencyMap) ? "" : "unavailable"}>
+                {nodeLatencyLabel(node, ui, latencyMap)}
+              </span>
               <small>{node.protocol.toUpperCase()} :: {node.transport || "udp"}</small>
               {node.id === subscription.selectedNodeId ? <em>✓</em> : null}
             </button>

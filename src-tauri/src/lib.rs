@@ -3,10 +3,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::io;
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
 #[derive(Serialize)]
@@ -30,11 +32,35 @@ struct RuntimePaths {
 #[serde(rename_all = "camelCase")]
 struct RuntimeSettings {
     #[serde(default)]
+    tachyon_grpc_listen: String,
+    #[serde(default)]
+    tachyon_grpc_port: u16,
+    #[serde(default)]
+    tachyon_ipc_listen: String,
+    #[serde(default)]
+    tachyon_ipc_port: u16,
+    #[serde(default)]
     tachyon_core_binary_path: String,
     #[serde(default)]
     xray_binary_path: String,
     #[serde(default)]
+    tachyon_telemetry_interval_ms: u32,
+    #[serde(default)]
     tachyon_core_release_channel: String,
+    #[serde(default)]
+    tachyon_tun_address: String,
+    #[serde(default)]
+    tachyon_tun_mtu: u32,
+    #[serde(default)]
+    xray_socks_listen: String,
+    #[serde(default)]
+    xray_socks_port: u16,
+    #[serde(default)]
+    xray_stats_enabled: bool,
+    #[serde(default)]
+    xray_stats_listen: String,
+    #[serde(default)]
+    xray_stats_port: u16,
     #[serde(default)]
     xray_release_channel: String,
 }
@@ -128,6 +154,22 @@ struct RuntimeStatus {
     xray: ProcessStatus,
 }
 
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct XrayTrafficStats {
+    bytes_sent: u64,
+    bytes_received: u64,
+    queried_at: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TcpLatencyResult {
+    ok: bool,
+    latency_ms: Option<u32>,
+    error: Option<String>,
+}
+
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct MatchRule {
@@ -178,12 +220,20 @@ struct SteamScanResult {
 
 struct RuntimeState {
     processes: Mutex<RuntimeProcesses>,
+    window_restore_bounds: Mutex<Option<WindowBounds>>,
+}
+
+#[derive(Clone, Copy)]
+struct WindowBounds {
+    position: tauri::PhysicalPosition<i32>,
+    size: tauri::PhysicalSize<u32>,
 }
 
 impl Default for RuntimeState {
     fn default() -> Self {
         Self {
             processes: Mutex::new(RuntimeProcesses::default()),
+            window_restore_bounds: Mutex::new(None),
         }
     }
 }
@@ -384,6 +434,76 @@ fn runtime_status(state: tauri::State<RuntimeState>) -> Result<RuntimeStatus, St
 }
 
 #[tauri::command]
+fn xray_traffic_stats(app: tauri::AppHandle) -> Result<XrayTrafficStats, String> {
+    let settings = load_runtime_settings(&app)?;
+    if !settings.xray_stats_enabled {
+        return Ok(XrayTrafficStats::default());
+    }
+
+    let binary = PathBuf::from(clean_path_input(&settings.xray_binary_path));
+    if !binary.is_file() {
+        return Err(format!("xray binary not found: {}", binary.display()));
+    }
+
+    let server = format!(
+        "{}:{}",
+        settings.xray_stats_listen, settings.xray_stats_port
+    );
+    let output = run_xray_stats_query(&binary, &server)?;
+    let mut stats = parse_xray_stats_query_output(&output);
+    stats.queried_at = epoch_seconds(SystemTime::now());
+    Ok(stats)
+}
+
+#[tauri::command]
+fn test_tcp_latency(
+    address: String,
+    port: u16,
+    timeout_ms: Option<u64>,
+) -> Result<TcpLatencyResult, String> {
+    let host = address.trim();
+    if host.is_empty() {
+        return Err("address is required".to_string());
+    }
+    if port == 0 {
+        return Err("port is required".to_string());
+    }
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(2500).clamp(100, 10000));
+    let addrs: Vec<_> = (host, port)
+        .to_socket_addrs()
+        .map_err(|err| format!("resolve {host}:{port}: {err}"))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(format!("resolve {host}:{port}: no addresses"));
+    }
+
+    let mut last_error = String::new();
+    for addr in addrs {
+        let started = Instant::now();
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => {
+                let _ = stream.shutdown(Shutdown::Both);
+                let latency = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+                return Ok(TcpLatencyResult {
+                    ok: true,
+                    latency_ms: Some(latency),
+                    error: None,
+                });
+            }
+            Err(err) => {
+                last_error = err.to_string();
+            }
+        }
+    }
+
+    Ok(TcpLatencyResult {
+        ok: false,
+        latency_ms: None,
+        error: Some(last_error),
+    })
+}
+
+#[tauri::command]
 fn start_xray(
     state: tauri::State<RuntimeState>,
     binary_path: String,
@@ -435,6 +555,95 @@ fn stop_tachyon_core(state: tauri::State<RuntimeState>) -> Result<ProcessStatus,
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
     processes.tachyon_core.stop("tachyon-core")
+}
+
+fn run_xray_stats_query(binary: &Path, server: &str) -> Result<String, String> {
+    let mut command = Command::new(binary);
+    command.args([
+        "api",
+        "statsquery",
+        "--server",
+        server,
+        "-pattern",
+        "",
+        "-reset=false",
+    ]);
+    let output = command_output_with_timeout(command, Duration::from_secs(2))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let details = if stderr.is_empty() { stdout } else { stderr };
+        return Err(format!("xray stats query failed: {details}"));
+    }
+    String::from_utf8(output.stdout).map_err(|err| format!("decode xray stats output: {err}"))
+}
+
+fn command_output_with_timeout(mut command: Command, timeout: Duration) -> Result<Output, String> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("spawn command: {err}"))?;
+    let started = Instant::now();
+    loop {
+        if child
+            .try_wait()
+            .map_err(|err| format!("poll command: {err}"))?
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .map_err(|err| format!("collect command output: {err}"));
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("xray stats query timed out".to_string());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn parse_xray_stats_query_output(output: &str) -> XrayTrafficStats {
+    let mut current_name = String::new();
+    let mut stats = XrayTrafficStats::default();
+    for line in output.lines() {
+        if let Some(name) = quoted_field(line, "name:") {
+            current_name = name;
+        }
+        let Some(value) = numeric_field(line, "value:") else {
+            continue;
+        };
+        if !current_name.starts_with("outbound>>>") || is_xray_internal_stat(&current_name) {
+            continue;
+        }
+        if current_name.ends_with(">>>traffic>>>uplink") {
+            stats.bytes_sent = stats.bytes_sent.saturating_add(value);
+        } else if current_name.ends_with(">>>traffic>>>downlink") {
+            stats.bytes_received = stats.bytes_received.saturating_add(value);
+        }
+    }
+    stats
+}
+
+fn quoted_field(line: &str, marker: &str) -> Option<String> {
+    let rest = line.split_once(marker)?.1.trim();
+    let start = rest.find('"')? + 1;
+    let end = rest[start..].find('"')? + start;
+    Some(rest[start..end].to_string())
+}
+
+fn numeric_field(line: &str, marker: &str) -> Option<u64> {
+    let rest = line.split_once(marker)?.1.trim_start();
+    let digits: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+fn is_xray_internal_stat(name: &str) -> bool {
+    name.contains("tachyon-xray-api") || name.contains(">>>api>>>")
 }
 
 fn draft_paths(app: &tauri::AppHandle) -> Result<ConfigDraftPaths, String> {
@@ -827,15 +1036,43 @@ fn normalize_runtime_settings(
 ) -> Result<RuntimeSettings, String> {
     let defaults = default_runtime_settings(app)?;
     Ok(RuntimeSettings {
+        tachyon_grpc_listen: non_empty_or(
+            settings.tachyon_grpc_listen,
+            defaults.tachyon_grpc_listen,
+        ),
+        tachyon_grpc_port: non_zero_u16_or(settings.tachyon_grpc_port, defaults.tachyon_grpc_port),
+        tachyon_ipc_listen: non_empty_or(settings.tachyon_ipc_listen, defaults.tachyon_ipc_listen),
+        tachyon_ipc_port: non_zero_u16_or(settings.tachyon_ipc_port, defaults.tachyon_ipc_port),
         tachyon_core_binary_path: non_empty_or(
             settings.tachyon_core_binary_path,
             defaults.tachyon_core_binary_path,
         ),
         xray_binary_path: non_empty_or(settings.xray_binary_path, defaults.xray_binary_path),
+        tachyon_telemetry_interval_ms: bounded_u32_or(
+            settings.tachyon_telemetry_interval_ms,
+            defaults.tachyon_telemetry_interval_ms,
+            100,
+            10000,
+        ),
         tachyon_core_release_channel: normalize_release_channel(
             settings.tachyon_core_release_channel,
             defaults.tachyon_core_release_channel,
         ),
+        tachyon_tun_address: non_empty_or(
+            settings.tachyon_tun_address,
+            defaults.tachyon_tun_address,
+        ),
+        tachyon_tun_mtu: bounded_u32_or(
+            settings.tachyon_tun_mtu,
+            defaults.tachyon_tun_mtu,
+            576,
+            9500,
+        ),
+        xray_socks_listen: non_empty_or(settings.xray_socks_listen, defaults.xray_socks_listen),
+        xray_socks_port: non_zero_u16_or(settings.xray_socks_port, defaults.xray_socks_port),
+        xray_stats_enabled: settings.xray_stats_enabled,
+        xray_stats_listen: non_empty_or(settings.xray_stats_listen, defaults.xray_stats_listen),
+        xray_stats_port: non_zero_u16_or(settings.xray_stats_port, defaults.xray_stats_port),
         xray_release_channel: normalize_release_channel(
             settings.xray_release_channel,
             defaults.xray_release_channel,
@@ -846,9 +1083,21 @@ fn normalize_runtime_settings(
 fn default_runtime_settings(app: &tauri::AppHandle) -> Result<RuntimeSettings, String> {
     let paths = default_runtime_paths(app)?;
     Ok(RuntimeSettings {
+        tachyon_grpc_listen: "127.0.0.1".to_string(),
+        tachyon_grpc_port: 50051,
+        tachyon_ipc_listen: "127.0.0.1".to_string(),
+        tachyon_ipc_port: 55123,
         tachyon_core_binary_path: paths.tachyon_core_binary_path,
         xray_binary_path: paths.xray_binary_path,
+        tachyon_telemetry_interval_ms: 500,
         tachyon_core_release_channel: "preview".to_string(),
+        tachyon_tun_address: "198.18.0.1/16".to_string(),
+        tachyon_tun_mtu: 9000,
+        xray_socks_listen: "127.0.0.1".to_string(),
+        xray_socks_port: 10808,
+        xray_stats_enabled: true,
+        xray_stats_listen: "127.0.0.1".to_string(),
+        xray_stats_port: 10085,
         xray_release_channel: "stable".to_string(),
     })
 }
@@ -867,6 +1116,22 @@ fn non_empty_or(value: String, fallback: String) -> String {
         fallback
     } else {
         cleaned
+    }
+}
+
+fn non_zero_u16_or(value: u16, fallback: u16) -> u16 {
+    if value == 0 {
+        fallback
+    } else {
+        value
+    }
+}
+
+fn bounded_u32_or(value: u32, fallback: u32, min: u32, max: u32) -> u32 {
+    if value < min || value > max {
+        fallback
+    } else {
+        value
     }
 }
 
@@ -1627,6 +1892,77 @@ fn epoch_seconds(time: SystemTime) -> Option<u64> {
         .ok()
 }
 
+#[tauri::command]
+fn window_minimize(window: tauri::Window) -> Result<(), String> {
+    window.minimize().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn window_toggle_maximize(window: tauri::Window) -> Result<(), String> {
+    let maximized = window.is_maximized().map_err(|error| error.to_string())?;
+    if maximized {
+        window.unmaximize().map_err(|error| error.to_string())
+    } else {
+        window.maximize().map_err(|error| error.to_string())
+    }
+}
+
+#[tauri::command]
+fn window_set_maximized(
+    window: tauri::Window,
+    state: tauri::State<'_, RuntimeState>,
+    value: bool,
+) -> Result<bool, String> {
+    if value {
+        let bounds = WindowBounds {
+            position: window.outer_position().map_err(|error| error.to_string())?,
+            size: window.outer_size().map_err(|error| error.to_string())?,
+        };
+        let monitor = window
+            .current_monitor()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "No current monitor available".to_string())?;
+        *state
+            .window_restore_bounds
+            .lock()
+            .map_err(|error| error.to_string())? = Some(bounds);
+        window
+            .set_position(tauri::Position::Physical(*monitor.position()))
+            .map_err(|error| error.to_string())?;
+        window
+            .set_size(tauri::Size::Physical(*monitor.size()))
+            .map_err(|error| error.to_string())?;
+    } else {
+        let bounds = state
+            .window_restore_bounds
+            .lock()
+            .map_err(|error| error.to_string())?
+            .take();
+        if let Some(bounds) = bounds {
+            window
+                .set_position(tauri::Position::Physical(bounds.position))
+                .map_err(|error| error.to_string())?;
+            window
+                .set_size(tauri::Size::Physical(bounds.size))
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(value)
+}
+
+#[tauri::command]
+fn window_set_always_on_top(window: tauri::Window, value: bool) -> Result<bool, String> {
+    window
+        .set_always_on_top(value)
+        .map_err(|error| error.to_string())?;
+    Ok(value)
+}
+
+#[tauri::command]
+fn window_close(window: tauri::Window) -> Result<(), String> {
+    window.close().map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2178,6 +2514,51 @@ mod tests {
     }
 
     #[test]
+    fn non_zero_u16_or_falls_back_only_for_zero() {
+        assert_eq!(non_zero_u16_or(0, 10808), 10808);
+        assert_eq!(non_zero_u16_or(10085, 10808), 10085);
+    }
+
+    #[test]
+    fn bounded_u32_or_enforces_bounds() {
+        assert_eq!(bounded_u32_or(250, 500, 100, 10000), 250);
+        assert_eq!(bounded_u32_or(50, 500, 100, 10000), 500);
+        assert_eq!(bounded_u32_or(20000, 500, 100, 10000), 500);
+    }
+
+    #[test]
+    fn parses_xray_stats_query_output_and_ignores_api_traffic() {
+        let raw = r#"
+stat: <
+  name: "outbound>>>tachyon-proxy>>>traffic>>>uplink"
+  value: 1024
+>
+stat: <
+  name: "outbound>>>tachyon-proxy>>>traffic>>>downlink"
+  value: 2048
+>
+stat: <
+  name: "inbound>>>tachyon-socks>>>traffic>>>uplink"
+  value: 300
+>
+stat: <
+  name: "outbound>>>tachyon-xray-api>>>traffic>>>uplink"
+  value: 999999
+>
+"#;
+        let stats = parse_xray_stats_query_output(raw);
+        assert_eq!(stats.bytes_sent, 1024);
+        assert_eq!(stats.bytes_received, 2048);
+        assert!(stats.queried_at.is_none());
+    }
+
+    #[test]
+    fn tcp_latency_rejects_missing_endpoint_parts() {
+        assert!(test_tcp_latency("".to_string(), 443, None).is_err());
+        assert!(test_tcp_latency("127.0.0.1".to_string(), 0, None).is_err());
+    }
+
+    #[test]
     fn path_string_round_trips() {
         let path = Path::new(if cfg!(target_os = "windows") {
             "C:\\test"
@@ -2240,10 +2621,17 @@ pub fn run() {
             install_latest_tachyon_core,
             fetch_subscription_text,
             runtime_status,
+            xray_traffic_stats,
+            test_tcp_latency,
             start_xray,
             stop_xray,
             start_tachyon_core,
-            stop_tachyon_core
+            stop_tachyon_core,
+            window_minimize,
+            window_toggle_maximize,
+            window_set_maximized,
+            window_set_always_on_top,
+            window_close
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Tachyon Prism")

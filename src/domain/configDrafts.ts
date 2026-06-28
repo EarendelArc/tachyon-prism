@@ -4,9 +4,12 @@ import { buildXrayOutboundDraft } from "./subscriptions";
 import type { ProxyNode, XrayOutboundObject } from "./subscriptions";
 
 export interface XrayClientDraftOptions {
+  enableStats?: boolean;
   routingMode?: XrayRoutingMode;
   socksListen?: string;
   socksPort?: number;
+  statsListen?: string;
+  statsPort?: number;
 }
 
 export type XrayRoutingMode = "direct" | "global" | "rule";
@@ -14,6 +17,13 @@ export type XrayRoutingMode = "direct" | "global" | "rule";
 export interface CoreClientDraftOptions {
   gameProfiles?: GameProfile[];
   launchers?: LauncherSettings;
+  grpcListen?: string;
+  grpcPort?: number;
+  ipcListen?: string;
+  ipcPort?: number;
+  telemetryIntervalMs?: number;
+  tunAddress?: string;
+  tunMtu?: number;
 }
 
 export function buildXrayClientConfigDraft(
@@ -21,42 +31,73 @@ export function buildXrayClientConfigDraft(
   options: XrayClientDraftOptions = {},
 ): Record<string, unknown> {
   const outbound = withTag(buildXrayOutboundDraft(node), "tachyon-proxy");
-  return {
+  const inbounds: Array<Record<string, unknown>> = [
+    {
+      tag: "tachyon-socks",
+      listen: options.socksListen ?? "127.0.0.1",
+      port: options.socksPort ?? 10808,
+      protocol: "socks",
+      settings: {
+        auth: "noauth",
+        udp: true,
+      },
+    },
+  ];
+  const outbounds = [
+    outbound,
+    {
+      tag: "tachyon-direct",
+      protocol: "freedom",
+    },
+    {
+      tag: "tachyon-block",
+      protocol: "blackhole",
+    },
+  ];
+  const config: Record<string, unknown> = {
     log: {
       loglevel: "warning",
     },
-    inbounds: [
-      {
-        tag: "tachyon-socks",
-        listen: options.socksListen ?? "127.0.0.1",
-        port: options.socksPort ?? 10808,
-        protocol: "socks",
-        settings: {
-          auth: "noauth",
-          udp: true,
-        },
-      },
-    ],
-    routing: xrayRouting(options.routingMode ?? "rule"),
-    outbounds: [
-      outbound,
-      {
-        tag: "tachyon-direct",
-        protocol: "freedom",
-      },
-      {
-        tag: "tachyon-block",
-        protocol: "blackhole",
-      },
-    ],
+    inbounds,
+    routing: xrayRouting(options.routingMode ?? "rule", Boolean(options.enableStats)),
+    outbounds,
   };
+  if (options.enableStats) {
+    inbounds.push({
+      tag: "tachyon-xray-api-in",
+      listen: options.statsListen ?? "127.0.0.1",
+      port: options.statsPort ?? 10085,
+      protocol: "tunnel",
+      settings: {
+        rewriteAddress: "127.0.0.1",
+      },
+    });
+    outbounds.push({
+      tag: "tachyon-xray-api",
+      protocol: "freedom",
+    });
+    config.api = {
+      tag: "tachyon-xray-api",
+      services: ["StatsService"],
+    };
+    config.policy = {
+      system: {
+        statsInboundDownlink: true,
+        statsInboundUplink: true,
+        statsOutboundDownlink: true,
+        statsOutboundUplink: true,
+      },
+    };
+    config.stats = {};
+  }
+  return config;
 }
 
 export function buildCoreClientConfigDraft(
   node: ProxyNode,
   options: CoreClientDraftOptions = {},
 ): Record<string, unknown> {
-  const endpoint = nodeEndpoint(node);
+  const remoteEndpoint = nodeEndpoint(node);
   const gameProfiles = options.gameProfiles ?? [];
   const launchers = options.launchers ?? defaultLauncherSettings;
 
@@ -65,8 +106,8 @@ export function buildCoreClientConfigDraft(
     client: {
       tun: {
         name: "",
-        address: "198.18.0.1/16",
-        mtu: 9000,
+        address: options.tunAddress ?? "198.18.0.1/16",
+        mtu: options.tunMtu ?? 9000,
         auto_route: true,
         dns_hijack: true,
       },
@@ -88,8 +129,8 @@ export function buildCoreClientConfigDraft(
         ],
       },
       proxy: {
-        server_addr: endpoint,
-        tgp_server_addr: endpoint,
+        server_addr: remoteEndpoint,
+        tgp_server_addr: remoteEndpoint,
       },
     },
     tgp: {
@@ -108,9 +149,9 @@ export function buildCoreClientConfigDraft(
       session_idle_timeout: "60s",
     },
     ipc: {
-      websocket_addr: "127.0.0.1:55123",
-      grpc_addr: "127.0.0.1:50051",
-      telemetry_interval_ms: 500,
+      websocket_addr: endpoint(options.ipcListen ?? "127.0.0.1", options.ipcPort ?? 55123),
+      grpc_addr: endpoint(options.grpcListen ?? "127.0.0.1", options.grpcPort ?? 50051),
+      telemetry_interval_ms: options.telemetryIntervalMs ?? 500,
     },
     observability: {
       log_level: "info",
@@ -131,11 +172,21 @@ function withTag(outbound: XrayOutboundObject, tag: string): XrayOutboundObject 
   };
 }
 
-function xrayRouting(mode: XrayRoutingMode): Record<string, unknown> {
+function xrayRouting(mode: XrayRoutingMode, enableStats = false): Record<string, unknown> {
+  const apiRule = enableStats
+    ? [
+        {
+          type: "field",
+          inboundTag: ["tachyon-xray-api-in"],
+          outboundTag: "tachyon-xray-api",
+        },
+      ]
+    : [];
   if (mode === "direct" || mode === "global") {
     return {
       domainStrategy: "AsIs",
       rules: [
+        ...apiRule,
         {
           type: "field",
           inboundTag: ["tachyon-socks"],
@@ -148,6 +199,7 @@ function xrayRouting(mode: XrayRoutingMode): Record<string, unknown> {
   return {
     domainStrategy: "IPIfNonMatch",
     rules: [
+      ...apiRule,
       {
         type: "field",
         ip: ["geoip:private"],
@@ -172,4 +224,8 @@ function nodeEndpoint(node: ProxyNode): string {
     throw new Error("Selected node has no remote endpoint");
   }
   return `${node.address}:${node.port}`;
+}
+
+function endpoint(listen: string, port: number): string {
+  return `${listen}:${port}`;
 }

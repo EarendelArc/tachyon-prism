@@ -126,6 +126,37 @@ describe("buildXrayClientConfigDraft", () => {
     expect(inbounds[0].port).toBe(9999);
   });
 
+  it("can enable the Xray StatsService API inbound", () => {
+    const config = buildXrayClientConfigDraft(mockVMessNode, {
+      enableStats: true,
+      statsListen: "127.0.0.2",
+      statsPort: 10086,
+    });
+    const inbounds = config.inbounds as Array<Record<string, unknown>>;
+    const outbounds = config.outbounds as Array<Record<string, unknown>>;
+    const apiInbound = inbounds.find((inbound) => inbound.tag === "tachyon-xray-api-in");
+    const apiOutbound = outbounds.find((outbound) => outbound.tag === "tachyon-xray-api");
+    const api = config.api as Record<string, unknown>;
+    const policy = config.policy as Record<string, unknown>;
+    const routing = config.routing as Record<string, unknown>;
+    const rules = routing.rules as Array<Record<string, unknown>>;
+
+    expect(apiInbound).toMatchObject({
+      listen: "127.0.0.2",
+      port: 10086,
+      protocol: "tunnel",
+    });
+    expect((apiInbound?.settings as Record<string, unknown>).rewriteAddress).toBe("127.0.0.1");
+    expect(apiOutbound).toMatchObject({ protocol: "freedom" });
+    expect(api.services).toEqual(["StatsService"]);
+    expect(config.stats).toEqual({});
+    expect(policy).toBeDefined();
+    expect(rules[0]).toMatchObject({
+      inboundTag: ["tachyon-xray-api-in"],
+      outboundTag: "tachyon-xray-api",
+    });
+  });
+
   it("uses 127.0.0.1:10808 as default socks inbound", () => {
     const config = buildXrayClientConfigDraft(mockTrojanNode);
     const inbounds = config.inbounds as Array<Record<string, unknown>>;
@@ -229,6 +260,27 @@ describe("buildCoreClientConfigDraft", () => {
     const ipc = config.ipc as Record<string, unknown>;
     expect(ipc.websocket_addr).toBe("127.0.0.1:55123");
     expect(ipc.grpc_addr).toBe("127.0.0.1:50051");
+  });
+
+  it("respects runtime networking options", () => {
+    const config = buildCoreClientConfigDraft(mockVMessNode, {
+      grpcListen: "127.0.0.5",
+      grpcPort: 50052,
+      ipcListen: "127.0.0.6",
+      ipcPort: 55124,
+      telemetryIntervalMs: 250,
+      tunAddress: "198.19.0.1/16",
+      tunMtu: 8500,
+    });
+    const client = config.client as Record<string, unknown>;
+    const tun = client.tun as Record<string, unknown>;
+    const ipc = config.ipc as Record<string, unknown>;
+
+    expect(tun.address).toBe("198.19.0.1/16");
+    expect(tun.mtu).toBe(8500);
+    expect(ipc.websocket_addr).toBe("127.0.0.6:55124");
+    expect(ipc.grpc_addr).toBe("127.0.0.5:50052");
+    expect(ipc.telemetry_interval_ms).toBe(250);
   });
 
   it("uses default launcher settings when not provided", () => {

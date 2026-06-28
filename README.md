@@ -13,6 +13,8 @@ sent through Tachyon Core for low-latency acceleration.
 ## Current Features
 
 - Runtime and profile status dashboard.
+- Real-time dual-core traffic chart with separate Tachyon and Xray
+  upload/download series.
 - Local manual game profile management.
 - Local Steam library scan and game-profile suggestions.
 - Persistent Steam launcher settings for child-process tracking, game UDP
@@ -20,11 +22,14 @@ sent through Tachyon Core for low-latency acceleration.
 - Per-program UDP/TCP routing policy controls.
 - Basic subscription import from URL or pasted payload.
 - Local node list with selected-node persistence.
+- Node latency refresh using Prism-side TCP connect probes in desktop builds.
 - Xray client JSON draft generation from the selected node.
 - Tachyon Core client JSON draft generation for the TGP game path.
 - One-click saving of generated `client.json` and `xray-client.json` to the
   Tauri app config directory.
 - Persistent runtime binary path settings for Xray Core and Tachyon Core.
+- Runtime network settings for Xray SOCKS, Xray StatsService, Tachyon IPC,
+  Tachyon gRPC, TUN address/MTU, and telemetry interval.
 - Managed local binary installation into Prism's app config `bin` directory.
 - Online Xray Core and Tachyon Core latest-release discovery, download,
   SHA-256 verification, and managed install from GitHub release channels.
@@ -70,6 +75,9 @@ TGP relay endpoint needed for UDP game acceleration.
 The Config panel generates two JSON drafts from the selected node:
 
 - `xray-client.json`: a local SOCKS inbound plus the selected Xray outbound.
+  When Xray stats are enabled, Prism also adds an official Xray API inbound
+  using the `StatsService` so the Overview chart can show Xray traffic without
+  involving Tachyon Core.
 - `client.json`: a Tachyon Core client config for the TGP UDP game path,
   including Prism-managed game profiles under `client.routing.game_profiles`
   and launcher policy under `client.routing.launchers`.
@@ -103,9 +111,17 @@ alpha-stage.
 The Runtime panel stores binary paths in `runtime-settings.json`. `Start All`
 first writes the latest generated config files, then launches Xray with
 `xray-client.json` and Tachyon Core with `client.json`.
+The same Runtime panel stores local listen ports and Core transport settings:
+Xray SOCKS, Xray StatsService, Tachyon HTTP IPC, Tachyon gRPC, TUN address/MTU,
+and telemetry interval.
 On Windows, Tachyon Core also requires `wintun.dll` in the same directory as
 the configured `tachyon-core.exe`; Prism reports this in Runtime readiness and
 blocks Core start when the required sidecar is missing.
+
+The Overview traffic chart intentionally has two telemetry sources. Tachyon
+series come from Tachyon Core's SSE telemetry stream. Xray series are polled by
+Prism from the Xray `StatsService` exposed by the generated Xray config. Core
+does not read subscriptions, manage Xray, or collect Xray statistics.
 
 The managed-binary API is intentionally separate from launch control so future
 mirror selection, background progress events, and privilege-elevation flows can

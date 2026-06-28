@@ -230,6 +230,48 @@ def assert_content_fits_viewport(cdp: CDP) -> None:
         raise AssertionError(f"content vertical overflow detected: {overflow}")
 
 
+def assert_custom_window_chrome(cdp: CDP) -> None:
+    chrome = cdp.evaluate(
+        """
+        (() => ({
+          titlebar: Boolean(document.querySelector('.app-titlebar')),
+          dragRegions: document.querySelectorAll('[data-tauri-drag-region]').length,
+          actionCount: document.querySelectorAll('.window-actions button').length,
+          labels: Array.from(document.querySelectorAll('.window-actions button'))
+            .map((button) => button.getAttribute('aria-label'))
+        }))()
+        """,
+    )
+    if not chrome["titlebar"] or int(chrome["dragRegions"]) < 2 or int(chrome["actionCount"]) != 4:
+        raise AssertionError(f"custom window chrome missing: {chrome}")
+    expected = {"Pin window", "Minimize window", "Maximize window", "Close window"}
+    if set(chrome["labels"]) != expected:
+        raise AssertionError(f"custom window controls mismatch: {chrome}")
+
+
+def assert_dual_core_chart(cdp: CDP) -> None:
+    chart = cdp.evaluate(
+        """
+        (() => ({
+          legend: Array.from(document.querySelectorAll('.legend-item'))
+            .map((item) => item.textContent.trim()),
+          emptyText: document.querySelector('.chart-empty')?.textContent.trim() ?? '',
+          seriesClasses: Array.from(document.querySelectorAll('.legend-item'))
+            .map((item) => item.className)
+        }))()
+        """,
+    )
+    labels = " ".join(chart["legend"])
+    for label in ["Tachyon ↑", "Tachyon ↓", "Xray ↑", "Xray ↓"]:
+        if label not in labels:
+            raise AssertionError(f"dual-core traffic legend missing {label}: {chart}")
+    for class_name in ["tachyon-up", "tachyon-down", "xray-up", "xray-down"]:
+        if not any(class_name in item for item in chart["seriesClasses"]):
+            raise AssertionError(f"dual-core traffic class missing {class_name}: {chart}")
+    if not chart["emptyText"]:
+        raise AssertionError(f"chart empty state missing: {chart}")
+
+
 def import_sample_subscription(cdp: CDP) -> str:
     sample = "\n".join(
         [
@@ -371,9 +413,12 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
               const raw = document.querySelector('textarea[data-config-draft="xray"]')?.value ?? '{}';
               const config = JSON.parse(raw);
               const rules = config.routing?.rules ?? [];
+              const trafficRule = rules.find((rule) => rule.outboundTag !== 'tachyon-xray-api') ?? {};
               resolve({
                 domainStrategy: config.routing?.domainStrategy ?? '',
                 firstOutboundTag: rules[0]?.outboundTag ?? '',
+                firstTrafficOutboundTag: trafficRule.outboundTag ?? '',
+                hasApiRule: rules.some((rule) => rule.outboundTag === 'tachyon-xray-api'),
                 hasBlockRule: rules.some((rule) => rule.outboundTag === 'tachyon-block'),
                 ruleCount: rules.length
               });
@@ -480,6 +525,8 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         assert_no_runtime_error(text)
         assert_no_horizontal_overflow(cdp)
         assert_content_fits_viewport(cdp)
+        assert_custom_window_chrome(cdp)
+        assert_dual_core_chart(cdp)
         cdp.screenshot(output_dir / "overview-desktop.png")
         text = open_and_close_controller(cdp)
         assert_contains(text, "策略组", "节点选择", "自动选择")
@@ -510,7 +557,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         if active_routing_mode(cdp) != "global":
             raise AssertionError("global routing mode did not become active")
         summary = xray_routing_summary(cdp)
-        if summary["firstOutboundTag"] != "tachyon-proxy":
+        if not summary["hasApiRule"] or summary["firstTrafficOutboundTag"] != "tachyon-proxy":
             raise AssertionError(f"global routing config mismatch: {summary}")
 
         text = switch_routing_mode(cdp, "direct")
@@ -518,7 +565,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         if active_routing_mode(cdp) != "direct":
             raise AssertionError("direct routing mode did not become active")
         summary = xray_routing_summary(cdp)
-        if summary["firstOutboundTag"] != "tachyon-direct":
+        if not summary["hasApiRule"] or summary["firstTrafficOutboundTag"] != "tachyon-direct":
             raise AssertionError(f"direct routing config mismatch: {summary}")
 
         text = switch_routing_mode(cdp, "rule")
@@ -542,6 +589,18 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         text = switch_to_english(cdp)
         assert_contains(text, "Personalization", "Theme", "Core")
         cdp.screenshot(output_dir / "settings-desktop-en.png")
+        text = select_settings_section(cdp, 1)
+        assert_contains(
+            text,
+            "Xray SOCKS",
+            "Xray Stats API",
+            "Tachyon IPC",
+            "Tachyon gRPC",
+            "TUN",
+            "Telemetry",
+        )
+        assert_no_runtime_error(text)
+        cdp.screenshot(output_dir / "settings-core-desktop-en.png")
 
         print(f"Prism UI smoke test passed. Artifacts: {output_dir}")
     finally:

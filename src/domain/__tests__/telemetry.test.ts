@@ -84,6 +84,14 @@ describe("TelemetryEvent types", () => {
   it("telemetry data has all counters", () => {
     const data: TelemetryData = {
       packets_read: 1000,
+      bytes_read: 65536,
+      bytes_tgp: 49152,
+      bytes_direct: 12288,
+      bytes_drop: 4096,
+      tgp_bytes_sent: 32768,
+      tgp_bytes_received: 16384,
+      xray_bytes_sent: 8192,
+      xray_bytes_received: 4096,
       unsupported: 5,
       lookup_errors: 10,
       decided_tgp: 600,
@@ -94,6 +102,9 @@ describe("TelemetryEvent types", () => {
       goroutines: 42,
     };
     expect(data.packets_read).toBe(1000);
+    expect(data.bytes_tgp).toBe(49152);
+    expect(data.tgp_bytes_sent).toBe(32768);
+    expect(data.xray_bytes_received).toBe(4096);
     expect(data.tgp_sessions).toBe(1);
     expect(data.goroutines).toBe(42);
   });

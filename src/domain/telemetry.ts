@@ -24,6 +24,14 @@ export interface HelloData {
 
 export interface TelemetryData {
   packets_read: number;
+  bytes_read?: number;
+  bytes_tgp?: number;
+  bytes_direct?: number;
+  bytes_drop?: number;
+  tgp_bytes_sent?: number;
+  tgp_bytes_received?: number;
+  xray_bytes_sent?: number;
+  xray_bytes_received?: number;
   unsupported: number;
   lookup_errors: number;
   decided_tgp: number;
