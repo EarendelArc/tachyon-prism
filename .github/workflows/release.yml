@@ -27,6 +27,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6.0.3
 
+      - name: Use crates.io on GitHub Actions
+        shell: bash
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [registries.crates-io]
+          protocol = "sparse"
+
+          [net]
+          git-fetch-with-cli = true
+          EOF
+
       - name: Setup Node
         uses: actions/setup-node@v5.0.0
         with:
@@ -98,6 +110,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6.0.3
+
+      - name: Use crates.io on GitHub Actions
+        shell: bash
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [registries.crates-io]
+          protocol = "sparse"
+
+          [net]
+          git-fetch-with-cli = true
+          EOF
 
       - name: Setup Node
         uses: actions/setup-node@v5.0.0

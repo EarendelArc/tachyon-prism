@@ -46,6 +46,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6.0.3
 
+      - name: Use crates.io on GitHub Actions
+        working-directory: .
+        shell: bash
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [registries.crates-io]
+          protocol = "sparse"
+
+          [net]
+          git-fetch-with-cli = true
+          EOF
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.96.0
 
