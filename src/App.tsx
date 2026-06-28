@@ -27,7 +27,10 @@ import {
   getRuntimePaths,
   getRuntimeSettings,
   getRuntimeStatus,
+  getSystemProxyStatus,
   getXrayTrafficStats,
+  disableSystemProxy,
+  enableSystemProxy,
   installLatestTachyonCore,
   installLatestXray,
   installManagedBinary,
@@ -47,6 +50,7 @@ import {
   type RuntimeReleaseInfo,
   type RuntimeSettings,
   type RuntimeStatus,
+  type SystemProxyState,
   type TcpLatencyResult,
   type XrayTrafficStats,
 } from "./domain/runtime";
@@ -138,6 +142,7 @@ const emptyRuntimeInputs = {
   xrayHttpPort: 10809,
   xraySocksListen: "127.0.0.1",
   xraySocksPort: 10808,
+  systemProxyBypass: "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*;<local>",
   xrayStatsEnabled: true,
   xrayStatsListen: "127.0.0.1",
   xrayStatsPort: 10085,
@@ -468,6 +473,19 @@ function processStatusLabel(status: ProcessStatus | undefined): string {
   return status.pid ? `${status.state} pid ${status.pid}` : status.state;
 }
 
+function systemProxyLabel(status: SystemProxyState | null): string {
+  if (!status) {
+    return "unknown";
+  }
+  if (!status.supported) {
+    return "unsupported";
+  }
+  if (status.matchesPrism) {
+    return "enabled";
+  }
+  return status.enabled ? "other proxy" : "disabled";
+}
+
 function formatBytes(value: number | null): string {
   if (value === null) {
     return "--";
@@ -762,6 +780,7 @@ export function App() {
   const [configPaths, setConfigPaths] = useState<ConfigDraftPaths | null>(null);
   const [runtimePaths, setRuntimePaths] = useState<RuntimePaths | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [systemProxy, setSystemProxy] = useState<SystemProxyState | null>(null);
   const [runtimeInputs, setRuntimeInputs] = useState(emptyRuntimeInputs);
   const [managedBinaries, setManagedBinaries] = useState<ManagedBinaryInventory | null>(null);
   const [binarySourceInputs, setBinarySourceInputs] = useState(emptyBinarySourceInputs);
@@ -873,6 +892,7 @@ export function App() {
     [readinessItems],
   );
   const runtimeRows = [
+    { label: "System Proxy", value: systemProxyLabel(systemProxy) },
     { label: "Xray Core", value: processStatusLabel(runtimeStatus?.xray) },
     { label: "Tachyon Core", value: processStatusLabel(runtimeStatus?.tachyonCore) },
   ];
@@ -1234,6 +1254,39 @@ export function App() {
     }
   }
 
+  async function refreshSystemProxy() {
+    try {
+      const status = await getSystemProxyStatus();
+      setSystemProxy(status);
+    } catch {
+      // System proxy commands are desktop-only and platform-dependent.
+    }
+  }
+
+  async function toggleSystemProxy() {
+    try {
+      if (systemProxy?.matchesPrism) {
+        const state = await disableSystemProxy();
+        setSystemProxy(state);
+        setMessage("System proxy disabled");
+        return;
+      }
+
+      const settings = await saveRuntimeSettings(runtimeInputs);
+      setRuntimeInputs(settings);
+      const status = await getRuntimeStatus();
+      setRuntimeStatus(status);
+      if (status.xray.state !== "running") {
+        await startRuntime("xray");
+      }
+      const state = await enableSystemProxy();
+      setSystemProxy(state);
+      setMessage(state.matchesPrism ? "System proxy enabled" : "System proxy update pending");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "System proxy update failed");
+    }
+  }
+
   async function probeXrayProxy() {
     try {
       const settings = await saveRuntimeSettings(runtimeInputs);
@@ -1345,9 +1398,18 @@ export function App() {
   }
 
   async function stopAllRuntime() {
+    try {
+      if (systemProxy?.matchesPrism) {
+        const proxy = await disableSystemProxy();
+        setSystemProxy(proxy);
+      }
+    } catch {
+      // Continue stopping subprocesses even if proxy cleanup fails.
+    }
     await stopRuntime("xray");
     await stopRuntime("tachyonCore");
     await refreshRuntime();
+    await refreshSystemProxy();
   }
 
   async function handleWindowAction(action: "pin" | "minimize" | "maximize" | "close") {
@@ -1421,6 +1483,7 @@ export function App() {
       .catch(() => undefined);
     void refreshManagedBinaries();
     void refreshRuntime();
+    void refreshSystemProxy();
   }, []);
 
   useEffect(() => {
@@ -1576,10 +1639,10 @@ export function App() {
       <section className="quick-strip">
         <div className="mode-pills">
           <button
-            aria-pressed={runtimeStatus?.xray.state === "running"}
-            className={runtimeStatus?.xray.state === "running" ? "pill active" : "pill"}
+            aria-pressed={Boolean(systemProxy?.matchesPrism)}
+            className={systemProxy?.matchesPrism ? "pill active" : "pill"}
             type="button"
-            onClick={() => void toggleRuntime("xray")}
+            onClick={() => void toggleSystemProxy()}
           >
             {ui.systemProxy}
           </button>
@@ -1609,7 +1672,13 @@ export function App() {
           <button aria-label="Test Xray proxy" type="button" onClick={() => void probeXrayProxy()}>
             HTTP
           </button>
-          <button type="button" onClick={() => void refreshRuntime()}>
+          <button
+            type="button"
+            onClick={() => {
+              void refreshRuntime();
+              void refreshSystemProxy();
+            }}
+          >
             ↻
           </button>
           <button type="button" onClick={() => void stopAllRuntime()}>
@@ -2609,6 +2678,15 @@ function SettingsView({
                       }
                     />
                   </div>
+                </label>
+                <label className="wide-field">
+                  <span>System Proxy Bypass</span>
+                  <input
+                    value={runtimeInputs.systemProxyBypass}
+                    onChange={(event) =>
+                      setRuntimeInputs((current) => ({ ...current, systemProxyBypass: event.target.value }))
+                    }
+                  />
                 </label>
                 <label>
                   <span>Tachyon IPC</span>

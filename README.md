@@ -33,6 +33,9 @@ sent through Tachyon Core for low-latency acceleration.
   interval.
 - Local Xray proxy probe through the generated HTTP inbound, without changing
   system proxy or enabling TUN.
+- Cross-platform system proxy control wired to Prism's local Xray HTTP/SOCKS
+  inbounds. Stopping all runtime processes clears Prism-owned system proxy
+  state before stopping Xray.
 - Managed local binary installation into Prism's app config `bin` directory.
 - Online Xray Core and Tachyon Core latest-release discovery, download,
   SHA-256 verification, and managed install from GitHub release channels.
@@ -127,6 +130,13 @@ The Overview quick actions include a local HTTP proxy probe. It sends an
 absolute-form HTTP request to the configured local Xray HTTP inbound and reports
 the returned status code and latency. This validates the selected Xray outbound
 path without touching OS system proxy settings or Tachyon TUN mode.
+
+The System Proxy quick action is a real OS-level proxy switch. It first ensures
+Xray is running with the generated config, then points system HTTP/HTTPS traffic
+to the local Xray HTTP inbound and SOCKS traffic to the local Xray SOCKS inbound.
+The bypass list is editable in Settings > Core. Automated tests cover command
+construction and local proxy probing; they intentionally do not toggle the host
+system proxy.
 
 The Overview traffic chart intentionally has two telemetry sources. Tachyon
 series come from Tachyon Core's SSE telemetry stream. Xray series are polled by

@@ -28,7 +28,7 @@ struct RuntimePaths {
     runtime_settings_path: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeSettings {
     #[serde(default)]
@@ -59,6 +59,8 @@ struct RuntimeSettings {
     xray_socks_listen: String,
     #[serde(default)]
     xray_socks_port: u16,
+    #[serde(default)]
+    system_proxy_bypass: String,
     #[serde(default)]
     xray_stats_enabled: bool,
     #[serde(default)]
@@ -182,6 +184,18 @@ struct ProxyProbeResult {
     latency_ms: Option<u32>,
     via: String,
     target_url: String,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemProxyState {
+    supported: bool,
+    enabled: bool,
+    matches_prism: bool,
+    proxy_server: String,
+    expected_proxy_server: String,
+    bypass: String,
     error: Option<String>,
 }
 
@@ -539,6 +553,26 @@ fn test_xray_proxy(
 }
 
 #[tauri::command]
+fn system_proxy_status(app: tauri::AppHandle) -> Result<SystemProxyState, String> {
+    let settings = load_runtime_settings(&app)?;
+    Ok(platform_system_proxy_status(&settings))
+}
+
+#[tauri::command]
+fn enable_system_proxy(app: tauri::AppHandle) -> Result<SystemProxyState, String> {
+    let settings = load_runtime_settings(&app)?;
+    platform_enable_system_proxy(&settings)?;
+    Ok(platform_system_proxy_status(&settings))
+}
+
+#[tauri::command]
+fn disable_system_proxy(app: tauri::AppHandle) -> Result<SystemProxyState, String> {
+    let settings = load_runtime_settings(&app)?;
+    platform_disable_system_proxy(&settings)?;
+    Ok(platform_system_proxy_status(&settings))
+}
+
+#[tauri::command]
 fn start_xray(
     state: tauri::State<RuntimeState>,
     binary_path: String,
@@ -685,6 +719,469 @@ fn probe_http_via_proxy(
         target_url: target.absolute_url,
         error: Some(last_error),
     })
+}
+
+fn expected_system_proxy_server(settings: &RuntimeSettings) -> String {
+    format!(
+        "http={}:{};https={}:{};socks={}:{}",
+        settings.xray_http_listen,
+        settings.xray_http_port,
+        settings.xray_http_listen,
+        settings.xray_http_port,
+        settings.xray_socks_listen,
+        settings.xray_socks_port
+    )
+}
+
+fn default_system_proxy_bypass() -> String {
+    "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*;<local>".to_string()
+}
+
+fn system_proxy_state(
+    settings: &RuntimeSettings,
+    supported: bool,
+    enabled: bool,
+    proxy_server: String,
+    bypass: String,
+    error: Option<String>,
+) -> SystemProxyState {
+    let expected = expected_system_proxy_server(settings);
+    let matches_prism =
+        enabled && normalize_proxy_server(&proxy_server) == normalize_proxy_server(&expected);
+    SystemProxyState {
+        supported,
+        enabled,
+        matches_prism,
+        proxy_server,
+        expected_proxy_server: expected,
+        bypass,
+        error,
+    }
+}
+
+fn normalize_proxy_server(value: &str) -> String {
+    value
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+#[cfg(target_os = "windows")]
+fn platform_system_proxy_status(settings: &RuntimeSettings) -> SystemProxyState {
+    match windows_reg_query_internet_settings() {
+        Ok(raw) => {
+            let parsed = parse_windows_proxy_settings(&raw);
+            system_proxy_state(
+                settings,
+                true,
+                parsed.proxy_enable,
+                parsed.proxy_server,
+                parsed.proxy_override,
+                None,
+            )
+        }
+        Err(err) => system_proxy_state(
+            settings,
+            true,
+            false,
+            String::new(),
+            String::new(),
+            Some(err),
+        ),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn platform_enable_system_proxy(settings: &RuntimeSettings) -> Result<(), String> {
+    let server = expected_system_proxy_server(settings);
+    run_command(
+        "reg",
+        &[
+            "add",
+            WINDOWS_INTERNET_SETTINGS_KEY,
+            "/v",
+            "ProxyEnable",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "1",
+            "/f",
+        ],
+    )?;
+    run_command(
+        "reg",
+        &[
+            "add",
+            WINDOWS_INTERNET_SETTINGS_KEY,
+            "/v",
+            "ProxyServer",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &server,
+            "/f",
+        ],
+    )?;
+    run_command(
+        "reg",
+        &[
+            "add",
+            WINDOWS_INTERNET_SETTINGS_KEY,
+            "/v",
+            "ProxyOverride",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &settings.system_proxy_bypass,
+            "/f",
+        ],
+    )?;
+    notify_windows_proxy_changed();
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn platform_disable_system_proxy(_settings: &RuntimeSettings) -> Result<(), String> {
+    run_command(
+        "reg",
+        &[
+            "add",
+            WINDOWS_INTERNET_SETTINGS_KEY,
+            "/v",
+            "ProxyEnable",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "0",
+            "/f",
+        ],
+    )?;
+    notify_windows_proxy_changed();
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+const WINDOWS_INTERNET_SETTINGS_KEY: &str =
+    r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+
+#[cfg(target_os = "windows")]
+fn windows_reg_query_internet_settings() -> Result<String, String> {
+    run_command("reg", &["query", WINDOWS_INTERNET_SETTINGS_KEY])
+}
+
+#[derive(Default)]
+struct WindowsProxySettings {
+    proxy_enable: bool,
+    proxy_server: String,
+    proxy_override: String,
+}
+
+fn parse_windows_proxy_settings(raw: &str) -> WindowsProxySettings {
+    let mut settings = WindowsProxySettings::default();
+    for line in raw.lines() {
+        let parts: Vec<_> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        match parts[0] {
+            "ProxyEnable" => {
+                settings.proxy_enable = parts[2] == "0x1" || parts[2] == "1";
+            }
+            "ProxyServer" => {
+                settings.proxy_server = parts[2..].join(" ");
+            }
+            "ProxyOverride" => {
+                settings.proxy_override = parts[2..].join(" ");
+            }
+            _ => {}
+        }
+    }
+    settings
+}
+
+#[cfg(target_os = "windows")]
+fn notify_windows_proxy_changed() {
+    let _ = run_command(
+        "rundll32.exe",
+        &["user32.dll,UpdatePerUserSystemParameters"],
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn platform_system_proxy_status(settings: &RuntimeSettings) -> SystemProxyState {
+    match macos_first_network_service() {
+        Ok(service) => match run_command("networksetup", &["-getwebproxy", &service]) {
+            Ok(raw) => {
+                let enabled = raw
+                    .lines()
+                    .any(|line| line.trim().eq_ignore_ascii_case("Enabled: Yes"));
+                let server = format!(
+                    "http={}:{};https={}:{};socks={}:{}",
+                    settings.xray_http_listen,
+                    settings.xray_http_port,
+                    settings.xray_http_listen,
+                    settings.xray_http_port,
+                    settings.xray_socks_listen,
+                    settings.xray_socks_port
+                );
+                system_proxy_state(
+                    settings,
+                    true,
+                    enabled,
+                    server,
+                    settings.system_proxy_bypass.clone(),
+                    None,
+                )
+            }
+            Err(err) => system_proxy_state(
+                settings,
+                true,
+                false,
+                String::new(),
+                String::new(),
+                Some(err),
+            ),
+        },
+        Err(err) => system_proxy_state(
+            settings,
+            true,
+            false,
+            String::new(),
+            String::new(),
+            Some(err),
+        ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform_enable_system_proxy(settings: &RuntimeSettings) -> Result<(), String> {
+    for service in macos_network_services()? {
+        run_command(
+            "networksetup",
+            &[
+                "-setwebproxy",
+                &service,
+                &settings.xray_http_listen,
+                &settings.xray_http_port.to_string(),
+            ],
+        )?;
+        run_command(
+            "networksetup",
+            &[
+                "-setsecurewebproxy",
+                &service,
+                &settings.xray_http_listen,
+                &settings.xray_http_port.to_string(),
+            ],
+        )?;
+        run_command(
+            "networksetup",
+            &[
+                "-setsocksfirewallproxy",
+                &service,
+                &settings.xray_socks_listen,
+                &settings.xray_socks_port.to_string(),
+            ],
+        )?;
+        run_command("networksetup", &["-setwebproxystate", &service, "on"])?;
+        run_command("networksetup", &["-setsecurewebproxystate", &service, "on"])?;
+        run_command(
+            "networksetup",
+            &["-setsocksfirewallproxystate", &service, "on"],
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn platform_disable_system_proxy(_settings: &RuntimeSettings) -> Result<(), String> {
+    for service in macos_network_services()? {
+        run_command("networksetup", &["-setwebproxystate", &service, "off"])?;
+        run_command(
+            "networksetup",
+            &["-setsecurewebproxystate", &service, "off"],
+        )?;
+        run_command(
+            "networksetup",
+            &["-setsocksfirewallproxystate", &service, "off"],
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_first_network_service() -> Result<String, String> {
+    macos_network_services()?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no macOS network service found".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_network_services() -> Result<Vec<String>, String> {
+    let raw = run_command("networksetup", &["-listallnetworkservices"])?;
+    Ok(raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("An asterisk"))
+        .map(|line| line.trim_start_matches("*").trim().to_string())
+        .collect())
+}
+
+#[cfg(target_os = "linux")]
+fn platform_system_proxy_status(settings: &RuntimeSettings) -> SystemProxyState {
+    match run_command("gsettings", &["get", "org.gnome.system.proxy", "mode"]) {
+        Ok(mode) => {
+            let enabled = mode.contains("manual");
+            system_proxy_state(
+                settings,
+                true,
+                enabled,
+                expected_system_proxy_server(settings),
+                settings.system_proxy_bypass.clone(),
+                None,
+            )
+        }
+        Err(err) => system_proxy_state(
+            settings,
+            false,
+            false,
+            String::new(),
+            String::new(),
+            Some(err),
+        ),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn platform_enable_system_proxy(settings: &RuntimeSettings) -> Result<(), String> {
+    run_command(
+        "gsettings",
+        &["set", "org.gnome.system.proxy", "mode", "manual"],
+    )?;
+    run_command(
+        "gsettings",
+        &[
+            "set",
+            "org.gnome.system.proxy.http",
+            "host",
+            &settings.xray_http_listen,
+        ],
+    )?;
+    run_command(
+        "gsettings",
+        &[
+            "set",
+            "org.gnome.system.proxy.http",
+            "port",
+            &settings.xray_http_port.to_string(),
+        ],
+    )?;
+    run_command(
+        "gsettings",
+        &[
+            "set",
+            "org.gnome.system.proxy.https",
+            "host",
+            &settings.xray_http_listen,
+        ],
+    )?;
+    run_command(
+        "gsettings",
+        &[
+            "set",
+            "org.gnome.system.proxy.https",
+            "port",
+            &settings.xray_http_port.to_string(),
+        ],
+    )?;
+    run_command(
+        "gsettings",
+        &[
+            "set",
+            "org.gnome.system.proxy.socks",
+            "host",
+            &settings.xray_socks_listen,
+        ],
+    )?;
+    run_command(
+        "gsettings",
+        &[
+            "set",
+            "org.gnome.system.proxy.socks",
+            "port",
+            &settings.xray_socks_port.to_string(),
+        ],
+    )?;
+    run_command(
+        "gsettings",
+        &[
+            "set",
+            "org.gnome.system.proxy",
+            "ignore-hosts",
+            &linux_ignore_hosts(&settings.system_proxy_bypass),
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn platform_disable_system_proxy(_settings: &RuntimeSettings) -> Result<(), String> {
+    run_command(
+        "gsettings",
+        &["set", "org.gnome.system.proxy", "mode", "none"],
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ignore_hosts(bypass: &str) -> String {
+    let hosts = bypass
+        .split(';')
+        .map(str::trim)
+        .filter(|item| !item.is_empty() && *item != "<local>")
+        .map(|item| format!("'{}'", item.replace('\'', "")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{hosts}]")
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn platform_system_proxy_status(settings: &RuntimeSettings) -> SystemProxyState {
+    system_proxy_state(
+        settings,
+        false,
+        false,
+        String::new(),
+        String::new(),
+        Some("system proxy is unsupported on this platform".to_string()),
+    )
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn platform_enable_system_proxy(_settings: &RuntimeSettings) -> Result<(), String> {
+    Err("system proxy is unsupported on this platform".to_string())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn platform_disable_system_proxy(_settings: &RuntimeSettings) -> Result<(), String> {
+    Err("system proxy is unsupported on this platform".to_string())
+}
+
+fn run_command(program: &str, args: &[&str]) -> Result<String, String> {
+    let mut command = Command::new(program);
+    command.args(args);
+    let output = command_output_with_timeout(command, Duration::from_secs(5))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let details = if stderr.is_empty() { stdout } else { stderr };
+        return Err(format!("{program} failed: {details}"));
+    }
+    String::from_utf8(output.stdout).map_err(|err| format!("decode {program} output: {err}"))
 }
 
 fn command_output_with_timeout(mut command: Command, timeout: Duration) -> Result<Output, String> {
@@ -1220,6 +1717,10 @@ fn normalize_runtime_settings(
         xray_http_port: non_zero_u16_or(settings.xray_http_port, defaults.xray_http_port),
         xray_socks_listen: non_empty_or(settings.xray_socks_listen, defaults.xray_socks_listen),
         xray_socks_port: non_zero_u16_or(settings.xray_socks_port, defaults.xray_socks_port),
+        system_proxy_bypass: non_empty_or(
+            settings.system_proxy_bypass,
+            defaults.system_proxy_bypass,
+        ),
         xray_stats_enabled: settings.xray_stats_enabled,
         xray_stats_listen: non_empty_or(settings.xray_stats_listen, defaults.xray_stats_listen),
         xray_stats_port: non_zero_u16_or(settings.xray_stats_port, defaults.xray_stats_port),
@@ -1247,6 +1748,7 @@ fn default_runtime_settings(app: &tauri::AppHandle) -> Result<RuntimeSettings, S
         xray_http_port: 10809,
         xray_socks_listen: "127.0.0.1".to_string(),
         xray_socks_port: 10808,
+        system_proxy_bypass: default_system_proxy_bypass(),
         xray_stats_enabled: true,
         xray_stats_listen: "127.0.0.1".to_string(),
         xray_stats_port: 10085,
@@ -2768,6 +3270,68 @@ stat: <
     }
 
     #[test]
+    fn expected_system_proxy_server_uses_http_and_socks_inbounds() {
+        let settings = RuntimeSettings {
+            xray_http_listen: "127.0.0.2".to_string(),
+            xray_http_port: 18080,
+            xray_socks_listen: "127.0.0.3".to_string(),
+            xray_socks_port: 18081,
+            ..RuntimeSettings::default()
+        };
+
+        assert_eq!(
+            expected_system_proxy_server(&settings),
+            "http=127.0.0.2:18080;https=127.0.0.2:18080;socks=127.0.0.3:18081"
+        );
+    }
+
+    #[test]
+    fn parses_windows_proxy_registry_output() {
+        let raw = r#"
+HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
+    ProxyEnable    REG_DWORD    0x1
+    ProxyServer    REG_SZ    http=127.0.0.1:10809;https=127.0.0.1:10809;socks=127.0.0.1:10808
+    ProxyOverride    REG_SZ    localhost;127.*;<local>
+"#;
+        let parsed = parse_windows_proxy_settings(raw);
+        assert!(parsed.proxy_enable);
+        assert_eq!(
+            parsed.proxy_server,
+            "http=127.0.0.1:10809;https=127.0.0.1:10809;socks=127.0.0.1:10808"
+        );
+        assert_eq!(parsed.proxy_override, "localhost;127.*;<local>");
+    }
+
+    #[test]
+    fn system_proxy_state_detects_prism_match() {
+        let settings = RuntimeSettings {
+            xray_http_listen: "127.0.0.1".to_string(),
+            xray_http_port: 10809,
+            xray_socks_listen: "127.0.0.1".to_string(),
+            xray_socks_port: 10808,
+            ..RuntimeSettings::default()
+        };
+        let state = system_proxy_state(
+            &settings,
+            true,
+            true,
+            "HTTP=127.0.0.1:10809;HTTPS=127.0.0.1:10809;SOCKS=127.0.0.1:10808".to_string(),
+            default_system_proxy_bypass(),
+            None,
+        );
+        assert!(state.matches_prism);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_ignore_hosts_formats_gsettings_array() {
+        assert_eq!(
+            linux_ignore_hosts("localhost;127.*;<local>"),
+            "['localhost', '127.*']"
+        );
+    }
+
+    #[test]
     fn path_string_round_trips() {
         let path = Path::new(if cfg!(target_os = "windows") {
             "C:\\test"
@@ -2833,6 +3397,9 @@ pub fn run() {
             xray_traffic_stats,
             test_tcp_latency,
             test_xray_proxy,
+            system_proxy_status,
+            enable_system_proxy,
+            disable_system_proxy,
             start_xray,
             stop_xray,
             start_tachyon_core,

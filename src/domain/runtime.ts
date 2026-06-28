@@ -24,6 +24,7 @@ export interface RuntimeSettings {
   xrayHttpPort: number;
   xraySocksListen: string;
   xraySocksPort: number;
+  systemProxyBypass: string;
   xrayStatsEnabled: boolean;
   xrayStatsListen: string;
   xrayStatsPort: number;
@@ -110,6 +111,16 @@ export interface ProxyProbeResult {
   latencyMs: number | null;
   via: string;
   targetUrl: string;
+  error: string | null;
+}
+
+export interface SystemProxyState {
+  supported: boolean;
+  enabled: boolean;
+  matchesPrism: boolean;
+  proxyServer: string;
+  expectedProxyServer: string;
+  bypass: string;
   error: string | null;
 }
 
@@ -211,6 +222,27 @@ export async function testXrayProxy(
   });
 }
 
+export async function getSystemProxyStatus(): Promise<SystemProxyState> {
+  if (!isTauriRuntime()) {
+    return previewSystemProxyState(false);
+  }
+  return invokeDesktop<SystemProxyState>("system_proxy_status");
+}
+
+export async function enableSystemProxy(): Promise<SystemProxyState> {
+  if (!isTauriRuntime()) {
+    return previewSystemProxyState(true);
+  }
+  return invokeDesktop<SystemProxyState>("enable_system_proxy");
+}
+
+export async function disableSystemProxy(): Promise<SystemProxyState> {
+  if (!isTauriRuntime()) {
+    return previewSystemProxyState(false);
+  }
+  return invokeDesktop<SystemProxyState>("disable_system_proxy");
+}
+
 export async function startXray(
   binaryPath: string,
   configPath: string,
@@ -249,6 +281,7 @@ function previewRuntimeSettings(): RuntimeSettings {
     xrayHttpPort: 10809,
     xraySocksListen: "127.0.0.1",
     xraySocksPort: 10808,
+    systemProxyBypass: "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*;<local>",
     xrayStatsEnabled: true,
     xrayStatsListen: "127.0.0.1",
     xrayStatsPort: 10085,
@@ -333,6 +366,19 @@ function previewProxyProbe(targetUrl: string): ProxyProbeResult {
     statusCode: 204,
     targetUrl,
     via: "127.0.0.1:10809",
+  };
+}
+
+function previewSystemProxyState(enabled: boolean): SystemProxyState {
+  const expectedProxyServer = "http=127.0.0.1:10809;https=127.0.0.1:10809;socks=127.0.0.1:10808";
+  return {
+    bypass: "localhost;127.*;<local>",
+    enabled,
+    error: null,
+    expectedProxyServer,
+    matchesPrism: enabled,
+    proxyServer: enabled ? expectedProxyServer : "",
+    supported: true,
   };
 }
 
