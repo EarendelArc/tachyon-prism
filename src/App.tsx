@@ -1530,6 +1530,27 @@ export function App() {
     }
   }
 
+  function titlebarDragBlocked(target: EventTarget | null): boolean {
+    return target instanceof HTMLElement
+      ? Boolean(target.closest("button, input, select, textarea, a, [data-no-window-drag]"))
+      : false;
+  }
+
+  function startWindowDrag(event: React.MouseEvent<HTMLElement>) {
+    if (!isTauriRuntime() || event.button !== 0 || titlebarDragBlocked(event.target)) {
+      return;
+    }
+    event.preventDefault();
+    void invokeDesktop<void>("window_start_dragging").catch(() => undefined);
+  }
+
+  function handleTitlebarDoubleClick(event: React.MouseEvent<HTMLElement>) {
+    if (titlebarDragBlocked(event.target)) {
+      return;
+    }
+    void handleWindowAction("maximize");
+  }
+
   function changeLanguage(nextLanguage: Language) {
     saveLanguage(nextLanguage);
     setLanguage(nextLanguage);
@@ -1667,7 +1688,12 @@ export function App() {
 
   return (
     <main className="prism-shell">
-      <header className="app-titlebar">
+      <header
+        className="app-titlebar"
+        data-tauri-drag-region
+        onDoubleClick={handleTitlebarDoubleClick}
+        onMouseDown={startWindowDrag}
+      >
         <div className="title-left" data-tauri-drag-region>
           <span className="app-cube">◆</span>
           <strong>Tachyon Prism v0.1.0</strong>

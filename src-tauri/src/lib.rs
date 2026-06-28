@@ -2867,6 +2867,11 @@ fn window_close(window: tauri::Window) -> Result<(), String> {
     window.close().map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn window_start_dragging(window: tauri::Window) -> Result<(), String> {
+    window.start_dragging().map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3704,7 +3709,8 @@ pub fn run() {
             window_toggle_maximize,
             window_set_maximized,
             window_set_always_on_top,
-            window_close
+            window_close,
+            window_start_dragging
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Tachyon Prism")
