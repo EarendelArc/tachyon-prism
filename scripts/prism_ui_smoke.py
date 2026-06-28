@@ -22,9 +22,27 @@ ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
 ARTIFACTS = ROOT / "artifacts" / "ui-smoke"
 EDGE = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
+SMOKE_URL_SUBSCRIPTION = "\n".join(
+    [
+        "vless://url-test-uuid@url-vless.example.com:443?encryption=none&security=tls&type=ws&sni=url.example.com#Smoke URL VLESS",
+        "trojan://url-password@url-trojan.example.com:8443?security=tls&sni=url-trojan.example.com#Smoke URL Trojan",
+    ],
+)
 
 
 class QuietHandler(SimpleHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path.split("?", 1)[0] == "/smoke-subscription":
+            data = SMOKE_URL_SUBSCRIPTION.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        super().do_GET()
+
     def log_message(self, format: str, *args: Any) -> None:
         return
 
@@ -336,6 +354,34 @@ def import_subscription_payload(cdp: CDP, name: str, payload: str) -> str:
     )
 
 
+def update_subscription_url(cdp: CDP, name: str, source_url: str) -> str:
+    return str(
+        cdp.evaluate(
+            f"""
+            new Promise((resolve) => {{
+              const setValue = (element, value) => {{
+                if (!element) throw new Error('subscription form element missing');
+                const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value');
+                descriptor.set.call(element, value);
+                element.dispatchEvent(new Event('input', {{ bubbles: true }}));
+              }};
+              const card = document.querySelector('.add-sub-card');
+              if (!card) throw new Error('subscription add card missing');
+              const inputs = card.querySelectorAll('input');
+              setValue(inputs[0], {json.dumps(name)});
+              setValue(inputs[1], {json.dumps(source_url)});
+              setValue(card.querySelector('textarea'), '');
+              const button = card.querySelector('.row-actions button:first-child');
+              if (!button) throw new Error('update button missing');
+              button.click();
+              setTimeout(() => resolve(document.body.innerText), 1000);
+            }})
+            """,
+            await_promise=True,
+        ),
+    )
+
+
 def click_add_subscription(cdp: CDP) -> dict[str, Any]:
     return cdp.evaluate(
         """
@@ -538,6 +584,12 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         add_state = click_add_subscription(cdp)
         if add_state["activeTag"] != "INPUT":
             raise AssertionError(f"add subscription did not focus the form: {add_state}")
+        text = update_subscription_url(
+            cdp,
+            "Smoke URL",
+            f"http://127.0.0.1:{port}/smoke-subscription",
+        )
+        assert_contains(text, "Smoke URL", "Smoke URL VLESS", "Smoke URL Trojan")
         text = import_sample_subscription(cdp)
         assert_contains(text, "Smoke", "Smoke VLESS", "Smoke Trojan", "Smoke Hysteria")
         text = import_clash_subscription(cdp)
