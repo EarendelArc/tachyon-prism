@@ -8,6 +8,7 @@
         "web:dev": "vite --configLoader native --host 127.0.0.1 --port 1420",
         "web:build": "tsc && vite build --configLoader native",
         "build": "tauri build --features custom-protocol",
+        "build:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
         "typecheck": "tsc --noEmit",
         "test": "vitest run",
         "test:ui": "python scripts/prism_ui_smoke.py",
