@@ -534,6 +534,30 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
     )
 
 
+def configure_tachyon_server(cdp: CDP, server: str) -> str:
+    return str(
+        cdp.evaluate(
+            f"""
+            new Promise((resolve) => {{
+              location.hash = 'settings';
+              setTimeout(() => {{
+                document.querySelectorAll('.settings-sidebar button')[1]?.click();
+                setTimeout(() => {{
+                  const input = document.querySelector('input[placeholder="game.example.com:443"]');
+                  if (!input) throw new Error('Tachyon server input missing');
+                  const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value');
+                  descriptor.set.call(input, {json.dumps(server)});
+                  input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                  setTimeout(() => resolve(document.body.innerText), 350);
+                }}, 350);
+              }}, 350);
+            }})
+            """,
+            await_promise=True,
+        ),
+    )
+
+
 def select_settings_section(cdp: CDP, index: int) -> str:
     return str(
         cdp.evaluate(
@@ -723,9 +747,11 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         assert_contains(text, "Personalization", "Theme", "Core")
         assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "settings-desktop-en.png")
-        text = select_settings_section(cdp, 1)
+        text = configure_tachyon_server(cdp, "game.example.com:443")
         assert_contains(
             text,
+            "Tachyon Server",
+            "TGP Server",
             "Xray SOCKS",
             "Xray Stats API",
             "TUN Privilege",
@@ -737,7 +763,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         )
         assert_no_runtime_error(text)
         text = click_validate_configs(cdp)
-        assert_contains(text, "Xray and Tachyon Core configs validated", "Xray", "Tachyon Core", "OK")
+        assert_contains(text, "Available configs validated", "Xray", "Tachyon Core", "OK")
         assert_desktop_interaction_polish(cdp)
         assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "settings-core-desktop-en.png")

@@ -5,19 +5,23 @@
   "identifier": "space.tachyon.prism",
   "build": {
     "beforeDevCommand": "npm run web:dev",
-    "beforeBuildCommand": "npm run web:build",
+    "beforeBuildCommand": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/vite/bin/vite.js build --configLoader native",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
+        "label": "main",
+        "create": false,
+        "url": "index.html",
         "title": "Tachyon Prism",
         "width": 800,
         "height": 540,
         "minWidth": 800,
         "minHeight": 540,
         "decorations": false,
+        "visible": true,
         "shadow": true
       }
     ],

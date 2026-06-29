@@ -8,30 +8,32 @@
 
 * {
   box-sizing: border-box;
-  scrollbar-color: rgba(0, 137, 255, 0.58) rgba(255, 255, 255, 0.055);
+  scrollbar-color: rgba(0, 120, 255, 0.78) transparent;
   scrollbar-width: thin;
+  user-select: none;
+  -webkit-user-drag: none;
+  -webkit-user-select: none;
 }
 
 *::-webkit-scrollbar {
-  height: 8px;
-  width: 8px;
+  height: 6px;
+  width: 6px;
 }
 
 *::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.035);
+  background: transparent;
   border-radius: 999px;
 }
 
 *::-webkit-scrollbar-thumb {
-  background:
-    linear-gradient(180deg, rgba(0, 137, 255, 0.9), rgba(43, 178, 255, 0.56));
-  border: 2px solid rgba(10, 12, 14, 0.94);
+  background: rgba(0, 120, 255, 0.72);
+  border: 1px solid rgba(8, 10, 11, 0.82);
   border-radius: 999px;
+  min-height: 34px;
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background:
-    linear-gradient(180deg, rgba(47, 164, 255, 0.98), rgba(0, 118, 255, 0.76));
+  background: #0089ff;
 }
 
 *::-webkit-scrollbar-corner {
@@ -41,8 +43,6 @@
 body {
   margin: 0;
   overflow: hidden;
-  user-select: none;
-  -webkit-user-select: none;
 }
 
 button,
@@ -104,6 +104,14 @@ textarea {
   -webkit-user-select: text;
 }
 
+input *,
+textarea *,
+[data-selectable="true"],
+.selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 input:focus,
 select:focus,
 textarea:focus {
@@ -137,6 +145,7 @@ a {
   display: flex;
   gap: 10px;
   padding: 8px 18px 4px 12px;
+  touch-action: none;
   -webkit-app-region: drag;
 }
 
@@ -302,6 +311,7 @@ a {
   min-height: 0;
   overflow: auto;
   padding: 8px 15px 0;
+  scrollbar-gutter: stable;
 }
 
 .page-enter {

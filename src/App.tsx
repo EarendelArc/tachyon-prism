@@ -7,6 +7,7 @@ import {
 } from "./domain/configDrafts";
 import {
   getConfigPaths,
+  saveConfigDraft,
   saveConfigDrafts,
   type ConfigDraftPaths,
 } from "./domain/desktopConfig";
@@ -146,6 +147,8 @@ const emptyRuntimeInputs = {
   tachyonIpcPort: 55123,
   tachyonCoreBinaryPath: "",
   tachyonCoreReleaseChannel: "preview" as ReleaseChannel,
+  tachyonServerAddress: "",
+  tachyonTgpServerAddress: "",
   tachyonTelemetryIntervalMs: 500,
   tachyonTunAddress: "198.18.0.1/16",
   tachyonTunMtu: 9000,
@@ -217,6 +220,8 @@ const zh = {
   stopAll: "停止全部",
   subscriptions: "订阅",
   tachyon: "Tachyon",
+  tachyonServer: "Tachyon 服务器",
+  tachyonTgpServer: "TGP 服务器",
   traffic: "流量",
   trafficNoSamplesHint: "启动 Xray 或 Tachyon Core 后，这里会显示真实的双核心流量曲线。",
   trafficSource: "数据源",
@@ -365,6 +370,8 @@ const en: typeof zh = {
   stopAll: "Stop All",
   subscriptions: "Subscriptions",
   tachyon: "Tachyon",
+  tachyonServer: "Tachyon Server",
+  tachyonTgpServer: "TGP Server",
   traffic: "Traffic",
   trafficNoSamplesHint: "Start Xray or Tachyon Core to draw real dual-core traffic curves here.",
   trafficSource: "Source",
@@ -666,46 +673,59 @@ function draftText(
   launcherSettings: LauncherSettings,
   routingMode: XrayRoutingMode,
   runtimeSettings: RuntimeSettings,
-): { core: string; error: string; xray: string } {
-  if (!activeNode) {
-    return { core: "", error: "", xray: "" };
-  }
+): { core: string; coreError: string; error: string; xray: string; xrayError: string } {
+  let core = "";
+  let coreError = "";
+  let xray = "";
+  let xrayError = "";
+
   try {
-    return {
-      core: stringifyDraft(
-        buildCoreClientConfigDraft(activeNode, {
-          gameProfiles: profiles,
-          grpcListen: runtimeSettings.tachyonGrpcListen,
-          grpcPort: runtimeSettings.tachyonGrpcPort,
-          ipcListen: runtimeSettings.tachyonIpcListen,
-          ipcPort: runtimeSettings.tachyonIpcPort,
-          launchers: launcherSettings,
-          telemetryIntervalMs: runtimeSettings.tachyonTelemetryIntervalMs,
-          tunAddress: runtimeSettings.tachyonTunAddress,
-          tunMtu: runtimeSettings.tachyonTunMtu,
-        }),
-      ),
-      error: "",
-      xray: stringifyDraft(
-        buildXrayClientConfigDraft(activeNode, {
-          enableStats: runtimeSettings.xrayStatsEnabled,
-          httpListen: runtimeSettings.xrayHttpListen,
-          httpPort: runtimeSettings.xrayHttpPort,
-          routingMode,
-          socksListen: runtimeSettings.xraySocksListen,
-          socksPort: runtimeSettings.xraySocksPort,
-          statsListen: runtimeSettings.xrayStatsListen,
-          statsPort: runtimeSettings.xrayStatsPort,
-        }),
-      ),
-    };
+    core = stringifyDraft(
+      buildCoreClientConfigDraft({
+        gameProfiles: profiles,
+        grpcListen: runtimeSettings.tachyonGrpcListen,
+        grpcPort: runtimeSettings.tachyonGrpcPort,
+        ipcListen: runtimeSettings.tachyonIpcListen,
+        ipcPort: runtimeSettings.tachyonIpcPort,
+        launchers: launcherSettings,
+        serverAddr: runtimeSettings.tachyonServerAddress,
+        telemetryIntervalMs: runtimeSettings.tachyonTelemetryIntervalMs,
+        tgpServerAddr: runtimeSettings.tachyonTgpServerAddress,
+        tunAddress: runtimeSettings.tachyonTunAddress,
+        tunMtu: runtimeSettings.tachyonTunMtu,
+      }),
+    );
   } catch (error) {
-    return {
-      core: "",
-      error: error instanceof Error ? error.message : "Config generation failed",
-      xray: "",
-    };
+    coreError = error instanceof Error ? error.message : "Tachyon Core config generation failed";
   }
+
+  try {
+    if (!activeNode) {
+      throw new Error("Select an Xray subscription node before generating Xray config");
+    }
+    xray = stringifyDraft(
+      buildXrayClientConfigDraft(activeNode, {
+        enableStats: runtimeSettings.xrayStatsEnabled,
+        httpListen: runtimeSettings.xrayHttpListen,
+        httpPort: runtimeSettings.xrayHttpPort,
+        routingMode,
+        socksListen: runtimeSettings.xraySocksListen,
+        socksPort: runtimeSettings.xraySocksPort,
+        statsListen: runtimeSettings.xrayStatsListen,
+        statsPort: runtimeSettings.xrayStatsPort,
+      }),
+    );
+  } catch (error) {
+    xrayError = error instanceof Error ? error.message : "Xray config generation failed";
+  }
+
+  return {
+    core,
+    coreError,
+    error: [xrayError, coreError].filter(Boolean).join(" / "),
+    xray,
+    xrayError,
+  };
 }
 
 function telemetryBytes(data: TelemetryData | null, xrayStats: XrayTrafficStats): TrafficTotals {
@@ -869,29 +889,42 @@ export function App() {
       activeNode
         ? {
             detail: `${activeNode.name} (${activeNode.protocol.toUpperCase()})`,
-            label: "Selected node",
+            label: "Xray node",
             state: "ok",
           }
         : {
-            detail: "Import a subscription or select a node before starting cores.",
-            label: "Selected node",
+            detail: "Import a subscription or select a node before starting Xray.",
+            label: "Xray node",
+            state: "warning",
+          },
+    );
+    items.push(
+      runtimeInputs.tachyonServerAddress.trim()
+        ? {
+            detail: runtimeInputs.tachyonTgpServerAddress.trim() || runtimeInputs.tachyonServerAddress.trim(),
+            label: "Tachyon server",
+            state: "ok",
+          }
+        : {
+            detail: "Configure a Tachyon TGP server before starting Tachyon Core.",
+            label: "Tachyon server",
             state: "error",
           },
     );
     items.push(
-      drafts.xray && !drafts.error
+      drafts.xray && !drafts.xrayError
         ? { detail: "Xray client JSON can be generated.", label: "Xray config", state: "ok" }
         : {
-            detail: drafts.error || "Xray config needs a selected node.",
+            detail: drafts.xrayError || "Xray config needs a selected node.",
             label: "Xray config",
-            state: "error",
+            state: activeNode ? "error" : "warning",
           },
     );
     items.push(
-      drafts.core && !drafts.error
+      drafts.core && !drafts.coreError
         ? { detail: "Tachyon Core client JSON can be generated.", label: "Tachyon config", state: "ok" }
         : {
-            detail: drafts.error || "Tachyon config needs a selected node.",
+            detail: drafts.coreError || "Tachyon config needs a server address.",
             label: "Tachyon config",
             state: "error",
           },
@@ -938,11 +971,15 @@ export function App() {
     activeNode,
     activeProfiles,
     drafts.core,
+    drafts.coreError,
     drafts.error,
     drafts.xray,
+    drafts.xrayError,
     managedBinaries,
     runtimePrivilege,
     runtimeInputs.tachyonCoreBinaryPath,
+    runtimeInputs.tachyonServerAddress,
+    runtimeInputs.tachyonTgpServerAddress,
     runtimeInputs.xrayBinaryPath,
   ]);
   const readinessErrors = useMemo(
@@ -1184,9 +1221,37 @@ export function App() {
     }
   }
 
-  async function writeDrafts(): Promise<ConfigDraftPaths> {
-    if (!drafts.core || !drafts.xray) {
-      throw new Error("No config draft available");
+  async function writeDrafts(kind: ManagedBinaryKind | "all" = "all"): Promise<ConfigDraftPaths> {
+    if (kind === "xray") {
+      if (!drafts.xray) {
+        throw new Error(drafts.xrayError || "No Xray config draft available");
+      }
+      const paths = await saveConfigDraft("xray", drafts.xray);
+      setConfigPaths(paths);
+      return paths;
+    }
+
+    if (kind === "tachyonCore") {
+      if (!drafts.core) {
+        throw new Error(drafts.coreError || "No Tachyon Core config draft available");
+      }
+      const paths = await saveConfigDraft("core", drafts.core);
+      setConfigPaths(paths);
+      return paths;
+    }
+
+    if (!drafts.core && !drafts.xray) {
+      throw new Error(drafts.error || "No config draft available");
+    }
+    if (!drafts.core) {
+      const paths = await saveConfigDraft("xray", drafts.xray);
+      setConfigPaths(paths);
+      return paths;
+    }
+    if (!drafts.xray) {
+      const paths = await saveConfigDraft("core", drafts.core);
+      setConfigPaths(paths);
+      return paths;
     }
     const paths = await saveConfigDrafts(drafts.core, drafts.xray);
     setConfigPaths(paths);
@@ -1224,16 +1289,18 @@ export function App() {
 
   async function validateAllConfigs() {
     try {
-      const paths = await writeDrafts();
+      const paths = await writeDrafts("all");
       const settings = await saveRuntimeSettings(runtimeInputs);
       setRuntimeInputs(settings);
-      const xray = await runConfigValidation("xray", paths, settings, false);
-      const tachyonCore = await runConfigValidation("tachyonCore", paths, settings, false);
-      setMessage(
-        xray.ok && tachyonCore.ok
-          ? "Xray and Tachyon Core configs validated"
-          : "Config validation finished with errors",
-      );
+      const results: ConfigValidationResult[] = [];
+      if (drafts.xray) {
+        results.push(await runConfigValidation("xray", paths, settings, false));
+      }
+      if (drafts.core) {
+        results.push(await runConfigValidation("tachyonCore", paths, settings, false));
+      }
+      const ok = results.length > 0 && results.every((result) => result.ok);
+      setMessage(ok ? "Available configs validated" : "Config validation finished with errors");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Config validation failed");
     }
@@ -1384,7 +1451,10 @@ export function App() {
       const status = await getRuntimeStatus();
       setRuntimeStatus(status);
       if (status.xray.state !== "running") {
-        await startRuntime("xray");
+        const started = await startRuntime("xray");
+        if (!started) {
+          return;
+        }
       }
       const state = await enableSystemProxy();
       setSystemProxy(state);
@@ -1417,7 +1487,7 @@ export function App() {
     }
   }
 
-  async function startRuntime(kind: ManagedBinaryKind) {
+  async function startRuntime(kind: ManagedBinaryKind): Promise<boolean> {
     try {
       if (kind === "tachyonCore") {
         const privilege = runtimePrivilege ?? (await refreshRuntimePrivilege());
@@ -1425,7 +1495,7 @@ export function App() {
           throw new Error(privilege.message);
         }
       }
-      const paths = await writeDrafts();
+      const paths = await writeDrafts(kind);
       const settings = await saveRuntimeSettings(runtimeInputs);
       setRuntimeInputs(settings);
       await runConfigValidation(kind, paths, settings, false);
@@ -1458,8 +1528,10 @@ export function App() {
               },
       }));
       setMessage(`${managedBinaryDisplayName(kind)} started`);
+      return true;
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Start failed");
+      return false;
     }
   }
 
@@ -2828,6 +2900,26 @@ function SettingsView({
                 ))}
               </div>
               <div className="core-settings-grid">
+                <label>
+                  <span>{ui.tachyonServer}</span>
+                  <input
+                    placeholder="game.example.com:443"
+                    value={runtimeInputs.tachyonServerAddress}
+                    onChange={(event) =>
+                      setRuntimeInputs((current) => ({ ...current, tachyonServerAddress: event.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>{ui.tachyonTgpServer}</span>
+                  <input
+                    placeholder="optional, defaults to Tachyon server"
+                    value={runtimeInputs.tachyonTgpServerAddress}
+                    onChange={(event) =>
+                      setRuntimeInputs((current) => ({ ...current, tachyonTgpServerAddress: event.target.value }))
+                    }
+                  />
+                </label>
                 <label>
                   <span>Xray SOCKS</span>
                   <div className="input-pair">

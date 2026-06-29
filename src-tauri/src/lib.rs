@@ -44,6 +44,10 @@ struct RuntimeSettings {
     #[serde(default)]
     xray_binary_path: String,
     #[serde(default)]
+    tachyon_server_address: String,
+    #[serde(default)]
+    tachyon_tgp_server_address: String,
+    #[serde(default)]
     xray_http_listen: String,
     #[serde(default)]
     xray_http_port: u16,
@@ -378,6 +382,31 @@ fn save_config_drafts(
 
     write_atomic(Path::new(&paths.core_config_path), &core_json)?;
     write_atomic(Path::new(&paths.xray_config_path), &xray_json)?;
+
+    Ok(paths)
+}
+
+#[tauri::command]
+fn save_config_draft(
+    app: tauri::AppHandle,
+    kind: String,
+    json: String,
+) -> Result<ConfigDraftPaths, String> {
+    let paths = draft_paths(&app)?;
+    let config_dir = PathBuf::from(&paths.config_dir);
+    fs::create_dir_all(&config_dir).map_err(|err| format!("create config directory: {err}"))?;
+
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "core" | "tachyoncore" | "tachyon-core" => {
+            ensure_json_object("Core config", &json)?;
+            write_atomic(Path::new(&paths.core_config_path), &json)?;
+        }
+        "xray" | "xray-core" => {
+            ensure_json_object("Xray config", &json)?;
+            write_atomic(Path::new(&paths.xray_config_path), &json)?;
+        }
+        other => return Err(format!("unknown config draft kind: {other}")),
+    }
 
     Ok(paths)
 }
@@ -1938,6 +1967,14 @@ fn normalize_runtime_settings(
             defaults.tachyon_core_binary_path,
         ),
         xray_binary_path: non_empty_or(settings.xray_binary_path, defaults.xray_binary_path),
+        tachyon_server_address: non_empty_or(
+            settings.tachyon_server_address,
+            defaults.tachyon_server_address,
+        ),
+        tachyon_tgp_server_address: non_empty_or(
+            settings.tachyon_tgp_server_address,
+            defaults.tachyon_tgp_server_address,
+        ),
         tachyon_telemetry_interval_ms: bounded_u32_or(
             settings.tachyon_telemetry_interval_ms,
             defaults.tachyon_telemetry_interval_ms,
@@ -1985,6 +2022,8 @@ fn default_runtime_settings(app: &tauri::AppHandle) -> Result<RuntimeSettings, S
         tachyon_ipc_port: 55123,
         tachyon_core_binary_path: paths.tachyon_core_binary_path,
         xray_binary_path: paths.xray_binary_path,
+        tachyon_server_address: String::new(),
+        tachyon_tgp_server_address: String::new(),
         tachyon_telemetry_interval_ms: 500,
         tachyon_core_release_channel: "preview".to_string(),
         tachyon_tun_address: "198.18.0.1/16".to_string(),
@@ -3672,6 +3711,18 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
 
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            let window_config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|window| window.label == "main")
+                .ok_or_else(|| "missing main window config".to_string())?;
+
+            tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?.build()?;
+            Ok(())
+        })
         .manage(RuntimeState::default())
         .invoke_handler(tauri::generate_handler![
             core_status,
@@ -3681,6 +3732,7 @@ pub fn run() {
             scan_steam_library,
             config_paths,
             save_config_drafts,
+            save_config_draft,
             runtime_paths,
             runtime_settings,
             save_runtime_settings,
@@ -3716,7 +3768,14 @@ pub fn run() {
         .expect("failed to build Tachyon Prism")
         .run(|handle, event| {
             if matches!(event, tauri::RunEvent::Ready) {
-                if let Some(window) = handle.webview_windows().get("main") {
+                for (_, window) in handle.webview_windows() {
+                    let default_size = tauri::Size::Logical(tauri::LogicalSize {
+                        width: 800.0,
+                        height: 540.0,
+                    });
+                    let _ = window.set_min_size(Some(default_size));
+                    let _ = window.set_size(default_size);
+                    let _ = window.center();
                     let _ = window.show();
                     let _ = window.set_focus();
                 }

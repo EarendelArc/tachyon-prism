@@ -16,6 +16,8 @@ export interface RuntimeSettings {
   tachyonIpcPort: number;
   tachyonCoreBinaryPath: string;
   xrayBinaryPath: string;
+  tachyonServerAddress: string;
+  tachyonTgpServerAddress: string;
   tachyonTelemetryIntervalMs: number;
   tachyonCoreReleaseChannel: ReleaseChannel;
   tachyonTunAddress: string;
@@ -321,6 +323,8 @@ function previewRuntimeSettings(): RuntimeSettings {
     tachyonIpcPort: 55123,
     tachyonCoreBinaryPath: "",
     tachyonCoreReleaseChannel: "preview",
+    tachyonServerAddress: "",
+    tachyonTgpServerAddress: "",
     tachyonTelemetryIntervalMs: 500,
     tachyonTunAddress: "198.18.0.1/16",
     tachyonTunMtu: 9000,

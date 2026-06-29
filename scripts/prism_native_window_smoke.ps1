@@ -85,14 +85,35 @@ function Get-RectObject {
 function Wait-ForMainWindow {
   param(
     [System.Diagnostics.Process]$Process,
-    [int]$TimeoutSeconds = 20
+    [int]$TimeoutSeconds = 20,
+    [int]$StableChecks = 2
   )
 
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  $stableHandle = [IntPtr]::Zero
+  $stableCount = 0
   while ((Get-Date) -lt $deadline) {
     $Process.Refresh()
+    $candidateHandles = @([PrismNativeSmokeWin32]::VisibleWindowsForProcess([uint32]$Process.Id))
     if ($Process.MainWindowHandle -ne 0) {
-      return $Process.MainWindowHandle
+      $candidateHandles = @($Process.MainWindowHandle) + $candidateHandles
+    }
+    foreach ($candidate in $candidateHandles) {
+      if ($candidate -eq 0) {
+        continue
+      }
+      $rect = Get-RectObject -Handle $candidate
+      if ($rect.width -ge 780 -and $rect.height -ge 520) {
+        if ($candidate -eq $stableHandle) {
+          $stableCount += 1
+        } else {
+          $stableHandle = $candidate
+          $stableCount = 1
+        }
+        if ($stableCount -ge $StableChecks) {
+          return $candidate
+        }
+      }
     }
     Start-Sleep -Milliseconds 250
   }
@@ -107,13 +128,17 @@ try {
   $hwnd = Wait-ForMainWindow -Process $process
   [PrismNativeSmokeWin32]::SetForegroundWindow($hwnd) | Out-Null
   Start-Sleep -Milliseconds 700
+  $hwnd = Wait-ForMainWindow -Process $process -TimeoutSeconds 20 -StableChecks 1
 
   $visibleWindows = [PrismNativeSmokeWin32]::VisibleWindowsForProcess([uint32]$process.Id)
   $windowInfos = @($visibleWindows | ForEach-Object {
+    $rect = Get-RectObject -Handle $_
     [pscustomobject]@{
       handle = $_.ToInt64()
       title = [PrismNativeSmokeWin32]::WindowTitle($_)
       className = [PrismNativeSmokeWin32]::WindowClass($_)
+      width = $rect.width
+      height = $rect.height
     }
   })
   $before = Get-RectObject -Handle $hwnd

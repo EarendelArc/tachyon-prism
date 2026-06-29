@@ -26,6 +26,19 @@ export async function saveConfigDrafts(
   });
 }
 
+export async function saveConfigDraft(
+  kind: "core" | "xray",
+  json: string,
+): Promise<ConfigDraftPaths> {
+  if (!isTauriRuntime()) {
+    return previewConfigPaths();
+  }
+  return invokeDesktop<ConfigDraftPaths>("save_config_draft", {
+    kind,
+    json,
+  });
+}
+
 function previewConfigPaths(): ConfigDraftPaths {
   return {
     configDir: "Preview mode",

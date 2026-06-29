@@ -91,6 +91,10 @@ const mockProfiles: GameProfile[] = [
   },
 ];
 
+const mockCoreOptions = {
+  serverAddr: "game.example.com:443",
+};
+
 describe("buildXrayClientConfigDraft", () => {
   it("generates a config with socks inbound and proxy outbound", () => {
     const config = buildXrayClientConfigDraft(mockVMessNode);
@@ -210,7 +214,8 @@ describe("buildXrayClientConfigDraft", () => {
 
 describe("buildCoreClientConfigDraft", () => {
   it("generates a client-mode config with tun and routing", () => {
-    const config = buildCoreClientConfigDraft(mockVMessNode, {
+    const config = buildCoreClientConfigDraft({
+      ...mockCoreOptions,
       gameProfiles: mockProfiles,
     });
     expect(config.mode).toBe("client");
@@ -222,7 +227,8 @@ describe("buildCoreClientConfigDraft", () => {
   });
 
   it("includes game profiles in routing", () => {
-    const config = buildCoreClientConfigDraft(mockVMessNode, {
+    const config = buildCoreClientConfigDraft({
+      ...mockCoreOptions,
       gameProfiles: mockProfiles,
     });
     const client = config.client as Record<string, unknown>;
@@ -233,24 +239,25 @@ describe("buildCoreClientConfigDraft", () => {
     expect(profiles[1].id).toBe("valorant");
   });
 
-  it("throws when node has no port", () => {
+  it("throws when Tachyon server address is missing", () => {
     expect(() =>
-      buildCoreClientConfigDraft({
-        ...mockVMessNode,
-        port: 0,
-      }),
+      buildCoreClientConfigDraft(),
     ).toThrow();
   });
 
-  it("sets proxy endpoint from node address:port", () => {
-    const config = buildCoreClientConfigDraft(mockTrojanNode);
+  it("sets proxy endpoint from Tachyon server settings", () => {
+    const config = buildCoreClientConfigDraft({
+      serverAddr: "relay.example.com:443",
+      tgpServerAddr: "game-relay.example.com:443",
+    });
     const client = config.client as Record<string, unknown>;
     const proxy = client.proxy as Record<string, unknown>;
-    expect(proxy.server_addr).toBe("trojan.example.com:8443");
+    expect(proxy.server_addr).toBe("relay.example.com:443");
+    expect(proxy.tgp_server_addr).toBe("game-relay.example.com:443");
   });
 
   it("includes LAN direct rules with default routing rules", () => {
-    const config = buildCoreClientConfigDraft(mockVMessNode);
+    const config = buildCoreClientConfigDraft(mockCoreOptions);
     const client = config.client as Record<string, unknown>;
     const routing = client.routing as Record<string, unknown>;
     const rules = routing.rules as Array<Record<string, unknown>>;
@@ -261,7 +268,7 @@ describe("buildCoreClientConfigDraft", () => {
   });
 
   it("includes TGP settings", () => {
-    const config = buildCoreClientConfigDraft(mockVMessNode);
+    const config = buildCoreClientConfigDraft(mockCoreOptions);
     const tgp = config.tgp as Record<string, unknown>;
     expect(tgp.fec).toBeDefined();
     expect(tgp.pacing).toBeDefined();
@@ -269,14 +276,15 @@ describe("buildCoreClientConfigDraft", () => {
   });
 
   it("includes IPC settings", () => {
-    const config = buildCoreClientConfigDraft(mockVMessNode);
+    const config = buildCoreClientConfigDraft(mockCoreOptions);
     const ipc = config.ipc as Record<string, unknown>;
     expect(ipc.websocket_addr).toBe("127.0.0.1:55123");
     expect(ipc.grpc_addr).toBe("127.0.0.1:50051");
   });
 
   it("respects runtime networking options", () => {
-    const config = buildCoreClientConfigDraft(mockVMessNode, {
+    const config = buildCoreClientConfigDraft({
+      ...mockCoreOptions,
       grpcListen: "127.0.0.5",
       grpcPort: 50052,
       ipcListen: "127.0.0.6",
@@ -297,7 +305,7 @@ describe("buildCoreClientConfigDraft", () => {
   });
 
   it("uses default launcher settings when not provided", () => {
-    const config = buildCoreClientConfigDraft(mockVMessNode);
+    const config = buildCoreClientConfigDraft(mockCoreOptions);
     const client = config.client as Record<string, unknown>;
     const routing = client.routing as Record<string, unknown>;
     const launchers = routing.launchers as LauncherSettings;

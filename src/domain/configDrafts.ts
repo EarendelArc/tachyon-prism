@@ -23,7 +23,9 @@ export interface CoreClientDraftOptions {
   grpcPort?: number;
   ipcListen?: string;
   ipcPort?: number;
+  serverAddr?: string;
   telemetryIntervalMs?: number;
+  tgpServerAddr?: string;
   tunAddress?: string;
   tunMtu?: number;
 }
@@ -105,10 +107,13 @@ export function buildXrayClientConfigDraft(
 }
 
 export function buildCoreClientConfigDraft(
-  node: ProxyNode,
   options: CoreClientDraftOptions = {},
 ): Record<string, unknown> {
-  const remoteEndpoint = nodeEndpoint(node);
+  const remoteEndpoint = normalizeEndpoint(options.serverAddr);
+  const tgpEndpoint = normalizeEndpoint(options.tgpServerAddr) || remoteEndpoint;
+  if (!remoteEndpoint) {
+    throw new Error("Tachyon server address is required");
+  }
   const gameProfiles = options.gameProfiles ?? [];
   const launchers = options.launchers ?? defaultLauncherSettings;
 
@@ -141,7 +146,7 @@ export function buildCoreClientConfigDraft(
       },
       proxy: {
         server_addr: remoteEndpoint,
-        tgp_server_addr: remoteEndpoint,
+        tgp_server_addr: tgpEndpoint,
       },
     },
     tgp: {
@@ -233,13 +238,10 @@ function xrayRouting(mode: XrayRoutingMode, enableStats = false): Record<string,
   };
 }
 
-function nodeEndpoint(node: ProxyNode): string {
-  if (node.port <= 0) {
-    throw new Error("Selected node has no remote endpoint");
-  }
-  return `${node.address}:${node.port}`;
-}
-
 function endpoint(listen: string, port: number): string {
   return `${listen}:${port}`;
+}
+
+function normalizeEndpoint(value = ""): string {
+  return value.trim().replace(/^tachyon:\/\//i, "").replace(/^tgp:\/\//i, "");
 }
