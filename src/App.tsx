@@ -479,22 +479,19 @@ function nodeEndpoint(node: ProxyNode): string {
   return node.port > 0 ? `${node.address}:${node.port}` : node.address;
 }
 
-function fallbackNodeLatency(node: ProxyNode): number {
-  const seed = Array.from(node.id).reduce((sum, char) => sum + char.charCodeAt(0), 0);
-  return 82 + (seed % 236);
+function nodeLatency(node: ProxyNode, latencyMap: NodeLatencyMap): number | null {
+  const measured = latencyMap[node.id];
+  return measured?.ok && measured.latencyMs !== null ? measured.latencyMs : null;
 }
 
-function nodeLatency(node: ProxyNode, latencyMap: NodeLatencyMap): number {
-  const measured = latencyMap[node.id];
-  return measured?.ok && measured.latencyMs !== null ? measured.latencyMs : fallbackNodeLatency(node);
+function nodeLatencySortValue(node: ProxyNode, latencyMap: NodeLatencyMap): number {
+  const measured = nodeLatency(node, latencyMap);
+  return measured ?? Number.MAX_SAFE_INTEGER;
 }
 
 function nodeAvailable(node: ProxyNode, latencyMap: NodeLatencyMap): boolean {
   const measured = latencyMap[node.id];
-  if (measured && !measured.ok) {
-    return false;
-  }
-  return nodeLatency(node, latencyMap) < 285;
+  return !measured || Boolean(measured.ok && measured.latencyMs !== null);
 }
 
 function nodeLatencyLabel(node: ProxyNode, ui: typeof zh, latencyMap: NodeLatencyMap): string {
@@ -502,7 +499,8 @@ function nodeLatencyLabel(node: ProxyNode, ui: typeof zh, latencyMap: NodeLatenc
   if (measured && !measured.ok) {
     return ui.unavailable;
   }
-  return `${nodeLatency(node, latencyMap)}ms`;
+  const latency = nodeLatency(node, latencyMap);
+  return latency === null ? "--" : `${latency}ms`;
 }
 
 function processStatusLabel(status: ProcessStatus | undefined): string {
@@ -1112,29 +1110,89 @@ export function App() {
     }
   }
 
+  async function updateAllSubscriptions() {
+    const remoteSubscriptions = subscription.subscriptions.filter(
+      (item) => item.sourceUrl && item.sourceUrl !== "manual",
+    );
+    if (remoteSubscriptions.length === 0) {
+      setMessage("No remote subscriptions to update");
+      return;
+    }
+
+    let nextSnapshot = subscription;
+    const updatedNodes: ProxyNode[] = [];
+    const failures: string[] = [];
+
+    for (const item of remoteSubscriptions) {
+      try {
+        const nodes = await fetchSubscriptionNodes(item.sourceUrl);
+        nextSnapshot = createSubscriptionSnapshot(item.sourceUrl, nodes, nextSnapshot, item.name);
+        updatedNodes.push(...nodes);
+      } catch (error) {
+        failures.push(`${item.name}: ${error instanceof Error ? error.message : "update failed"}`);
+      }
+    }
+
+    if (updatedNodes.length === 0) {
+      setMessage(failures[0] ?? "Subscription update failed");
+      return;
+    }
+
+    try {
+      if (nextSnapshot.subscriptions.some((item) => item.id === subscription.selectedSubscriptionId)) {
+        nextSnapshot = selectSubscription(nextSnapshot, subscription.selectedSubscriptionId);
+        if (nextSnapshot.nodes.some((node) => node.id === subscription.selectedNodeId)) {
+          nextSnapshot = selectSubscriptionNode(nextSnapshot, subscription.selectedNodeId);
+        }
+      }
+    } catch {
+      // Keep the freshly updated snapshot if the previous selection disappeared.
+    }
+
+    saveSubscriptionSnapshot(nextSnapshot);
+    setSubscription(nextSnapshot);
+    setMessage(
+      failures.length > 0
+        ? `${remoteSubscriptions.length - failures.length}/${remoteSubscriptions.length} subscriptions updated`
+        : `${remoteSubscriptions.length} subscriptions updated`,
+    );
+    void refreshNodeLatencies(updatedNodes, false);
+  }
+
   async function refreshNodeLatencies(nodes = subscription.nodes, announce = true) {
     if (nodes.length === 0) {
       setNodeLatencies({});
       return;
     }
-    const results = await Promise.all(
-      nodes.map(async (node) => {
-        try {
-          const result = await testTcpLatency(node.address, node.port, 2500);
-          return [node.id, result] as const;
-        } catch (error) {
-          return [
-            node.id,
-            {
-              error: error instanceof Error ? error.message : "latency test failed",
-              latencyMs: null,
-              ok: false,
-            },
-          ] as const;
+    const results: Array<readonly [string, TcpLatencyResult]> = [];
+    const queue = [...nodes];
+    const workerCount = Math.min(queue.length, 6);
+    const measure = async (node: ProxyNode): Promise<readonly [string, TcpLatencyResult]> => {
+      try {
+        const result = await testTcpLatency(node.address, node.port, 2500);
+        return [node.id, result] as const;
+      } catch (error) {
+        return [
+          node.id,
+          {
+            error: error instanceof Error ? error.message : "latency test failed",
+            latencyMs: null,
+            ok: false,
+          },
+        ] as const;
+      }
+    };
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (queue.length > 0) {
+        const node = queue.shift();
+        if (!node) {
+          continue;
         }
-      }),
-    );
-    setNodeLatencies(Object.fromEntries(results));
+        results.push(await measure(node));
+      }
+    });
+    await Promise.all(workers);
+    setNodeLatencies((current) => ({ ...current, ...Object.fromEntries(results) }));
     if (announce) {
       setMessage("Latency refreshed");
     }
@@ -1956,6 +2014,7 @@ export function App() {
             onRefreshLatency={() => void refreshNodeLatencies()}
             onTextChange={setSubscriptionText}
             onUpdate={() => void updateSubscriptionFromUrl()}
+            onUpdateAll={() => void updateAllSubscriptions()}
             onUrlChange={setSubscriptionUrl}
             setViewMode={setSubscriptionViewMode}
             subscription={subscription}
@@ -2290,7 +2349,10 @@ function ConfigsView({
   const sortedNodes = useMemo(() => {
     const nodes = [...subscription.nodes];
     if (sortByDelay) {
-      nodes.sort((left, right) => nodeLatency(left, latencyMap) - nodeLatency(right, latencyMap));
+      nodes.sort(
+        (left, right) =>
+          nodeLatencySortValue(left, latencyMap) - nodeLatencySortValue(right, latencyMap),
+      );
     }
     return showUnavailable ? nodes : nodes.filter((node) => nodeAvailable(node, latencyMap));
   }, [latencyMap, showUnavailable, sortByDelay, subscription.nodes]);
@@ -2474,6 +2536,7 @@ function SubscriptionsView({
   onRefreshLatency,
   onTextChange,
   onUpdate,
+  onUpdateAll,
   onUrlChange,
   setViewMode,
   subscription,
@@ -2497,6 +2560,7 @@ function SubscriptionsView({
   onRefreshLatency: () => void;
   onTextChange: (value: string) => void;
   onUpdate: () => void;
+  onUpdateAll: () => void;
   onUrlChange: (value: string) => void;
   setViewMode: (mode: SubscriptionViewMode) => void;
   subscription: SubscriptionSnapshot;
@@ -2526,7 +2590,7 @@ function SubscriptionsView({
           </button>
         </div>
         <div className="toolbar-actions">
-          <button type="button" onClick={onUpdate}>
+          <button type="button" onClick={onUpdateAll}>
             {ui.updateAll}
           </button>
           <button className="primary-action" type="button" onClick={onPrepareAdd}>

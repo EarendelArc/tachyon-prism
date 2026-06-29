@@ -440,6 +440,27 @@ def update_subscription_url(cdp: CDP, name: str, source_url: str) -> str:
     )
 
 
+def update_all_subscriptions(cdp: CDP) -> str:
+    return str(
+        cdp.evaluate(
+            """
+            new Promise((resolve) => {
+              location.hash = 'subscriptions';
+              setTimeout(() => {
+                const button = Array.from(document.querySelectorAll('.section-toolbar .toolbar-actions button')).find((item) =>
+                  item.textContent.trim() === '更新全部' || item.textContent.trim() === 'Update All'
+                );
+                if (!button) throw new Error('update all subscription button missing');
+                button.click();
+                setTimeout(() => resolve(document.body.innerText), 1200);
+              }, 350);
+            })
+            """,
+            await_promise=True,
+        ),
+    )
+
+
 def click_add_subscription(cdp: CDP) -> dict[str, Any]:
     return cdp.evaluate(
         """
@@ -692,6 +713,8 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
             f"http://127.0.0.1:{port}/smoke-subscription",
         )
         assert_contains(text, "Smoke URL", "Smoke URL VLESS", "Smoke URL Trojan")
+        text = update_all_subscriptions(cdp)
+        assert_contains(text, "1 subscriptions updated", "Smoke URL VLESS", "Smoke URL Trojan")
         text = import_sample_subscription(cdp)
         assert_contains(text, "Smoke", "Smoke VLESS", "Smoke Trojan", "Smoke Hysteria")
         text = import_clash_subscription(cdp)
