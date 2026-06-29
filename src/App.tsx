@@ -1197,10 +1197,10 @@ export function App() {
     void refreshNodeLatencies(updatedNodes, false);
   }
 
-  async function refreshNodeLatencies(nodes = subscription.nodes, announce = true) {
+  async function refreshNodeLatencies(nodes = subscription.nodes, announce = true): Promise<NodeLatencyMap> {
     if (nodes.length === 0) {
       setNodeLatencies({});
-      return;
+      return {};
     }
     const results: Array<readonly [string, TcpLatencyResult]> = [];
     const queue = [...nodes];
@@ -1230,10 +1230,12 @@ export function App() {
       }
     });
     await Promise.all(workers);
-    setNodeLatencies((current) => ({ ...current, ...Object.fromEntries(results) }));
+    const nextLatencies = { ...nodeLatencies, ...Object.fromEntries(results) };
+    setNodeLatencies(nextLatencies);
     if (announce) {
       setMessage("Latency refreshed");
     }
+    return nextLatencies;
   }
 
   function importSubscriptionText() {
@@ -1314,12 +1316,35 @@ export function App() {
     );
   }
 
-  function runPlugin(pluginId: string, pluginTitle: string) {
+  async function runPlugin(pluginId: string, pluginTitle: string) {
     try {
-      persistPluginState(
-        recordPluginRun(pluginState, pluginId),
-        `${pluginTitle} run completed`,
-      );
+      const nextPluginState = recordPluginRun(pluginState, pluginId);
+      if (pluginId === "smart-node-switch") {
+        let latencyMap = nodeLatencies;
+        const hasMeasuredNodes = subscription.nodes.some(
+          (node) => nodeAvailable(node, latencyMap) && nodeLatency(node, latencyMap) !== null,
+        );
+        if (!hasMeasuredNodes) {
+          latencyMap = await refreshNodeLatencies(subscription.nodes, false);
+        }
+        const bestNode = [...subscription.nodes]
+          .filter((node) => nodeAvailable(node, latencyMap) && nodeLatency(node, latencyMap) !== null)
+          .sort(
+            (left, right) =>
+              nodeLatencySortValue(left, latencyMap) - nodeLatencySortValue(right, latencyMap),
+          )[0];
+        if (!bestNode) {
+          throw new Error("Refresh latency before running Smart Node Switch");
+        }
+        const snapshot = selectSubscriptionNode(subscription, bestNode.id);
+        saveSubscriptionSnapshot(snapshot);
+        setSubscription(snapshot);
+        savePluginState(nextPluginState);
+        setPluginState(nextPluginState);
+        setMessage(`${pluginTitle} switched to ${bestNode.name}`);
+        return;
+      }
+      persistPluginState(nextPluginState, `${pluginTitle} run completed`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Plugin run failed");
     }
