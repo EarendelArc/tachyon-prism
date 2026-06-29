@@ -3363,7 +3363,7 @@ function SettingsView({
                           }
                         >
                           <option value="stable">Stable</option>
-                          <option value="preview">Preview</option>
+                          <option value="preview">Pre</option>
                         </select>
                       </label>
                       <div className="row-actions">
