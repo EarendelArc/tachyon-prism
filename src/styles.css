@@ -1102,16 +1102,41 @@ p,
   transform: translateY(-2px);
 }
 
+.plugin-rich-card.active {
+  background:
+    radial-gradient(circle at 85% 20%, rgba(0, 211, 154, 0.12), transparent 35%),
+    rgba(255, 255, 255, 0.08);
+  border-color: rgba(0, 211, 154, 0.26);
+}
+
 .plugin-rich-card h2 {
   align-items: center;
   display: flex;
   gap: 5px;
 }
 
+.plugin-rich-card p {
+  min-height: 34px;
+}
+
+.plugin-meta {
+  color: rgba(255, 255, 255, 0.58);
+  display: grid;
+  font-size: 12px;
+  gap: 3px;
+  line-height: 1.25;
+}
+
 .plugin-rich-card footer {
   align-items: center;
   display: flex;
+  gap: 10px;
   justify-content: space-between;
+}
+
+.plugin-rich-card footer .row-actions {
+  flex-wrap: nowrap;
+  gap: 6px;
 }
 
 .tag-row span {

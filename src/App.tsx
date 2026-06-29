@@ -79,6 +79,17 @@ import {
   saveLanguage,
   type Language,
 } from "./domain/i18n";
+import {
+  enabledPluginCount,
+  emptyPluginState,
+  installPluginState,
+  installedPluginCount,
+  loadPluginState,
+  recordPluginRun,
+  savePluginState,
+  togglePluginEnabled,
+  type PluginStateSnapshot,
+} from "./domain/plugins";
 import { TelemetryClient } from "./domain/telemetry";
 import type { TelemetryData, TelemetryState } from "./domain/telemetry";
 import { invokeDesktop, isTauriRuntime } from "./domain/tauri";
@@ -170,6 +181,12 @@ const emptyBinarySourceInputs = {
 };
 
 const managedBinaryKinds: ManagedBinaryKind[] = ["xray", "tachyonCore"];
+const pluginCatalogIds = [
+  "rolling-release",
+  "node-transform",
+  "traffic-stats",
+  "smart-node-switch",
+] as const;
 
 const zh = {
   activeConnections: "活动连接",
@@ -268,8 +285,15 @@ const zh = {
   pluginAllowNodeRead: "允许插件读取节点",
   pluginAutoUpdate: "自动更新插件",
   pluginCenter: "插件中心",
+  pluginDisabled: "已停用",
+  pluginEnabled: "已启用",
+  pluginInstalled: "已安装",
+  pluginLastRun: "最后运行",
+  pluginNeverRun: "未运行",
+  pluginNotInstalled: "未安装",
   pluginRollingDesc: "提升 Prism 升级体验，获取更快更新通道。",
   pluginRollingTitle: "滚动发行",
+  pluginRunCount: "运行次数",
   pluginSettings: "插件设置",
   pluginStatsDesc: "高效流量统计插件，支持按域名、进程聚合。",
   pluginStatsTitle: "流量统计",
@@ -297,6 +321,8 @@ const zh = {
   settingsGeneral: "通用",
   source: "源码",
   sourceBinaryPath: "源二进制路径",
+  disable: "停用",
+  enable: "启用",
   steamChildTracking: "Steam 子进程追踪",
   steamLauncherDetection: "Steam 启动器检测",
   steamRoot: "Steam 根目录",
@@ -418,8 +444,15 @@ const en: typeof zh = {
   pluginAllowNodeRead: "Allow plugins to read nodes",
   pluginAutoUpdate: "Auto-update plugins",
   pluginCenter: "Plugin Center",
+  pluginDisabled: "Disabled",
+  pluginEnabled: "Enabled",
+  pluginInstalled: "Installed",
+  pluginLastRun: "Last run",
+  pluginNeverRun: "Never run",
+  pluginNotInstalled: "Not installed",
   pluginRollingDesc: "Improve Prism update experience with faster preview channels.",
   pluginRollingTitle: "Rolling Release",
+  pluginRunCount: "Runs",
   pluginSettings: "Plugin Settings",
   pluginStatsDesc: "Efficient traffic statistics by domain and process.",
   pluginStatsTitle: "Traffic Stats",
@@ -447,6 +480,8 @@ const en: typeof zh = {
   settingsGeneral: "General",
   source: "Source",
   sourceBinaryPath: "Source binary path",
+  disable: "Disable",
+  enable: "Enable",
   steamChildTracking: "Steam child process tracking",
   steamLauncherDetection: "Steam launcher detection",
   steamRoot: "Steam root",
@@ -826,6 +861,9 @@ export function App() {
   const [subscriptionText, setSubscriptionText] = useState("");
   const [subscriptionViewMode, setSubscriptionViewMode] = useState<SubscriptionViewMode>("grid");
   const [policyGroupViewMode, setPolicyGroupViewMode] = useState<SubscriptionViewMode>("grid");
+  const [pluginState, setPluginState] = useState<PluginStateSnapshot>(() =>
+    loadPluginState(pluginCatalogIds),
+  );
   const [routingMode, setRoutingMode] = useState<XrayRoutingMode>(loadRoutingMode);
   const [showUnavailableNodes, setShowUnavailableNodes] = useState(false);
   const [sortPolicyNodesByDelay, setSortPolicyNodesByDelay] = useState(true);
@@ -1255,6 +1293,36 @@ export function App() {
     setRoutingMode(mode);
     saveRoutingMode(mode);
     setMessage(`${routingModeLabel(mode, ui)} mode selected`);
+  }
+
+  function persistPluginState(nextState: PluginStateSnapshot, messageText: string) {
+    savePluginState(nextState);
+    setPluginState(nextState);
+    setMessage(messageText);
+  }
+
+  function installPlugin(pluginId: string, pluginTitle: string) {
+    persistPluginState(installPluginState(pluginState, pluginId), `${pluginTitle} installed`);
+  }
+
+  function togglePlugin(pluginId: string, pluginTitle: string) {
+    const nextState = togglePluginEnabled(pluginState, pluginId);
+    const nextPlugin = nextState[pluginId];
+    persistPluginState(
+      nextState,
+      nextPlugin?.enabled ? `${pluginTitle} enabled` : `${pluginTitle} disabled`,
+    );
+  }
+
+  function runPlugin(pluginId: string, pluginTitle: string) {
+    try {
+      persistPluginState(
+        recordPluginRun(pluginState, pluginId),
+        `${pluginTitle} run completed`,
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Plugin run failed");
+    }
   }
 
   function prepareSubscriptionAdd() {
@@ -2026,7 +2094,15 @@ export function App() {
           />
         ) : null}
 
-        {activeView === "plugins" ? <PluginsView ui={ui} /> : null}
+        {activeView === "plugins" ? (
+          <PluginsView
+            onInstall={installPlugin}
+            onRun={runPlugin}
+            onToggle={togglePlugin}
+            pluginState={pluginState}
+            ui={ui}
+          />
+        ) : null}
 
         {activeView === "settings" ? (
           <SettingsView
@@ -2692,40 +2768,66 @@ function SubscriptionsView({
   );
 }
 
-function PluginsView({ ui }: { ui: typeof zh }) {
+function PluginsView({
+  onInstall,
+  onRun,
+  onToggle,
+  pluginState,
+  ui,
+}: {
+  onInstall: (pluginId: string, pluginTitle: string) => void;
+  onRun: (pluginId: string, pluginTitle: string) => void;
+  onToggle: (pluginId: string, pluginTitle: string) => void;
+  pluginState: PluginStateSnapshot;
+  ui: typeof zh;
+}) {
   const plugins = [
     {
+      badge: "",
       desc: ui.pluginRollingDesc,
+      id: pluginCatalogIds[0],
       tags: [ui.pluginTriggerManual, ui.pluginTriggerApp],
       title: ui.pluginRollingTitle,
     },
     {
+      badge: "",
       desc: ui.pluginTransformDesc,
+      id: pluginCatalogIds[1],
       tags: [ui.pluginTriggerManual, ui.pluginTriggerUpdate],
       title: ui.pluginTransformTitle,
     },
     {
+      badge: "Dev",
       desc: ui.pluginStatsDesc,
+      id: pluginCatalogIds[2],
       tags: [ui.pluginTriggerManual, ui.pluginTriggerApp],
       title: ui.pluginStatsTitle,
     },
     {
+      badge: "●",
       desc: ui.pluginSwitchDesc,
+      id: pluginCatalogIds[3],
       tags: [ui.pluginTriggerManual, ui.pluginTriggerNode],
       title: ui.pluginSwitchTitle,
     },
   ];
+  const installed = installedPluginCount(pluginState);
+  const enabled = enabledPluginCount(pluginState);
   return (
     <div className="plugins-page page-enter">
       <div className="section-toolbar">
         <div className="segmented">
           <button className="active" type="button">
-            {ui.traffic}
+            {ui.pluginCenter}
           </button>
-          <button type="button">{ui.list}</button>
+          <button type="button">
+            {enabled}/{plugins.length} {ui.pluginEnabled}
+          </button>
         </div>
         <div className="toolbar-actions">
-          <button type="button">{ui.pluginCenter}</button>
+          <button type="button">
+            {installed}/{plugins.length} {ui.pluginInstalled}
+          </button>
           <button type="button">{ui.checkUpdates}</button>
           <button className="primary-action" type="button">
             + {ui.add}
@@ -2733,31 +2835,65 @@ function PluginsView({ ui }: { ui: typeof zh }) {
         </div>
       </div>
       <div className="plugin-card-grid">
-        {plugins.map((plugin, index) => (
-          <article className="plugin-rich-card" key={plugin.title}>
-            <header>
-              <h2>
-                {index === 2 ? <span className="dev-badge">Dev</span> : null}
-                {index === 3 ? <span className="green-dot" /> : null}
-                {plugin.title}
-              </h2>
-              <button type="button">...</button>
-            </header>
-            <div className="tag-row">
-              {plugin.tags.map((tag) => (
-                <span key={tag}>{tag}</span>
-              ))}
-              <span>💬</span>
-            </div>
-            <p>{plugin.desc}</p>
-            <footer>
-              <a href="#source">{ui.source}</a>
-              <button className="primary-action" type="button">
-                ✨ {ui.run}
-              </button>
-            </footer>
-          </article>
-        ))}
+        {plugins.map((plugin) => {
+          const state = pluginState[plugin.id] ?? emptyPluginState();
+          const status = !state.installed
+            ? ui.pluginNotInstalled
+            : state.enabled
+              ? ui.pluginEnabled
+              : ui.pluginDisabled;
+          const lastRun = state.lastRunAt
+            ? new Date(state.lastRunAt).toLocaleString()
+            : ui.pluginNeverRun;
+          return (
+            <article
+              className={state.enabled ? "plugin-rich-card active" : "plugin-rich-card"}
+              key={plugin.id}
+            >
+              <header>
+                <h2>
+                  {plugin.badge === "Dev" ? <span className="dev-badge">Dev</span> : null}
+                  {plugin.badge === "●" ? <span className="green-dot" /> : null}
+                  {plugin.title}
+                </h2>
+                <button type="button" title={ui.more}>...</button>
+              </header>
+              <div className="tag-row">
+                {plugin.tags.map((tag) => (
+                  <span key={tag}>{tag}</span>
+                ))}
+                <span>{status}</span>
+              </div>
+              <p>{plugin.desc}</p>
+              <div className="plugin-meta">
+                <span>{ui.pluginRunCount}: {state.runCount}</span>
+                <span>{ui.pluginLastRun}: {lastRun}</span>
+              </div>
+              <footer>
+                <a href="#source">{ui.source}</a>
+                <div className="row-actions">
+                  {state.installed ? (
+                    <button type="button" onClick={() => onToggle(plugin.id, plugin.title)}>
+                      {state.enabled ? ui.disable : ui.enable}
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => onInstall(plugin.id, plugin.title)}>
+                      {ui.install}
+                    </button>
+                  )}
+                  <button
+                    className="primary-action"
+                    disabled={!state.installed || !state.enabled}
+                    type="button"
+                    onClick={() => onRun(plugin.id, plugin.title)}
+                  >
+                    ✨ {ui.run}
+                  </button>
+                </div>
+              </footer>
+            </article>
+          );
+        })}
       </div>
     </div>
   );

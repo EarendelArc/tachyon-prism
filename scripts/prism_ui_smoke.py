@@ -652,6 +652,36 @@ def open_and_close_controller(cdp: CDP) -> str:
     )
 
 
+def install_and_run_first_plugin(cdp: CDP) -> str:
+    return str(
+        cdp.evaluate(
+            """
+            new Promise((resolve) => {
+              location.hash = 'plugins';
+              setTimeout(() => {
+                const card = document.querySelector('.plugin-rich-card');
+                if (!card) throw new Error('plugin card missing');
+                const install = Array.from(card.querySelectorAll('button')).find((item) =>
+                  item.textContent.trim() === '安装' || item.textContent.trim() === 'Install'
+                );
+                if (!install) throw new Error('plugin install button missing');
+                install.click();
+                setTimeout(() => {
+                  const run = Array.from(card.querySelectorAll('button')).find((item) =>
+                    item.textContent.includes('运行') || item.textContent.includes('Run')
+                  );
+                  if (!run || run.disabled) throw new Error('plugin run button unavailable');
+                  run.click();
+                  setTimeout(() => resolve(document.body.innerText), 450);
+                }, 350);
+              }, 350);
+            })
+            """,
+            await_promise=True,
+        ),
+    )
+
+
 def run(edge_path: Path, port: int, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     server = start_server(port)
@@ -759,6 +789,8 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         text = navigate_hash(cdp, "plugins")
         assert_contains(text, "插件中心", "滚动发行", "节点转换")
         assert_no_runtime_error(text)
+        text = install_and_run_first_plugin(cdp)
+        assert_contains(text, "已启用", "运行次数: 1", "run completed")
         assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "plugins-desktop.png")
 
