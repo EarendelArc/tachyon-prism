@@ -3343,6 +3343,35 @@ mod tests {
     }
 
     #[test]
+    fn preview_release_channel_allows_prereleases() {
+        let marker = tachyon_core_platform_asset_marker().expect("supported test platform");
+        let preview = GithubRelease {
+            tag_name: "v0.1.0-alpha.8".to_string(),
+            published_at: Some("2026-06-30T00:00:00Z".to_string()),
+            prerelease: true,
+            assets: vec![
+                asset(&format!("tachyon-core_v0.1.0-alpha.8_{marker}.zip"), 123),
+                asset("SHA256SUMS.txt", 512),
+            ],
+        };
+        let stable = GithubRelease {
+            tag_name: "v0.1.0".to_string(),
+            published_at: Some("2026-06-01T00:00:00Z".to_string()),
+            prerelease: false,
+            assets: vec![
+                asset(&format!("tachyon-core_v0.1.0_{marker}.zip"), 123),
+                asset("SHA256SUMS.txt", 512),
+            ],
+        };
+
+        let info = latest_tachyon_core_release_info(vec![preview, stable], "pre")
+            .expect("preview release");
+
+        assert_eq!(info.tag_name, "v0.1.0-alpha.8");
+        assert!(info.asset_name.contains(marker));
+    }
+
+    #[test]
     fn xray_release_info_errors_on_empty_assets() {
         let release = GithubRelease {
             tag_name: "v0.1.0".to_string(),
