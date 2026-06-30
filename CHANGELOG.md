@@ -49,6 +49,8 @@ All notable changes to Tachyon Prism will be documented in this file.
 - Real subscription URL smoke test, Prism/Core config contract test, default
   frontend tests, TypeScript typecheck, Vite production build, native window
   smoke, and UI screenshot smoke.
+- Parsed VMess WebSocket, Trojan-Go-compatible, and Hysteria subscription nodes
+  round-trip into generated Xray client config drafts.
 
 ## [v0.1.0-alpha.1]
 

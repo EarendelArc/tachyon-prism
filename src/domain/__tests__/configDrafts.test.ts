@@ -9,6 +9,7 @@ import {
   stringifyDraft,
 } from "../configDrafts";
 import type { GameProfile, LauncherSettings } from "../gameProfiles";
+import { parseSubscription } from "../subscriptions";
 import type { ProxyNode } from "../subscriptions";
 
 const mockVMessNode: ProxyNode = {
@@ -213,6 +214,59 @@ describe("buildXrayClientConfigDraft", () => {
     expect(directRule.outboundTag).toBe("tachyon-direct");
     expect(globalRule.inboundTag).toEqual(["tachyon-socks", "tachyon-http"]);
     expect(directRule.inboundTag).toEqual(["tachyon-socks", "tachyon-http"]);
+  });
+
+  it("preserves parsed subscription outbound details in generated Xray configs", () => {
+    const nodes = parseSubscription(
+      [
+        "vmess://eyJ2IjoiMiIsInBzIjoiV01lc3MgV1MiLCJhZGQiOiJ2bWVzcy5leGFtcGxlLmNvbSIsInBvcnQiOiI0NDMiLCJpZCI6InZtZXNzLXV1aWQiLCJhaWQiOiIwIiwibmV0Ijoid3MiLCJ0eXBlIjoibm9uZSIsImhvc3QiOiJjZG4uZXhhbXBsZS5jb20iLCJwYXRoIjoiL3dzIiwidGxzIjoidGxzIn0=",
+        "trojan-go://secret@trojan.example.com:443?type=ws&path=/trojan&sni=edge.example.com#TrojanGo",
+        "hy2://auth@example.com:443?up=25&down=100#Hy2",
+      ].join("\n"),
+    );
+
+    const [vmessConfig, trojanConfig, hysteriaConfig] = nodes.map((node) =>
+      buildXrayClientConfigDraft(node),
+    );
+    const vmessProxy = ((vmessConfig.outbounds as Array<Record<string, unknown>>).find(
+      (outbound) => outbound.tag === "tachyon-proxy",
+    ) ?? {}) as Record<string, unknown>;
+    const trojanProxy = ((trojanConfig.outbounds as Array<Record<string, unknown>>).find(
+      (outbound) => outbound.tag === "tachyon-proxy",
+    ) ?? {}) as Record<string, unknown>;
+    const hysteriaProxy = ((hysteriaConfig.outbounds as Array<Record<string, unknown>>).find(
+      (outbound) => outbound.tag === "tachyon-proxy",
+    ) ?? {}) as Record<string, unknown>;
+
+    expect(vmessProxy).toMatchObject({
+      protocol: "vmess",
+      streamSettings: {
+        network: "websocket",
+        security: "tls",
+        wsSettings: {
+          path: "/ws",
+          headers: { Host: "cdn.example.com" },
+        },
+      },
+    });
+    expect(trojanProxy).toMatchObject({
+      protocol: "trojan",
+      streamSettings: {
+        network: "websocket",
+        wsSettings: { path: "/trojan" },
+      },
+    });
+    expect(hysteriaProxy).toMatchObject({
+      protocol: "hysteria",
+      streamSettings: {
+        network: "hysteria",
+        hysteriaSettings: {
+          auth: "auth",
+          upMbps: "25",
+          downMbps: "100",
+        },
+      },
+    });
   });
 });
 
