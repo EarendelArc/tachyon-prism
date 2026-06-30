@@ -38,8 +38,8 @@ All notable changes to Tachyon Prism will be documented in this file.
   links where VMess `type` means header type rather than network.
 - Parse Trojan-Go-compatible links as Xray Trojan outbounds when their
   parameters map to Xray transport settings.
-- Preserve common Clash/Mihomo TLS and Hysteria fields, including ALPN lists,
-  skip-cert-verify, Hysteria bandwidth hints, and UDP idle timeout.
+- Preserve common Clash/Mihomo TLS and Xray-compatible Hysteria fields,
+  including ALPN lists, skip-cert-verify, auth, and UDP idle timeout.
 - Upgrade previously saved URI subscription nodes on load so old cached nodes
   get canonical Xray outbound settings without requiring a manual re-import.
 - Stabilize the custom Windows titlebar drag/no-drag regions and verify no

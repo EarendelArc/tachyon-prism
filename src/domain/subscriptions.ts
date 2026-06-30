@@ -656,9 +656,6 @@ function clashOutboundSettings(
         version: clashValue(record, ["type"]).toLowerCase() === "hysteria" ? 1 : 2,
         address,
         port,
-        auth: clashValue(record, ["auth", "auth-str", "password"]),
-        upMbps: clashValue(record, ["up", "up-speed", "upMbps"]),
-        downMbps: clashValue(record, ["down", "down-speed", "downMbps"]),
       });
     case "socks":
     case "http": {
@@ -730,8 +727,6 @@ function clashStreamSettings(
   );
   if (protocol === "hysteria") {
     setParamIfPresent(params, "auth", clashValue(record, ["auth", "auth-str", "password"]));
-    setParamIfPresent(params, "up", clashValue(record, ["up", "up-speed", "upMbps"]));
-    setParamIfPresent(params, "down", clashValue(record, ["down", "down-speed", "downMbps"]));
     setParamIfPresent(
       params,
       "udpIdleTimeout",
@@ -927,7 +922,7 @@ function nodeFromOutbound(value: Record<string, unknown>, raw: string): ProxyNod
     protocol,
     address: endpoint.address,
     port: endpoint.port,
-    credential: credentialFromSettings(protocol, settings),
+    credential: credentialFromSettings(protocol, settings) ?? credentialFromStream(protocol, stream),
     security: stringValue(stream.security) || stringValue(settings.security) || stringValue(settings.encryption),
     transport: stringValue(stream.network),
     sni: sniFromStream(stream),
@@ -1185,12 +1180,10 @@ function parseHysteriaUri(rawUri: string, parsed: URL): ProxyNode | null {
   if (auth) {
     hysteriaSettings.auth = auth;
   }
-  copyParam(parsed.searchParams, hysteriaSettings, "up", "upMbps");
-  copyParam(parsed.searchParams, hysteriaSettings, "upmbps", "upMbps");
-  copyParam(parsed.searchParams, hysteriaSettings, "down", "downMbps");
-  copyParam(parsed.searchParams, hysteriaSettings, "downmbps", "downMbps");
-  copyParam(parsed.searchParams, hysteriaSettings, "udpIdleTimeout", "udpIdleTimeout");
-  copyParam(parsed.searchParams, hysteriaSettings, "udp_idle_timeout", "udpIdleTimeout");
+  const udpIdleTimeout = hysteriaUDPIdleTimeoutFromParams(parsed.searchParams);
+  if (udpIdleTimeout !== undefined) {
+    hysteriaSettings.udpIdleTimeout = udpIdleTimeout;
+  }
   const streamSettings = {
     ...streamSettingsFromParams(parsed.searchParams, "hysteria"),
     network: "hysteria",
@@ -1202,7 +1195,6 @@ function parseHysteriaUri(rawUri: string, parsed: URL): ProxyNode | null {
       version: 2,
       address: parsed.hostname,
       port,
-      auth,
     },
     streamSettings,
   });
@@ -1411,11 +1403,7 @@ function transportSettingsFromParams(
         value: compactRecord({
           version: 2,
           auth: stringOrUndefined(params.get("auth") ?? params.get("password")),
-          upMbps: stringOrUndefined(params.get("up") ?? params.get("upmbps")),
-          downMbps: stringOrUndefined(params.get("down") ?? params.get("downmbps")),
-          udpIdleTimeout: stringOrUndefined(
-            params.get("udpIdleTimeout") ?? params.get("udp_idle_timeout"),
-          ),
+          udpIdleTimeout: hysteriaUDPIdleTimeoutFromParams(params),
         }),
       };
     default:
@@ -1507,6 +1495,17 @@ function credentialFromSettings(
     default:
       return undefined;
   }
+}
+
+function credentialFromStream(
+  protocol: ProxyProtocol,
+  stream: Record<string, unknown>,
+): string | undefined {
+  if (protocol !== "hysteria") {
+    return undefined;
+  }
+  const hysteria = asRecord(stream.hysteriaSettings);
+  return stringOrUndefined(stringValue(hysteria.auth));
 }
 
 function endpointFromLegacyServerSettings(
@@ -1835,6 +1834,33 @@ function booleanParam(value: string | null): boolean | undefined {
     return undefined;
   }
   return value === "1" || value.toLowerCase() === "true";
+}
+
+function hysteriaUDPIdleTimeoutFromParams(params: URLSearchParams): number | undefined {
+  return durationSecondsParam(params.get("udpIdleTimeout") ?? params.get("udp_idle_timeout"));
+}
+
+function durationSecondsParam(value: string | null): number | undefined {
+  const trimmed = value?.trim().toLowerCase();
+  if (!trimmed) {
+    return undefined;
+  }
+  const match = /^(\d+)(ms|s|m)?$/.exec(trimmed);
+  if (!match) {
+    return undefined;
+  }
+  const amount = Number.parseInt(match[1], 10);
+  if (!Number.isInteger(amount) || amount <= 0) {
+    return undefined;
+  }
+  switch (match[2]) {
+    case "ms":
+      return Math.max(1, Math.ceil(amount / 1000));
+    case "m":
+      return amount * 60;
+    default:
+      return amount;
+  }
 }
 
 function splitList(value: string | null): string[] | undefined {

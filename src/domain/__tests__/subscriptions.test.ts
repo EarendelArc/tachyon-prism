@@ -142,10 +142,12 @@ describe("parseSubscription", () => {
       network: "hysteria",
       hysteriaSettings: {
         auth: "secret",
-        upMbps: "25",
-        downMbps: "100",
-        udpIdleTimeout: "30s",
+        udpIdleTimeout: 30,
       },
+    });
+    expect(nodes[0].parameters).toMatchObject({
+      up: "25",
+      down: "100",
     });
   });
 
@@ -498,9 +500,7 @@ proxy-groups:
       network: "hysteria",
       hysteriaSettings: {
         auth: "hy-secret",
-        upMbps: "50",
-        downMbps: "200",
-        udpIdleTimeout: "20s",
+        udpIdleTimeout: 20,
       },
     });
   });

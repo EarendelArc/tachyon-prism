@@ -262,8 +262,6 @@ describe("buildXrayClientConfigDraft", () => {
         network: "hysteria",
         hysteriaSettings: {
           auth: "auth",
-          upMbps: "25",
-          downMbps: "100",
         },
       },
     });
