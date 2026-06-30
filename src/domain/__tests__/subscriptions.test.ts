@@ -20,6 +20,7 @@ describe("parseSubscription", () => {
     expect(nodes[0].protocol).toBe("vmess");
     expect(nodes[0].address).toBe("10.0.0.1");
     expect(nodes[0].port).toBe(443);
+    expect(nodes[0].transport).toBe("websocket");
     expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
       vnext: [
         {
@@ -28,6 +29,14 @@ describe("parseSubscription", () => {
           users: [{ id: "test-uuid", alterId: 0, security: "auto" }],
         },
       ],
+    });
+    expect(buildXrayOutboundDraft(nodes[0]).streamSettings).toMatchObject({
+      network: "websocket",
+      security: "tls",
+      wsSettings: {
+        path: "/path",
+        headers: { Host: "example.com" },
+      },
     });
   });
 
@@ -82,6 +91,23 @@ describe("parseSubscription", () => {
     });
   });
 
+  it("parses Trojan-Go compatible URIs as Xray Trojan outbounds", () => {
+    const uri = "trojan-go://password@example.com:443?sni=edge.example.com&type=ws&path=/trojan#Trojan-Go Node";
+    const nodes = parseSubscription(uri);
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]).toMatchObject({
+      name: "Trojan-Go Node",
+      protocol: "trojan",
+      address: "example.com",
+      port: 443,
+      transport: "websocket",
+    });
+    expect(buildXrayOutboundDraft(nodes[0]).streamSettings).toMatchObject({
+      network: "websocket",
+      wsSettings: { path: "/trojan" },
+    });
+  });
+
   it("parses Shadowsocks URIs with SIP002 format", () => {
     const uri = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@10.0.0.1:8388#SS Node";
     const nodes = parseSubscription(uri);
@@ -103,13 +129,23 @@ describe("parseSubscription", () => {
   });
 
   it("parses Hysteria URIs", () => {
-    const uri = "hysteria://example.com:443?auth=secret&insecure=1#Hysteria Node";
+    const uri = "hy2://secret@example.com:443?insecure=1&up=25&down=100&udpIdleTimeout=30s#Hysteria Node";
     const nodes = parseSubscription(uri);
     expect(nodes).toHaveLength(1);
     expect(nodes[0].protocol).toBe("hysteria");
     expect(nodes[0].address).toBe("example.com");
     expect(nodes[0].port).toBe(443);
     expect(nodes[0].name).toBe("Hysteria Node");
+    expect(nodes[0].credential).toBe("secret");
+    expect(buildXrayOutboundDraft(nodes[0]).streamSettings).toMatchObject({
+      network: "hysteria",
+      hysteriaSettings: {
+        auth: "secret",
+        upMbps: "25",
+        downMbps: "100",
+        udpIdleTimeout: "30s",
+      },
+    });
   });
 
   it("parses SOCKS URIs", () => {
@@ -345,6 +381,8 @@ proxies:
     uuid: vless-uuid
     network: ws
     tls: true
+    skip-cert-verify: true
+    alpn: [h2, http/1.1]
     servername: www.cloudflare.com
     flow: xtls-rprx-vision
     reality-opts:
@@ -360,6 +398,16 @@ proxies:
     port: 8388
     cipher: 2022-blake3-aes-128-gcm
     password: ss-secret
+  - name: Clash Trojan TLS
+    type: trojan
+    server: trojan.example.com
+    port: 443
+    password: trojan-secret
+    tls: true
+    skip-cert-verify: true
+    alpn: [h2, http/1.1]
+    sni: tls.example.com
+  - { name: Clash Hy2, type: hysteria2, server: hy2.example.com, port: 443, password: hy-secret, up: 50, down: 200, udp-idle-timeout: 20s }
 proxy-groups:
   - name: Selector
     type: select
@@ -370,7 +418,7 @@ proxy-groups:
 
     const nodes = parseSubscription(payload);
 
-    expect(nodes).toHaveLength(2);
+    expect(nodes).toHaveLength(4);
     expect(nodes[0]).toMatchObject({
       name: "Clash VLESS Reality",
       protocol: "vless",
@@ -419,6 +467,40 @@ proxy-groups:
           password: "ss-secret",
         },
       ],
+    });
+    expect(nodes[2]).toMatchObject({
+      name: "Clash Trojan TLS",
+      protocol: "trojan",
+      address: "trojan.example.com",
+      port: 443,
+      credential: "trojan-secret",
+      security: "tls",
+      sni: "tls.example.com",
+    });
+    expect(nodes[2].outbound?.streamSettings).toMatchObject({
+      security: "tls",
+      tlsSettings: {
+        serverName: "tls.example.com",
+        allowInsecure: true,
+        alpn: ["h2", "http/1.1"],
+      },
+    });
+    expect(nodes[3]).toMatchObject({
+      name: "Clash Hy2",
+      protocol: "hysteria",
+      address: "hy2.example.com",
+      port: 443,
+      credential: "hy-secret",
+      transport: "hysteria",
+    });
+    expect(nodes[3].outbound?.streamSettings).toMatchObject({
+      network: "hysteria",
+      hysteriaSettings: {
+        auth: "hy-secret",
+        upMbps: "50",
+        downMbps: "200",
+        udpIdleTimeout: "20s",
+      },
     });
   });
 

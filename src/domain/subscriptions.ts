@@ -418,7 +418,7 @@ function nodeFromClashProxy(record: Record<string, string>): ProxyNode | null {
     tag: name,
     protocol,
     settings,
-    streamSettings: clashStreamSettings(record),
+    streamSettings: clashStreamSettings(record, protocol),
   });
 
   return nodeFromOutbound(outbound, `clash://${stableNodeId(JSON.stringify(record))}`);
@@ -489,6 +489,8 @@ function clashOutboundSettings(
         address,
         port,
         auth: clashValue(record, ["auth", "auth-str", "password"]),
+        upMbps: clashValue(record, ["up", "up-speed", "upMbps"]),
+        downMbps: clashValue(record, ["down", "down-speed", "downMbps"]),
       });
     case "socks":
     case "http": {
@@ -518,9 +520,12 @@ function clashOutboundSettings(
   }
 }
 
-function clashStreamSettings(record: Record<string, string>): Record<string, unknown> {
+function clashStreamSettings(
+  record: Record<string, string>,
+  protocol: ProxyProtocol = "unknown",
+): Record<string, unknown> {
   const params = new URLSearchParams();
-  const network = clashValue(record, ["network", "net"]);
+  const network = clashValue(record, ["network", "net"]) || (protocol === "hysteria" ? "hysteria" : "");
   if (network) {
     params.set("type", network);
   }
@@ -536,6 +541,11 @@ function clashStreamSettings(record: Record<string, string>): Record<string, unk
   setParamIfPresent(params, "sni", clashValue(record, ["sni", "servername", "serverName"]));
   setParamIfPresent(params, "fp", clashValue(record, ["client-fingerprint", "fingerprint", "fp"]));
   setParamIfPresent(params, "alpn", clashValue(record, ["alpn"]));
+  setParamIfPresent(
+    params,
+    "allowInsecure",
+    clashValue(record, ["skip-cert-verify", "allow-insecure", "allowInsecure", "insecure"]),
+  );
   setParamIfPresent(params, "pbk", clashValue(record, ["reality-opts.public-key", "reality-opts.publicKey", "pbk"]));
   setParamIfPresent(params, "sid", clashValue(record, ["reality-opts.short-id", "reality-opts.shortId", "sid"]));
   setParamIfPresent(params, "spx", clashValue(record, ["reality-opts.spider-x", "reality-opts.spiderX", "spx"]));
@@ -550,6 +560,16 @@ function clashStreamSettings(record: Record<string, string>): Record<string, unk
     "serviceName",
     clashValue(record, ["grpc-opts.grpc-service-name", "grpc-opts.serviceName", "serviceName"]),
   );
+  if (protocol === "hysteria") {
+    setParamIfPresent(params, "auth", clashValue(record, ["auth", "auth-str", "password"]));
+    setParamIfPresent(params, "up", clashValue(record, ["up", "up-speed", "upMbps"]));
+    setParamIfPresent(params, "down", clashValue(record, ["down", "down-speed", "downMbps"]));
+    setParamIfPresent(
+      params,
+      "udpIdleTimeout",
+      clashValue(record, ["udp-idle-timeout", "udpIdleTimeout"]),
+    );
+  }
   return streamSettingsFromParams(params);
 }
 
@@ -863,7 +883,18 @@ function nodeFromVMessShare(value: Record<string, unknown>, rawUri: string): Pro
     alpn: stringValue(value.alpn),
     fp: stringValue(value.fp),
   });
-  const searchParams = new URLSearchParams(params);
+  const streamParams = new URLSearchParams(
+    recordFromEntries({
+      type: stringValue(value.net),
+      headerType: stringValue(value.type),
+      host: stringValue(value.host),
+      path: stringValue(value.path),
+      security: stringValue(value.tls),
+      sni: stringValue(value.sni),
+      alpn: stringValue(value.alpn),
+      fp: stringValue(value.fp),
+    }),
+  );
   const outbound = compactOutbound({
     protocol: "vmess",
     settings: {
@@ -881,7 +912,7 @@ function nodeFromVMessShare(value: Record<string, unknown>, rawUri: string): Pro
         },
       ],
     },
-    streamSettings: streamSettingsFromParams(searchParams),
+    streamSettings: streamSettingsFromParams(streamParams),
   });
 
   return {
@@ -986,10 +1017,16 @@ function parseHysteriaUri(rawUri: string, parsed: URL): ProxyNode | null {
   if (auth) {
     hysteriaSettings.auth = auth;
   }
+  copyParam(parsed.searchParams, hysteriaSettings, "up", "upMbps");
+  copyParam(parsed.searchParams, hysteriaSettings, "upmbps", "upMbps");
+  copyParam(parsed.searchParams, hysteriaSettings, "down", "downMbps");
+  copyParam(parsed.searchParams, hysteriaSettings, "downmbps", "downMbps");
+  copyParam(parsed.searchParams, hysteriaSettings, "udpIdleTimeout", "udpIdleTimeout");
+  copyParam(parsed.searchParams, hysteriaSettings, "udp_idle_timeout", "udpIdleTimeout");
   const streamSettings = {
     ...streamSettingsFromParams(parsed.searchParams, "hysteria"),
     network: "hysteria",
-    hysteriaSettings,
+    hysteriaSettings: compactRecord(hysteriaSettings),
   };
   const outbound = compactOutbound({
     protocol: "hysteria",
@@ -997,6 +1034,7 @@ function parseHysteriaUri(rawUri: string, parsed: URL): ProxyNode | null {
       version: 2,
       address: parsed.hostname,
       port,
+      auth,
     },
     streamSettings,
   });
@@ -1205,6 +1243,11 @@ function transportSettingsFromParams(
         value: compactRecord({
           version: 2,
           auth: stringOrUndefined(params.get("auth") ?? params.get("password")),
+          upMbps: stringOrUndefined(params.get("up") ?? params.get("upmbps")),
+          downMbps: stringOrUndefined(params.get("down") ?? params.get("downmbps")),
+          udpIdleTimeout: stringOrUndefined(
+            params.get("udpIdleTimeout") ?? params.get("udp_idle_timeout"),
+          ),
         }),
       };
     default:
@@ -1504,6 +1547,7 @@ function normalizeProtocol(protocol: string): ProxyProtocol {
     https: "http",
     hy2: "hysteria",
     hysteria2: "hysteria",
+    "trojan-go": "trojan",
     wg: "wireguard",
   };
   const normalized = aliases[value] ?? value;
@@ -1626,9 +1670,11 @@ function booleanParam(value: string | null): boolean | undefined {
 }
 
 function splitList(value: string | null): string[] | undefined {
-  const items = value
+  const raw = value?.trim();
+  const body = raw?.startsWith("[") && raw.endsWith("]") ? raw.slice(1, -1) : raw;
+  const items = body
     ?.split(",")
-    .map((item) => item.trim())
+    .map((item) => item.trim().replace(/^["']|["']$/g, ""))
     .filter(Boolean);
   return items && items.length > 0 ? items : undefined;
 }
