@@ -158,6 +158,11 @@ const emptyRuntimeInputs = {
   tachyonIpcPort: 55123,
   tachyonCoreBinaryPath: "",
   tachyonCoreReleaseChannel: "preview" as ReleaseChannel,
+  tachyonFecAdaptWindow: 32,
+  tachyonFecDataShards: 4,
+  tachyonFecDynamic: true,
+  tachyonFecGroupTimeoutMs: 20,
+  tachyonFecParityShards: 2,
   tachyonServerAddress: "",
   tachyonTgpServerAddress: "",
   tachyonTelemetryIntervalMs: 500,
@@ -237,6 +242,10 @@ const zh = {
   stopAll: "停止全部",
   subscriptions: "订阅",
   tachyon: "Tachyon",
+  tachyonAdaptiveFec: "TGP 自适应 FEC",
+  tachyonAdaptiveFecDesc: "动态冗余调节",
+  tachyonFecShards: "TGP FEC 分片",
+  tachyonFecTiming: "TGP FEC 时序",
   tachyonServer: "Tachyon 服务器",
   tachyonTgpServer: "TGP 服务器",
   traffic: "流量",
@@ -396,6 +405,10 @@ const en: typeof zh = {
   stopAll: "Stop All",
   subscriptions: "Subscriptions",
   tachyon: "Tachyon",
+  tachyonAdaptiveFec: "TGP Adaptive FEC",
+  tachyonAdaptiveFecDesc: "Dynamic parity tuning",
+  tachyonFecShards: "TGP FEC Shards",
+  tachyonFecTiming: "TGP FEC Timing",
   tachyonServer: "Tachyon Server",
   tachyonTgpServer: "TGP Server",
   traffic: "Traffic",
@@ -716,6 +729,11 @@ function draftText(
     core = stringifyDraft(
       buildCoreClientConfigDraft({
         gameProfiles: profiles,
+        fecAdaptWindow: runtimeSettings.tachyonFecAdaptWindow,
+        fecDataShards: runtimeSettings.tachyonFecDataShards,
+        fecDynamic: runtimeSettings.tachyonFecDynamic,
+        fecGroupTimeoutMs: runtimeSettings.tachyonFecGroupTimeoutMs,
+        fecParityShards: runtimeSettings.tachyonFecParityShards,
         grpcListen: runtimeSettings.tachyonGrpcListen,
         grpcPort: runtimeSettings.tachyonGrpcPort,
         ipcListen: runtimeSettings.tachyonIpcListen,
@@ -3275,6 +3293,64 @@ function SettingsView({
                   </div>
                 </label>
                 <label>
+                  <span>{ui.tachyonFecShards}</span>
+                  <div className="input-pair">
+                    <input
+                      min={1}
+                      max={32}
+                      type="number"
+                      value={runtimeInputs.tachyonFecDataShards}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({
+                          ...current,
+                          tachyonFecDataShards: Number(event.target.value),
+                        }))
+                      }
+                    />
+                    <input
+                      min={0}
+                      max={32}
+                      type="number"
+                      value={runtimeInputs.tachyonFecParityShards}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({
+                          ...current,
+                          tachyonFecParityShards: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </div>
+                </label>
+                <label>
+                  <span>{ui.tachyonFecTiming}</span>
+                  <div className="input-pair">
+                    <input
+                      min={1}
+                      max={1000}
+                      type="number"
+                      value={runtimeInputs.tachyonFecGroupTimeoutMs}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({
+                          ...current,
+                          tachyonFecGroupTimeoutMs: Number(event.target.value),
+                        }))
+                      }
+                    />
+                    <input
+                      min={1}
+                      max={10000}
+                      type="number"
+                      value={runtimeInputs.tachyonFecAdaptWindow}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({
+                          ...current,
+                          tachyonFecAdaptWindow: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </div>
+                </label>
+                <label>
                   <span>Telemetry</span>
                   <div className="input-pair">
                     <input
@@ -3303,6 +3379,22 @@ function SettingsView({
                       Xray Stats
                     </label>
                   </div>
+                </label>
+                <label className="wide-field">
+                  <span>{ui.tachyonAdaptiveFec}</span>
+                  <label className="mini-check">
+                    <input
+                      checked={runtimeInputs.tachyonFecDynamic}
+                      type="checkbox"
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({
+                          ...current,
+                          tachyonFecDynamic: event.target.checked,
+                        }))
+                      }
+                    />
+                    {ui.tachyonAdaptiveFecDesc}
+                  </label>
                 </label>
               </div>
               <div className="runtime-grid">

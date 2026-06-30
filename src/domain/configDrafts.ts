@@ -17,6 +17,11 @@ export interface XrayClientDraftOptions {
 export type XrayRoutingMode = "direct" | "global" | "rule";
 
 export interface CoreClientDraftOptions {
+  fecAdaptWindow?: number;
+  fecDataShards?: number;
+  fecDynamic?: boolean;
+  fecGroupTimeoutMs?: number;
+  fecParityShards?: number;
   gameProfiles?: GameProfile[];
   launchers?: LauncherSettings;
   grpcListen?: string;
@@ -151,11 +156,11 @@ export function buildCoreClientConfigDraft(
     },
     tgp: {
       fec: {
-        data_shards: 4,
-        parity_shards: 2,
-        group_timeout: "20ms",
-        dynamic: true,
-        adapt_window: 32,
+        data_shards: options.fecDataShards ?? 4,
+        parity_shards: options.fecParityShards ?? 2,
+        group_timeout: `${options.fecGroupTimeoutMs ?? 20}ms`,
+        dynamic: options.fecDynamic ?? true,
+        adapt_window: options.fecAdaptWindow ?? 32,
       },
       pacing: {
         initial_rate_pps: 128,

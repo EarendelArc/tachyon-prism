@@ -44,6 +44,16 @@ struct RuntimeSettings {
     #[serde(default)]
     xray_binary_path: String,
     #[serde(default)]
+    tachyon_fec_adapt_window: u32,
+    #[serde(default)]
+    tachyon_fec_data_shards: u32,
+    #[serde(default = "default_true")]
+    tachyon_fec_dynamic: bool,
+    #[serde(default)]
+    tachyon_fec_group_timeout_ms: u32,
+    #[serde(default)]
+    tachyon_fec_parity_shards: u32,
+    #[serde(default)]
     tachyon_server_address: String,
     #[serde(default)]
     tachyon_tgp_server_address: String,
@@ -1967,6 +1977,31 @@ fn normalize_runtime_settings(
             defaults.tachyon_core_binary_path,
         ),
         xray_binary_path: non_empty_or(settings.xray_binary_path, defaults.xray_binary_path),
+        tachyon_fec_adapt_window: bounded_u32_or(
+            settings.tachyon_fec_adapt_window,
+            defaults.tachyon_fec_adapt_window,
+            1,
+            10000,
+        ),
+        tachyon_fec_data_shards: bounded_u32_or(
+            settings.tachyon_fec_data_shards,
+            defaults.tachyon_fec_data_shards,
+            1,
+            32,
+        ),
+        tachyon_fec_dynamic: settings.tachyon_fec_dynamic,
+        tachyon_fec_group_timeout_ms: bounded_u32_or(
+            settings.tachyon_fec_group_timeout_ms,
+            defaults.tachyon_fec_group_timeout_ms,
+            1,
+            1000,
+        ),
+        tachyon_fec_parity_shards: bounded_u32_or(
+            settings.tachyon_fec_parity_shards,
+            defaults.tachyon_fec_parity_shards,
+            0,
+            32,
+        ),
         tachyon_server_address: non_empty_or(
             settings.tachyon_server_address,
             defaults.tachyon_server_address,
@@ -2022,6 +2057,11 @@ fn default_runtime_settings(app: &tauri::AppHandle) -> Result<RuntimeSettings, S
         tachyon_ipc_port: 55123,
         tachyon_core_binary_path: paths.tachyon_core_binary_path,
         xray_binary_path: paths.xray_binary_path,
+        tachyon_fec_adapt_window: 32,
+        tachyon_fec_data_shards: 4,
+        tachyon_fec_dynamic: true,
+        tachyon_fec_group_timeout_ms: 20,
+        tachyon_fec_parity_shards: 2,
         tachyon_server_address: String::new(),
         tachyon_tgp_server_address: String::new(),
         tachyon_telemetry_interval_ms: 500,
@@ -2038,6 +2078,10 @@ fn default_runtime_settings(app: &tauri::AppHandle) -> Result<RuntimeSettings, S
         xray_stats_port: 10085,
         xray_release_channel: "stable".to_string(),
     })
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn normalize_release_channel(value: String, fallback: String) -> String {
@@ -3501,6 +3545,16 @@ mod tests {
         assert_eq!(bounded_u32_or(250, 500, 100, 10000), 250);
         assert_eq!(bounded_u32_or(50, 500, 100, 10000), 500);
         assert_eq!(bounded_u32_or(20000, 500, 100, 10000), 500);
+    }
+
+    #[test]
+    fn serde_defaults_enable_adaptive_tachyon_fec() {
+        let missing: RuntimeSettings = serde_json::from_str("{}").expect("settings");
+        assert!(missing.tachyon_fec_dynamic);
+
+        let disabled: RuntimeSettings =
+            serde_json::from_str(r#"{"tachyonFecDynamic":false}"#).expect("settings");
+        assert!(!disabled.tachyon_fec_dynamic);
     }
 
     #[test]

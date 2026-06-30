@@ -295,6 +295,11 @@ describe("buildCoreClientConfigDraft", () => {
       grpcPort: 50052,
       ipcListen: "127.0.0.6",
       ipcPort: 55124,
+      fecAdaptWindow: 48,
+      fecDataShards: 6,
+      fecDynamic: false,
+      fecGroupTimeoutMs: 35,
+      fecParityShards: 3,
       telemetryIntervalMs: 250,
       tunAddress: "198.19.0.1/16",
       tunMtu: 8500,
@@ -302,12 +307,21 @@ describe("buildCoreClientConfigDraft", () => {
     const client = config.client as Record<string, unknown>;
     const tun = client.tun as Record<string, unknown>;
     const ipc = config.ipc as Record<string, unknown>;
+    const tgp = config.tgp as Record<string, unknown>;
+    const fec = tgp.fec as Record<string, unknown>;
 
     expect(tun.address).toBe("198.19.0.1/16");
     expect(tun.mtu).toBe(8500);
     expect(ipc.websocket_addr).toBe("127.0.0.6:55124");
     expect(ipc.grpc_addr).toBe("127.0.0.5:50052");
     expect(ipc.telemetry_interval_ms).toBe(250);
+    expect(fec).toMatchObject({
+      data_shards: 6,
+      parity_shards: 3,
+      group_timeout: "35ms",
+      dynamic: false,
+      adapt_window: 48,
+    });
   });
 
   it("uses default launcher settings when not provided", () => {
