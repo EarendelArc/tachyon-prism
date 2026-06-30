@@ -793,7 +793,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         assert_contains(text, "插件中心", "滚动发行", "节点转换")
         assert_no_runtime_error(text)
         text = install_and_run_plugin(cdp, "节点智能切换")
-        assert_contains(text, "已启用", "运行次数: 1", "switched to")
+        assert_contains(text, "已启用", "运行次数: 1", "->")
         assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "plugins-desktop.png")
 

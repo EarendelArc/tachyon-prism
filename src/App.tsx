@@ -320,6 +320,7 @@ const zh = {
   pluginRollingTitle: "滚动发行",
   pluginRunCount: "运行次数",
   pluginSettings: "插件设置",
+  pluginSourceBundled: "内置插件，随 Prism 一起发布",
   pluginStatsDesc: "高效流量统计插件，支持按域名、进程聚合。",
   pluginStatsSnapshot: "Xray ↑{xrayUp} ↓{xrayDown} / Tachyon ↑{tachyonUp} ↓{tachyonDown}",
   pluginStatsTitle: "流量统计",
@@ -500,6 +501,7 @@ const en: typeof zh = {
   pluginRollingTitle: "Rolling Release",
   pluginRunCount: "Runs",
   pluginSettings: "Plugin Settings",
+  pluginSourceBundled: "Built-in plugin bundled with Prism",
   pluginStatsDesc: "Efficient traffic statistics by domain and process.",
   pluginStatsSnapshot: "Xray ↑{xrayUp} ↓{xrayDown} / Tachyon ↑{tachyonUp} ↓{tachyonDown}",
   pluginStatsTitle: "Traffic Stats",
@@ -1425,6 +1427,10 @@ export function App() {
     setMessage(ui.pluginUpdatesChecked);
   }
 
+  function showPluginSource(pluginTitle: string) {
+    setMessage(`${pluginTitle}: ${ui.pluginSourceBundled}`);
+  }
+
   async function runPlugin(pluginId: string, pluginTitle: string) {
     try {
       if (pluginId === "rolling-release") {
@@ -2289,6 +2295,7 @@ export function App() {
             onInstallAll={installAllPlugins}
             onInstall={installPlugin}
             onRun={runPlugin}
+            onSource={showPluginSource}
             onToggle={togglePlugin}
             pluginState={pluginState}
             ui={ui}
@@ -2965,6 +2972,7 @@ function PluginsView({
   onInstall,
   onInstallAll,
   onRun,
+  onSource,
   onToggle,
   pluginState,
   ui,
@@ -2973,6 +2981,7 @@ function PluginsView({
   onInstall: (pluginId: string, pluginTitle: string) => void;
   onInstallAll: () => void;
   onRun: (pluginId: string, pluginTitle: string) => void;
+  onSource: (pluginTitle: string) => void;
   onToggle: (pluginId: string, pluginTitle: string) => void;
   pluginState: PluginStateSnapshot;
   ui: typeof zh;
@@ -3070,7 +3079,9 @@ function PluginsView({
                 <strong>{state.lastResult || ui.pluginNoResult}</strong>
               </div>
               <footer>
-                <a href="#source">{ui.source}</a>
+                <button className="link-button" type="button" onClick={() => onSource(plugin.title)}>
+                  {ui.source}
+                </button>
                 <div className="row-actions">
                   {state.installed ? (
                     <button type="button" onClick={() => onToggle(plugin.id, plugin.title)}>

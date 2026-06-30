@@ -131,6 +131,23 @@ a {
   text-decoration: none;
 }
 
+.link-button {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  color: #178bff;
+  min-height: 0;
+  padding: 0;
+}
+
+.link-button:hover {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: #66b6ff;
+  transform: none;
+}
+
 .prism-shell {
   background: #070909;
   border: 1px solid rgba(255, 255, 255, 0.16);
