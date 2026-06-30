@@ -50,6 +50,7 @@ input,
 select,
 textarea {
   font: inherit;
+  -webkit-app-region: no-drag;
 }
 
 button {
@@ -156,12 +157,14 @@ a {
   flex: 0 1 auto;
   gap: 9px;
   min-width: 0;
+  -webkit-app-region: drag;
 }
 
 .title-drag-fill {
   align-self: stretch;
   flex: 1 1 auto;
   min-width: 12px;
+  -webkit-app-region: drag;
 }
 
 .title-left strong {
