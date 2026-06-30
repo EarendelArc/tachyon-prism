@@ -388,12 +388,37 @@ proxy-groups:
         headers: { Host: "cdn.example.com" },
       },
     });
+    expect(nodes[0].outbound?.settings).toMatchObject({
+      vnext: [
+        {
+          address: "vless.example.com",
+          port: 443,
+          users: [
+            {
+              id: "vless-uuid",
+              encryption: "none",
+              flow: "xtls-rprx-vision",
+            },
+          ],
+        },
+      ],
+    });
     expect(nodes[1]).toMatchObject({
       name: "Clash SS",
       protocol: "shadowsocks",
       address: "ss.example.com",
       port: 8388,
       credential: "2022-blake3-aes-128-gcm:ss-secret",
+    });
+    expect(nodes[1].outbound?.settings).toMatchObject({
+      servers: [
+        {
+          address: "ss.example.com",
+          port: 8388,
+          method: "2022-blake3-aes-128-gcm",
+          password: "ss-secret",
+        },
+      ],
     });
   });
 

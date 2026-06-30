@@ -432,33 +432,57 @@ function clashOutboundSettings(
 ): Record<string, unknown> {
   switch (protocol) {
     case "vless":
-      return compactRecord({
-        address,
-        port,
-        id: clashValue(record, ["uuid", "id"]),
-        encryption: clashValue(record, ["encryption"]) || "none",
-        flow: clashValue(record, ["flow"]),
-      });
+      return {
+        vnext: [
+          {
+            address,
+            port,
+            users: [
+              compactRecord({
+                id: clashValue(record, ["uuid", "id"]),
+                encryption: clashValue(record, ["encryption"]) || "none",
+                flow: clashValue(record, ["flow"]),
+              }),
+            ],
+          },
+        ],
+      };
     case "vmess":
-      return compactRecord({
-        address,
-        port,
-        id: clashValue(record, ["uuid", "id"]),
-        security: clashValue(record, ["cipher", "security"]) || "auto",
-      });
+      return {
+        vnext: [
+          {
+            address,
+            port,
+            users: [
+              compactRecord({
+                id: clashValue(record, ["uuid", "id"]),
+                security: clashValue(record, ["cipher", "security"]) || "auto",
+              }),
+            ],
+          },
+        ],
+      };
     case "trojan":
-      return compactRecord({
-        address,
-        port,
-        password: clashValue(record, ["password"]),
-      });
+      return {
+        servers: [
+          compactRecord({
+            address,
+            port,
+            password: clashValue(record, ["password"]),
+          }),
+        ],
+      };
     case "shadowsocks":
-      return compactRecord({
-        address,
-        port,
-        method: clashValue(record, ["cipher", "method"]),
-        password: clashValue(record, ["password"]),
-      });
+      return {
+        servers: [
+          compactRecord({
+            address,
+            port,
+            method: clashValue(record, ["cipher", "method"]),
+            password: clashValue(record, ["password"]),
+          }),
+        ],
+      };
     case "hysteria":
       return compactRecord({
         version: clashValue(record, ["type"]).toLowerCase() === "hysteria" ? 1 : 2,
@@ -467,13 +491,17 @@ function clashOutboundSettings(
         auth: clashValue(record, ["auth", "auth-str", "password"]),
       });
     case "socks":
-    case "http":
-      return compactRecord({
-        address,
-        port,
-        user: clashValue(record, ["username", "user"]),
-        pass: clashValue(record, ["password", "pass"]),
-      });
+    case "http": {
+      const user = clashValue(record, ["username", "user"]);
+      const pass = clashValue(record, ["password", "pass"]);
+      const server: Record<string, unknown> = { address, port };
+      if (user) {
+        server.users = [compactRecord({ user, pass })];
+      }
+      return {
+        servers: [compactRecord(server)],
+      };
+    }
     case "wireguard":
       return compactRecord({
         secretKey: clashValue(record, ["private-key", "secret-key", "secretKey"]),
