@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
@@ -331,6 +335,33 @@ describe("buildCoreClientConfigDraft", () => {
     const launchers = routing.launchers as LauncherSettings;
     expect(launchers.steam.enabled).toBe(true);
     expect(launchers.steam.trackChildProcesses).toBe(true);
+  });
+
+  const coreBinaryPath = process.env.TACHYON_CORE_BINARY_PATH?.trim();
+  const itWithCore = coreBinaryPath ? it : it.skip;
+
+  itWithCore("generates config accepted by the Tachyon Core binary", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "tachyon-prism-core-contract-"));
+    const configPath = join(tempDir, "client.json");
+    try {
+      writeFileSync(
+        configPath,
+        stringifyDraft(
+          buildCoreClientConfigDraft({
+            ...mockCoreOptions,
+            gameProfiles: mockProfiles,
+          }),
+        ),
+        "utf8",
+      );
+      const output = execFileSync(coreBinaryPath ?? "", ["validate", "--config", configPath], {
+        encoding: "utf8",
+        timeout: 8000,
+      });
+      expect(output).toContain("is valid");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });
 

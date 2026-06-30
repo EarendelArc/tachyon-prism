@@ -13,6 +13,8 @@ All notable changes to Tachyon Prism will be documented in this file.
   data shards, parity shards, group timeout, adaptive FEC, and adaptation window.
 - Live subscription smoke test gated by `TACHYON_LIVE_SUBSCRIPTION_URL` so real
   subscription parsing can be verified without exposing node details in logs.
+- Optional Prism/Core config contract test gated by `TACHYON_CORE_BINARY_PATH`,
+  validating generated Tachyon Core client JSON with the real Core binary.
 - GitHub Actions release workflow for unsigned Prism desktop bundles on Windows
   x64, Windows ARM64, macOS x64, macOS ARM64, Linux x64, and Linux ARM64.
 - Real-time telemetry client consuming Core SSE stream (`src/domain/telemetry.ts`).
@@ -32,8 +34,9 @@ All notable changes to Tachyon Prism will be documented in this file.
   visible console window appears in native smoke tests.
 
 ### Verified
-- Real subscription URL smoke test, default frontend tests, TypeScript
-  typecheck, Vite production build, native window smoke, and UI screenshot smoke.
+- Real subscription URL smoke test, Prism/Core config contract test, default
+  frontend tests, TypeScript typecheck, Vite production build, native window
+  smoke, and UI screenshot smoke.
 
 ## [v0.1.0-alpha.1]
 
