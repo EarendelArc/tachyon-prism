@@ -36,6 +36,7 @@ import {
   installLatestTachyonCore,
   installLatestXray,
   installManagedBinary,
+  installWintunSidecar,
   saveRuntimeSettings,
   startTachyonCore,
   startXray,
@@ -217,6 +218,7 @@ const zh = {
   import: "导入",
   install: "安装",
   installLatest: "安装最新版",
+  installWintun: "安装 Wintun",
   language: "语言",
   launchers: "启动器",
   list: "列表",
@@ -382,6 +384,7 @@ const en: typeof zh = {
   import: "Import",
   install: "Install",
   installLatest: "Install Latest",
+  installWintun: "Install Wintun",
   language: "Language",
   launchers: "Launchers",
   list: "List",
@@ -1585,6 +1588,22 @@ export function App() {
     }
   }
 
+  async function installWintun() {
+    try {
+      setBinaryBusy(true);
+      const settings = await saveRuntimeSettings(runtimeInputs);
+      setRuntimeInputs(settings);
+      const inventory = await installWintunSidecar();
+      setManagedBinaries(inventory);
+      setRuntimeInputs(inventory.runtimeSettings);
+      setMessage("wintun.dll installed");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Wintun install failed");
+    } finally {
+      setBinaryBusy(false);
+    }
+  }
+
   async function refreshRuntime() {
     try {
       const status = await getRuntimeStatus();
@@ -2175,6 +2194,7 @@ export function App() {
             onAddSuggestion={(profile) => void addSuggestion(profile)}
             onCheckLatest={(kind) => void checkLatestRelease(kind)}
             onDownloadLatest={(kind) => void downloadLatestRelease(kind)}
+            onInstallWintun={() => void installWintun()}
             onRefreshBinaries={() => void refreshManagedBinaries()}
             onRemoveProfile={(id) => void removeProfile(id)}
             onSaveDrafts={() => void saveDrafts()}
@@ -2971,6 +2991,7 @@ function SettingsView({
   onAddSuggestion,
   onCheckLatest,
   onDownloadLatest,
+  onInstallWintun,
   onRefreshBinaries,
   onRemoveProfile,
   onSaveDrafts,
@@ -3018,6 +3039,7 @@ function SettingsView({
   onAddSuggestion: (profile: GameProfile) => void;
   onCheckLatest: (kind: ManagedBinaryKind) => void;
   onDownloadLatest: (kind: ManagedBinaryKind) => void;
+  onInstallWintun: () => void;
   onRefreshBinaries: () => void;
   onRemoveProfile: (id: string) => void;
   onSaveDrafts: () => void;
@@ -3466,6 +3488,13 @@ function SettingsView({
                 {managedBinaryKinds.map((kind) => {
                   const binary = binaryInfo(kind);
                   const release = binaryReleases[kind];
+                  const sidecars = binary?.sidecarDependencies ?? [];
+                  const missingWintun = sidecars.some(
+                    (dependency) =>
+                      dependency.required &&
+                      !dependency.exists &&
+                      dependency.name.toLowerCase() === "wintun.dll",
+                  );
                   return (
                     <div className="binary-row" key={kind}>
                       <div className="binary-meta">
@@ -3473,6 +3502,14 @@ function SettingsView({
                         <span>{binary ? managedStatusLabel(binary) : "inventory unavailable"}</span>
                         {binary ? <span>{configuredStatusLabel(binary)}</span> : null}
                         {binary ? <span>{binary.targetPath}</span> : null}
+                        {sidecars.map((dependency) => (
+                          <span
+                            className={dependency.exists ? "sidecar-status ok" : "sidecar-status missing"}
+                            key={`${kind}-${dependency.name}`}
+                          >
+                            {dependency.name}: {dependency.exists ? "OK" : `Missing ${dependency.path}`}
+                          </span>
+                        ))}
                         {release ? (
                           <span>Latest {release.tagName}: {release.assetName} / {formatBytesFn(release.assetSizeBytes)}</span>
                         ) : null}
@@ -3503,6 +3540,9 @@ function SettingsView({
                         <button type="button" onClick={() => onUseManaged(kind)}>{ui.useManaged}</button>
                         <button disabled={binaryBusy} type="button" onClick={() => onCheckLatest(kind)}>{ui.checkLatest}</button>
                         <button disabled={binaryBusy} type="button" onClick={() => onDownloadLatest(kind)}>{ui.installLatest}</button>
+                        {kind === "tachyonCore" && missingWintun ? (
+                          <button disabled={binaryBusy} type="button" onClick={onInstallWintun}>{ui.installWintun}</button>
+                        ) : null}
                       </div>
                     </div>
                   );

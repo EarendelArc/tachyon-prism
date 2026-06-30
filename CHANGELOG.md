@@ -17,6 +17,8 @@ All notable changes to Tachyon Prism will be documented in this file.
   validating generated Tachyon Core client JSON with the real Core binary.
 - Runtime switches for Tachyon Core TUN auto-route and DNS hijack generation,
   both defaulting off for TGP-only safe mode.
+- Windows Wintun sidecar installer for Tachyon Core, including SHA-256
+  verification and per-architecture `wintun.dll` extraction.
 - GitHub Actions release workflow for unsigned Prism desktop bundles on Windows
   x64, Windows ARM64, macOS x64, macOS ARM64, Linux x64, and Linux ARM64.
 - Real-time telemetry client consuming Core SSE stream (`src/domain/telemetry.ts`).

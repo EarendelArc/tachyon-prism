@@ -204,6 +204,10 @@ export async function installLatestTachyonCore(): Promise<RuntimeInstallResult> 
   return invokeDesktop<RuntimeInstallResult>("install_latest_tachyon_core");
 }
 
+export async function installWintunSidecar(): Promise<ManagedBinaryInventory> {
+  return invokeDesktop<ManagedBinaryInventory>("install_wintun_sidecar");
+}
+
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
   if (!isTauriRuntime()) {
     return previewRuntimeStatus();

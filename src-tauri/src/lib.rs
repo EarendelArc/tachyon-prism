@@ -236,6 +236,11 @@ struct SystemProxyState {
     error: Option<String>,
 }
 
+const WINTUN_VERSION: &str = "0.14.1";
+const WINTUN_ARCHIVE_NAME: &str = "wintun-0.14.1.zip";
+const WINTUN_DOWNLOAD_URL: &str = "https://www.wintun.net/builds/wintun-0.14.1.zip";
+const WINTUN_SHA256: &str = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51";
+
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct MatchRule {
@@ -504,6 +509,11 @@ fn install_latest_tachyon_core(app: tauri::AppHandle) -> Result<RuntimeInstallRe
 }
 
 #[tauri::command]
+fn install_wintun_sidecar(app: tauri::AppHandle) -> Result<ManagedBinaryInventory, String> {
+    install_wintun_sidecar_file(&app)
+}
+
+#[tauri::command]
 fn fetch_subscription_text(source_url: String) -> Result<String, String> {
     let url = clean_url_input(&source_url);
     if url.is_empty() {
@@ -697,6 +707,7 @@ fn start_xray(
         .map_err(|err| format!("lock runtime state: {err}"))?;
     processes.xray.start(
         "xray",
+        ManagedBinaryKind::Xray,
         binary_path,
         config_path.clone(),
         &["run", "-config", &config_path],
@@ -724,6 +735,7 @@ fn start_tachyon_core(
         .map_err(|err| format!("lock runtime state: {err}"))?;
     processes.tachyon_core.start(
         "tachyon-core",
+        ManagedBinaryKind::TachyonCore,
         binary_path,
         config_path.clone(),
         &["run", "--config", &config_path],
@@ -2334,6 +2346,47 @@ fn install_release_archive(
     })
 }
 
+fn install_wintun_sidecar_file(app: &tauri::AppHandle) -> Result<ManagedBinaryInventory, String> {
+    let entry_path = wintun_archive_dll_path()?;
+    let settings = load_runtime_settings(app)?;
+    let binary_path = clean_path_input(&settings.tachyon_core_binary_path);
+    let tachyon_core_path = if binary_path.is_empty() {
+        managed_binary_target(app, ManagedBinaryKind::TachyonCore)?
+    } else {
+        PathBuf::from(binary_path)
+    };
+    let dependency = sidecar_dependencies(ManagedBinaryKind::TachyonCore, &tachyon_core_path)
+        .into_iter()
+        .find(|dep| dep.name.eq_ignore_ascii_case("wintun.dll"))
+        .ok_or_else(|| "wintun.dll is only required on Windows".to_string())?;
+    let target = PathBuf::from(clean_path_input(&dependency.path));
+    let download_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|err| format!("resolve app config directory: {err}"))?
+        .join("downloads")
+        .join("wintun")
+        .join(WINTUN_VERSION);
+    fs::create_dir_all(&download_dir).map_err(|err| {
+        format!(
+            "create Wintun download directory {}: {err}",
+            download_dir.display()
+        )
+    })?;
+
+    let archive_path = download_dir.join(WINTUN_ARCHIVE_NAME);
+    download_to_file(WINTUN_DOWNLOAD_URL, &archive_path)?;
+    let actual_sha256 = sha256_file(&archive_path)?;
+    if !actual_sha256.eq_ignore_ascii_case(WINTUN_SHA256) {
+        return Err(format!(
+            "checksum mismatch for {WINTUN_ARCHIVE_NAME}: expected {WINTUN_SHA256}, got {actual_sha256}"
+        ));
+    }
+
+    extract_zip_entry_to_file(&archive_path, entry_path, &target)?;
+    Ok(managed_binary_inventory(app)?)
+}
+
 fn xray_release_info(release: GithubRelease) -> Result<RuntimeReleaseInfo, String> {
     let marker = xray_platform_asset_marker()?;
     let asset = release
@@ -2486,6 +2539,17 @@ fn tachyon_core_platform_asset_marker() -> Result<&'static str, String> {
         ("macos", "x86_64") => Ok("darwin_amd64"),
         ("macos", "aarch64") => Ok("darwin_arm64"),
         (os, arch) => Err(format!("unsupported Tachyon Core platform: {os}/{arch}")),
+    }
+}
+
+fn wintun_archive_dll_path() -> Result<&'static str, String> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86") => Ok("wintun/bin/x86/wintun.dll"),
+        ("windows", "x86_64") => Ok("wintun/bin/amd64/wintun.dll"),
+        ("windows", "aarch64") => Ok("wintun/bin/arm64/wintun.dll"),
+        ("windows", "arm") => Ok("wintun/bin/arm/wintun.dll"),
+        ("windows", arch) => Err(format!("unsupported Wintun platform: windows/{arch}")),
+        (os, _) => Err(format!("Wintun is not required on {os}")),
     }
 }
 
@@ -2647,6 +2711,50 @@ fn extract_binary_from_zip(
     ))
 }
 
+fn extract_zip_entry_to_file(
+    archive_path: &Path,
+    entry_path: &str,
+    target: &Path,
+) -> Result<(), String> {
+    let archive_file = fs::File::open(archive_path)
+        .map_err(|err| format!("open archive {}: {err}", archive_path.display()))?;
+    let mut archive = zip::ZipArchive::new(archive_file)
+        .map_err(|err| format!("read archive {}: {err}", archive_path.display()))?;
+    let temp_path = target.with_extension("extract.tmp");
+    let normalized_entry = entry_path.replace('\\', "/");
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|err| format!("read archive entry {index}: {err}"))?;
+        let entry_name = entry.name().replace('\\', "/");
+        if !entry_name.eq_ignore_ascii_case(&normalized_entry) {
+            continue;
+        }
+
+        let parent = target
+            .parent()
+            .ok_or_else(|| "sidecar target has no parent".to_string())?;
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("create sidecar directory {}: {err}", parent.display()))?;
+        let mut output = fs::File::create(&temp_path)
+            .map_err(|err| format!("create {}: {err}", temp_path.display()))?;
+        io::copy(&mut entry, &mut output)
+            .map_err(|err| format!("extract {}: {err}", temp_path.display()))?;
+        if target.exists() {
+            fs::remove_file(target)
+                .map_err(|err| format!("replace {}: {err}", target.display()))?;
+        }
+        return fs::rename(&temp_path, target)
+            .map_err(|err| format!("move {}: {err}", target.display()));
+    }
+
+    Err(format!(
+        "{entry_path} not found in {}",
+        archive_path.display()
+    ))
+}
+
 fn sanitize_file_component(input: &str) -> String {
     let sanitized = input
         .chars()
@@ -2780,6 +2888,7 @@ impl ManagedProcess {
     fn start(
         &mut self,
         label: &str,
+        kind: ManagedBinaryKind,
         binary_path: String,
         config_path: String,
         args: &[&str],
@@ -2797,6 +2906,7 @@ impl ManagedProcess {
         if !config.is_file() {
             return Err(format!("{label} config not found: {}", config.display()));
         }
+        validate_process_start_inputs(label, kind, &binary, &config)?;
 
         let mut command = Command::new(&binary);
         command.args(args);
@@ -2875,6 +2985,29 @@ impl ManagedProcess {
             last_error: self.last_error.clone(),
         }
     }
+}
+
+fn validate_process_start_inputs(
+    label: &str,
+    kind: ManagedBinaryKind,
+    binary: &Path,
+    config: &Path,
+) -> Result<(), String> {
+    if !binary.is_file() {
+        return Err(format!("{label} binary not found: {}", binary.display()));
+    }
+    if !config.is_file() {
+        return Err(format!("{label} config not found: {}", config.display()));
+    }
+    for dep in sidecar_dependencies(kind, binary) {
+        if dep.required && !dep.exists {
+            return Err(format!(
+                "{label} dependency missing: {} at {}",
+                dep.name, dep.path
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn now_epoch_seconds() -> u64 {
@@ -3473,6 +3606,83 @@ mod tests {
     }
 
     #[test]
+    fn start_input_validation_checks_required_sidecars() {
+        let dir = std::env::temp_dir().join("tachyon-test-start-inputs");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join(binary_name("tachyon-core"));
+        let config = dir.join("client.json");
+        std::fs::write(&binary, b"binary").unwrap();
+        std::fs::write(&config, b"{}").unwrap();
+
+        let result = validate_process_start_inputs(
+            "tachyon-core",
+            ManagedBinaryKind::TachyonCore,
+            &binary,
+            &config,
+        );
+
+        if cfg!(target_os = "windows") {
+            let err = result.expect_err("missing wintun.dll must block Windows startup");
+            assert!(err.contains("wintun.dll"), "unexpected error: {err}");
+            std::fs::write(dir.join("wintun.dll"), b"wintun").unwrap();
+            validate_process_start_inputs(
+                "tachyon-core",
+                ManagedBinaryKind::TachyonCore,
+                &binary,
+                &config,
+            )
+            .expect("wintun.dll satisfies startup preflight");
+        } else {
+            result.expect("non-Windows Tachyon Core has no required sidecar");
+        }
+
+        validate_process_start_inputs("xray", ManagedBinaryKind::Xray, &binary, &config)
+            .expect("Xray does not require Tachyon sidecars");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wintun_archive_path_matches_current_platform() {
+        let result = wintun_archive_dll_path();
+        if cfg!(target_os = "windows") {
+            let path = result.expect("Windows must have a Wintun archive path");
+            assert!(path.starts_with("wintun/bin/"));
+            assert!(path.ends_with("/wintun.dll"));
+        } else {
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn extracts_exact_zip_entry_to_file() {
+        use zip::write::SimpleFileOptions;
+
+        let dir = std::env::temp_dir().join("tachyon-test-zip-entry");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join("sidecars.zip");
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("wintun/bin/x86/wintun.dll", options)
+            .unwrap();
+        zip.write_all(b"x86").unwrap();
+        zip.start_file("wintun/bin/amd64/wintun.dll", options)
+            .unwrap();
+        zip.write_all(b"amd64").unwrap();
+        zip.finish().unwrap();
+
+        let target = dir.join("wintun.dll");
+        extract_zip_entry_to_file(&archive, "wintun/bin/amd64/wintun.dll", &target)
+            .expect("extract exact entry");
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"amd64");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn push_unique_path_adds_when_empty() {
         let mut paths = Vec::new();
         push_unique_path(&mut paths, PathBuf::from("/tmp/a"));
@@ -3835,6 +4045,7 @@ pub fn run() {
             install_latest_xray,
             latest_tachyon_core_release,
             install_latest_tachyon_core,
+            install_wintun_sidecar,
             fetch_subscription_text,
             runtime_status,
             runtime_privilege_status,

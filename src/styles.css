@@ -1261,6 +1261,23 @@ p,
   grid-column: 1 / -1;
 }
 
+.sidecar-status {
+  border-radius: 6px;
+  display: inline-flex;
+  padding: 4px 7px;
+  width: fit-content;
+}
+
+.sidecar-status.ok {
+  background: rgba(35, 197, 126, 0.12);
+  color: #59d99a;
+}
+
+.sidecar-status.missing {
+  background: rgba(255, 88, 72, 0.14);
+  color: #ff8b82;
+}
+
 .inline-select {
   align-items: center;
   display: grid;
