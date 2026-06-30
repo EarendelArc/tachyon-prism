@@ -5,6 +5,7 @@ import {
   createSubscriptionSnapshot,
   loadSubscriptionSnapshot,
   parseSubscription,
+  parseSubscriptionWithReport,
   removeSubscription,
   selectSubscription,
   selectSubscriptionNode,
@@ -519,6 +520,43 @@ proxy-groups:
     const uri = "# This is a comment\nvless://uuid@10.0.0.1:443";
     const nodes = parseSubscription(uri);
     expect(nodes).toHaveLength(1);
+  });
+
+  it("reports unsupported, invalid, and duplicate subscription entries", () => {
+    const payload = [
+      "vless://uuid@example.com:443?encryption=none#Node",
+      "vless://uuid@example.com:443?encryption=none#Node",
+      "tuic://token@example.com:443#Unsupported",
+      "ssr://legacy",
+      "not-a-node",
+    ].join("\n");
+
+    const report = parseSubscriptionWithReport(payload);
+
+    expect(report.nodes).toHaveLength(1);
+    expect(report.totalEntries).toBe(5);
+    expect(report.skippedEntries).toBe(3);
+    expect(report.invalidEntries).toBe(1);
+    expect(report.duplicateNodes).toBe(1);
+    expect(report.unsupportedProtocols).toEqual({
+      ssr: 1,
+      tuic: 1,
+    });
+  });
+
+  it("reports unsupported Clash/Mihomo proxy protocols", () => {
+    const payload = `
+proxies:
+  - { name: OK, type: vless, server: ok.example.com, port: 443, uuid: uuid }
+  - { name: TUIC, type: tuic, server: tuic.example.com, port: 443, password: secret }
+`;
+
+    const report = parseSubscriptionWithReport(payload);
+
+    expect(report.nodes).toHaveLength(1);
+    expect(report.totalEntries).toBe(2);
+    expect(report.skippedEntries).toBe(1);
+    expect(report.unsupportedProtocols).toEqual({ tuic: 1 });
   });
 });
 

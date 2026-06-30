@@ -44,6 +44,15 @@ export interface ProxyNode {
   rawUri: string;
 }
 
+export interface SubscriptionParseReport {
+  nodes: ProxyNode[];
+  totalEntries: number;
+  skippedEntries: number;
+  invalidEntries: number;
+  duplicateNodes: number;
+  unsupportedProtocols: Record<string, number>;
+}
+
 export interface SubscriptionProfile {
   id: string;
   name: string;
@@ -118,11 +127,31 @@ export async function fetchSubscriptionText(sourceUrl: string): Promise<string> 
 }
 
 export function parseSubscription(input: string): ProxyNode[] {
+  return parseSubscriptionWithReport(input).nodes;
+}
+
+export function parseSubscriptionWithReport(input: string): SubscriptionParseReport {
   const seen = new Set<string>();
   const nodes: ProxyNode[] = [];
+  let parsedNodes = 0;
+  let bestDiagnostics = emptySubscriptionDiagnostics();
 
   for (const payload of subscriptionPayloadCandidates(input)) {
-    for (const node of parsePayload(payload)) {
+    const payloadNodes = parsePayload(payload);
+    const diagnostics = diagnosePayload(payload);
+    if (
+      payloadNodes.length > bestDiagnostics.parsedEntries ||
+      (payloadNodes.length === bestDiagnostics.parsedEntries &&
+        diagnostics.totalEntries > bestDiagnostics.totalEntries)
+    ) {
+      bestDiagnostics = {
+        ...diagnostics,
+        parsedEntries: payloadNodes.length,
+      };
+    }
+
+    for (const node of payloadNodes) {
+      parsedNodes += 1;
       if (seen.has(node.id)) {
         continue;
       }
@@ -131,7 +160,14 @@ export function parseSubscription(input: string): ProxyNode[] {
     }
   }
 
-  return nodes;
+  return {
+    nodes,
+    totalEntries: bestDiagnostics.totalEntries,
+    skippedEntries: bestDiagnostics.skippedEntries,
+    invalidEntries: bestDiagnostics.invalidEntries,
+    duplicateNodes: Math.max(0, parsedNodes - nodes.length),
+    unsupportedProtocols: bestDiagnostics.unsupportedProtocols,
+  };
 }
 
 export function createSubscriptionSnapshot(
@@ -310,6 +346,138 @@ function parsePayload(payload: string): ProxyNode[] {
     }
   }
   return nodes;
+}
+
+interface SubscriptionDiagnostics {
+  totalEntries: number;
+  skippedEntries: number;
+  invalidEntries: number;
+  parsedEntries: number;
+  unsupportedProtocols: Record<string, number>;
+}
+
+function emptySubscriptionDiagnostics(): SubscriptionDiagnostics {
+  return {
+    totalEntries: 0,
+    skippedEntries: 0,
+    invalidEntries: 0,
+    parsedEntries: 0,
+    unsupportedProtocols: {},
+  };
+}
+
+function diagnosePayload(payload: string): SubscriptionDiagnostics {
+  const jsonValue = parseJSON(payload);
+  if (jsonValue !== null) {
+    return diagnoseJSONPayload(jsonValue);
+  }
+
+  if (/^\s*proxies\s*:/m.test(payload)) {
+    return diagnoseClashPayload(payload);
+  }
+
+  return diagnoseLinePayload(payload);
+}
+
+function diagnoseJSONPayload(value: unknown): SubscriptionDiagnostics {
+  const diagnostics = emptySubscriptionDiagnostics();
+  const records = jsonOutboundRecords(value);
+  if (records.length === 0) {
+    diagnostics.totalEntries = 1;
+    diagnostics.invalidEntries = 1;
+    diagnostics.skippedEntries = 1;
+    return diagnostics;
+  }
+
+  diagnostics.totalEntries = records.length;
+  for (const record of records) {
+    const rawProtocol = stringValue(record.protocol);
+    const protocol = normalizeProtocol(rawProtocol);
+    if (protocol === "unknown" && rawProtocol !== "unknown") {
+      incrementProtocol(diagnostics.unsupportedProtocols, rawProtocol || "unknown");
+      diagnostics.skippedEntries += 1;
+      continue;
+    }
+    if (!nodeFromOutbound(record, JSON.stringify(record))) {
+      diagnostics.invalidEntries += 1;
+      diagnostics.skippedEntries += 1;
+    }
+  }
+  return diagnostics;
+}
+
+function diagnoseClashPayload(payload: string): SubscriptionDiagnostics {
+  const diagnostics = emptySubscriptionDiagnostics();
+  const records = parseClashProxyRecords(payload);
+  diagnostics.totalEntries = records.length;
+
+  for (const record of records) {
+    const rawProtocol = clashValue(record, ["type"]);
+    const protocol = normalizeProtocol(rawProtocol);
+    if (protocol === "unknown") {
+      incrementProtocol(diagnostics.unsupportedProtocols, rawProtocol || "unknown");
+      diagnostics.skippedEntries += 1;
+      continue;
+    }
+    if (!nodeFromClashProxy(record)) {
+      diagnostics.invalidEntries += 1;
+      diagnostics.skippedEntries += 1;
+    }
+  }
+
+  return diagnostics;
+}
+
+function diagnoseLinePayload(payload: string): SubscriptionDiagnostics {
+  const diagnostics = emptySubscriptionDiagnostics();
+  for (const line of payload.split(/\r?\n/)) {
+    const value = line.trim();
+    if (!value || value.startsWith("#")) {
+      continue;
+    }
+    diagnostics.totalEntries += 1;
+
+    if (parseJSONPayload(value).length > 0 || parseProxyUri(value)) {
+      continue;
+    }
+
+    const scheme = uriScheme(value);
+    if (scheme && normalizeProtocol(scheme) === "unknown") {
+      incrementProtocol(diagnostics.unsupportedProtocols, scheme);
+    } else {
+      diagnostics.invalidEntries += 1;
+    }
+    diagnostics.skippedEntries += 1;
+  }
+  return diagnostics;
+}
+
+function jsonOutboundRecords(value: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(value)) {
+    return value.flatMap(jsonOutboundRecords);
+  }
+  if (!isRecord(value)) {
+    return [];
+  }
+  if (Array.isArray(value.outbounds)) {
+    return value.outbounds.filter(isRecord);
+  }
+  if (isRecord(value.outbound)) {
+    return [value.outbound];
+  }
+  if (typeof value.protocol === "string") {
+    return [value];
+  }
+  return [];
+}
+
+function uriScheme(value: string): string {
+  return /^([a-z][a-z0-9+.-]*):\/\//i.exec(value)?.[1]?.toLowerCase() ?? "";
+}
+
+function incrementProtocol(protocols: Record<string, number>, protocol: string): void {
+  const key = protocol.trim().toLowerCase() || "unknown";
+  protocols[key] = (protocols[key] ?? 0) + 1;
 }
 
 function parseJSONPayload(payload: string): ProxyNode[] {

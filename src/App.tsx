@@ -64,16 +64,21 @@ import {
 import {
   activeSubscription,
   createSubscriptionSnapshot,
-  fetchSubscriptionNodes,
+  fetchSubscriptionText,
   loadSubscriptionSnapshot,
-  parseSubscription,
+  parseSubscriptionWithReport,
   removeSubscription,
   saveSubscriptionSnapshot,
   selectSubscription,
   selectSubscriptionNode,
   totalSubscriptionNodes,
 } from "./domain/subscriptions";
-import type { ProxyNode, SubscriptionProfile, SubscriptionSnapshot } from "./domain/subscriptions";
+import type {
+  ProxyNode,
+  SubscriptionParseReport,
+  SubscriptionProfile,
+  SubscriptionSnapshot,
+} from "./domain/subscriptions";
 import {
   createTranslator,
   loadLanguage,
@@ -341,8 +346,12 @@ const zh = {
   steamChildTracking: "Steam 子进程追踪",
   steamLauncherDetection: "Steam 启动器检测",
   steamRoot: "Steam 根目录",
+  subscriptionDuplicates: "重复节点 {count}",
+  subscriptionImportResult: "已导入 {count} 个节点",
   subscriptionName: "订阅名称",
   subscriptionPayload: "粘贴订阅内容",
+  subscriptionSkipped: "跳过 {count} 条",
+  subscriptionUnsupported: "不支持协议：{protocols}",
   subscriptionUrl: "订阅地址",
   systemProxy: "系统代理",
   theme: "主题",
@@ -507,8 +516,12 @@ const en: typeof zh = {
   steamChildTracking: "Steam child process tracking",
   steamLauncherDetection: "Steam launcher detection",
   steamRoot: "Steam root",
+  subscriptionDuplicates: "{count} duplicates",
+  subscriptionImportResult: "{count} nodes imported",
   subscriptionName: "Subscription name",
   subscriptionPayload: "Paste subscription payload",
+  subscriptionSkipped: "{count} skipped",
+  subscriptionUnsupported: "unsupported: {protocols}",
   subscriptionUrl: "Subscription URL",
   systemProxy: "System Proxy",
   theme: "Theme",
@@ -847,6 +860,34 @@ function emptyXrayTrafficStats(): XrayTrafficStats {
   };
 }
 
+async function fetchSubscriptionReport(sourceUrl: string): Promise<SubscriptionParseReport> {
+  return parseSubscriptionWithReport(await fetchSubscriptionText(sourceUrl));
+}
+
+function subscriptionImportMessage(report: SubscriptionParseReport, ui: typeof zh): string {
+  const parts = [
+    templateValue(ui.subscriptionImportResult, "count", String(report.nodes.length)),
+  ];
+  if (report.skippedEntries > 0) {
+    parts.push(templateValue(ui.subscriptionSkipped, "count", String(report.skippedEntries)));
+  }
+  if (report.duplicateNodes > 0) {
+    parts.push(templateValue(ui.subscriptionDuplicates, "count", String(report.duplicateNodes)));
+  }
+  const unsupported = Object.entries(report.unsupportedProtocols)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([protocol, count]) => `${protocol}×${count}`)
+    .join(", ");
+  if (unsupported) {
+    parts.push(templateValue(ui.subscriptionUnsupported, "protocols", unsupported));
+  }
+  return parts.join(" / ");
+}
+
+function templateValue(template: string, key: string, value: string): string {
+  return template.replace(`{${key}}`, value);
+}
+
 function trafficRateSample(previous: TrafficTotals, current: TrafficTotals, elapsedMs: number): TrafficSample {
   const seconds = Math.max(elapsedMs / 1000, 0.1);
   return {
@@ -1161,17 +1202,17 @@ export function App() {
 
   async function updateSubscriptionFromUrl() {
     try {
-      const nodes = await fetchSubscriptionNodes(subscriptionUrl);
+      const report = await fetchSubscriptionReport(subscriptionUrl);
       const snapshot = createSubscriptionSnapshot(
         subscriptionUrl,
-        nodes,
+        report.nodes,
         subscription,
         subscriptionName,
       );
       saveSubscriptionSnapshot(snapshot);
       setSubscription(snapshot);
-      setMessage(`${nodes.length} nodes imported`);
-      void refreshNodeLatencies(nodes);
+      setMessage(subscriptionImportMessage(report, ui));
+      void refreshNodeLatencies(report.nodes);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Subscription update failed");
     }
@@ -1192,9 +1233,9 @@ export function App() {
 
     for (const item of remoteSubscriptions) {
       try {
-        const nodes = await fetchSubscriptionNodes(item.sourceUrl);
-        nextSnapshot = createSubscriptionSnapshot(item.sourceUrl, nodes, nextSnapshot, item.name);
-        updatedNodes.push(...nodes);
+        const report = await fetchSubscriptionReport(item.sourceUrl);
+        nextSnapshot = createSubscriptionSnapshot(item.sourceUrl, report.nodes, nextSnapshot, item.name);
+        updatedNodes.push(...report.nodes);
       } catch (error) {
         failures.push(`${item.name}: ${error instanceof Error ? error.message : "update failed"}`);
       }
@@ -1269,18 +1310,18 @@ export function App() {
 
   function importSubscriptionText() {
     try {
-      const nodes = parseSubscription(subscriptionText);
+      const report = parseSubscriptionWithReport(subscriptionText);
       const snapshot = createSubscriptionSnapshot(
         "manual",
-        nodes,
+        report.nodes,
         subscription,
         subscriptionName || "Manual",
       );
       saveSubscriptionSnapshot(snapshot);
       setSubscription(snapshot);
       setSubscriptionText("");
-      setMessage(`${nodes.length} nodes imported`);
-      void refreshNodeLatencies(nodes);
+      setMessage(subscriptionImportMessage(report, ui));
+      void refreshNodeLatencies(report.nodes);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Subscription import failed");
     }
