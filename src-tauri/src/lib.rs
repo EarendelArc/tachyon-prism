@@ -68,6 +68,10 @@ struct RuntimeSettings {
     #[serde(default)]
     tachyon_tun_address: String,
     #[serde(default)]
+    tachyon_tun_auto_route: bool,
+    #[serde(default)]
+    tachyon_tun_dns_hijack: bool,
+    #[serde(default)]
     tachyon_tun_mtu: u32,
     #[serde(default)]
     xray_socks_listen: String,
@@ -2024,6 +2028,8 @@ fn normalize_runtime_settings(
             settings.tachyon_tun_address,
             defaults.tachyon_tun_address,
         ),
+        tachyon_tun_auto_route: settings.tachyon_tun_auto_route,
+        tachyon_tun_dns_hijack: settings.tachyon_tun_dns_hijack,
         tachyon_tun_mtu: bounded_u32_or(
             settings.tachyon_tun_mtu,
             defaults.tachyon_tun_mtu,
@@ -2067,6 +2073,8 @@ fn default_runtime_settings(app: &tauri::AppHandle) -> Result<RuntimeSettings, S
         tachyon_telemetry_interval_ms: 500,
         tachyon_core_release_channel: "preview".to_string(),
         tachyon_tun_address: "198.18.0.1/16".to_string(),
+        tachyon_tun_auto_route: false,
+        tachyon_tun_dns_hijack: false,
         tachyon_tun_mtu: 9000,
         xray_http_listen: "127.0.0.1".to_string(),
         xray_http_port: 10809,
@@ -3551,6 +3559,8 @@ mod tests {
     fn serde_defaults_enable_adaptive_tachyon_fec() {
         let missing: RuntimeSettings = serde_json::from_str("{}").expect("settings");
         assert!(missing.tachyon_fec_dynamic);
+        assert!(!missing.tachyon_tun_auto_route);
+        assert!(!missing.tachyon_tun_dns_hijack);
 
         let disabled: RuntimeSettings =
             serde_json::from_str(r#"{"tachyonFecDynamic":false}"#).expect("settings");

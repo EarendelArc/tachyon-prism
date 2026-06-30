@@ -26,6 +26,8 @@ export interface RuntimeSettings {
   tachyonTelemetryIntervalMs: number;
   tachyonCoreReleaseChannel: ReleaseChannel;
   tachyonTunAddress: string;
+  tachyonTunAutoRoute: boolean;
+  tachyonTunDnsHijack: boolean;
   tachyonTunMtu: number;
   xrayHttpListen: string;
   xrayHttpPort: number;
@@ -337,6 +339,8 @@ function previewRuntimeSettings(): RuntimeSettings {
     tachyonTgpServerAddress: "",
     tachyonTelemetryIntervalMs: 500,
     tachyonTunAddress: "198.18.0.1/16",
+    tachyonTunAutoRoute: false,
+    tachyonTunDnsHijack: false,
     tachyonTunMtu: 9000,
     xrayBinaryPath: "",
     xrayHttpListen: "127.0.0.1",

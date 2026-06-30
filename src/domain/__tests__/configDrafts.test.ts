@@ -228,6 +228,8 @@ describe("buildCoreClientConfigDraft", () => {
     const tun = client.tun as Record<string, unknown>;
     expect(tun.address).toBe("198.18.0.1/16");
     expect(tun.mtu).toBe(9000);
+    expect(tun.auto_route).toBe(false);
+    expect(tun.dns_hijack).toBe(false);
   });
 
   it("includes game profiles in routing", () => {
@@ -306,6 +308,8 @@ describe("buildCoreClientConfigDraft", () => {
       fecParityShards: 3,
       telemetryIntervalMs: 250,
       tunAddress: "198.19.0.1/16",
+      tunAutoRoute: true,
+      tunDnsHijack: true,
       tunMtu: 8500,
     });
     const client = config.client as Record<string, unknown>;
@@ -315,6 +319,8 @@ describe("buildCoreClientConfigDraft", () => {
     const fec = tgp.fec as Record<string, unknown>;
 
     expect(tun.address).toBe("198.19.0.1/16");
+    expect(tun.auto_route).toBe(true);
+    expect(tun.dns_hijack).toBe(true);
     expect(tun.mtu).toBe(8500);
     expect(ipc.websocket_addr).toBe("127.0.0.6:55124");
     expect(ipc.grpc_addr).toBe("127.0.0.5:50052");

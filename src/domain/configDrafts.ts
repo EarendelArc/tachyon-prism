@@ -32,6 +32,8 @@ export interface CoreClientDraftOptions {
   telemetryIntervalMs?: number;
   tgpServerAddr?: string;
   tunAddress?: string;
+  tunAutoRoute?: boolean;
+  tunDnsHijack?: boolean;
   tunMtu?: number;
 }
 
@@ -129,8 +131,8 @@ export function buildCoreClientConfigDraft(
         name: "",
         address: options.tunAddress ?? "198.18.0.1/16",
         mtu: options.tunMtu ?? 9000,
-        auto_route: true,
-        dns_hijack: true,
+        auto_route: options.tunAutoRoute ?? false,
+        dns_hijack: options.tunDnsHijack ?? false,
       },
       routing: {
         default_action: "direct",

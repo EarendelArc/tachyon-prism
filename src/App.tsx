@@ -167,6 +167,8 @@ const emptyRuntimeInputs = {
   tachyonTgpServerAddress: "",
   tachyonTelemetryIntervalMs: 500,
   tachyonTunAddress: "198.18.0.1/16",
+  tachyonTunAutoRoute: false,
+  tachyonTunDnsHijack: false,
   tachyonTunMtu: 9000,
   xrayBinaryPath: "",
   xrayHttpListen: "127.0.0.1",
@@ -248,6 +250,8 @@ const zh = {
   tachyonFecTiming: "TGP FEC 时序",
   tachyonServer: "Tachyon 服务器",
   tachyonTgpServer: "TGP 服务器",
+  tachyonTunAutoRoute: "TUN 全局路由",
+  tachyonTunDnsHijack: "DNS 劫持",
   traffic: "流量",
   trafficNoSamplesHint: "启动 Xray 或 Tachyon Core 后，这里会显示真实的双核心流量曲线。",
   trafficSource: "数据源",
@@ -411,6 +415,8 @@ const en: typeof zh = {
   tachyonFecTiming: "TGP FEC Timing",
   tachyonServer: "Tachyon Server",
   tachyonTgpServer: "TGP Server",
+  tachyonTunAutoRoute: "TUN Auto Route",
+  tachyonTunDnsHijack: "DNS Hijack",
   traffic: "Traffic",
   trafficNoSamplesHint: "Start Xray or Tachyon Core to draw real dual-core traffic curves here.",
   trafficSource: "Source",
@@ -743,6 +749,8 @@ function draftText(
         telemetryIntervalMs: runtimeSettings.tachyonTelemetryIntervalMs,
         tgpServerAddr: runtimeSettings.tachyonTgpServerAddress,
         tunAddress: runtimeSettings.tachyonTunAddress,
+        tunAutoRoute: runtimeSettings.tachyonTunAutoRoute,
+        tunDnsHijack: runtimeSettings.tachyonTunDnsHijack,
         tunMtu: runtimeSettings.tachyonTunMtu,
       }),
     );
@@ -3291,6 +3299,38 @@ function SettingsView({
                       }
                     />
                   </div>
+                </label>
+                <label className="wide-field">
+                  <span>{ui.tachyonTunAutoRoute}</span>
+                  <label className="mini-check">
+                    <input
+                      checked={runtimeInputs.tachyonTunAutoRoute}
+                      type="checkbox"
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({
+                          ...current,
+                          tachyonTunAutoRoute: event.target.checked,
+                        }))
+                      }
+                    />
+                    {ui.tachyonTunAutoRoute}
+                  </label>
+                </label>
+                <label className="wide-field">
+                  <span>{ui.tachyonTunDnsHijack}</span>
+                  <label className="mini-check">
+                    <input
+                      checked={runtimeInputs.tachyonTunDnsHijack}
+                      type="checkbox"
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({
+                          ...current,
+                          tachyonTunDnsHijack: event.target.checked,
+                        }))
+                      }
+                    />
+                    {ui.tachyonTunDnsHijack}
+                  </label>
                 </label>
                 <label>
                   <span>{ui.tachyonFecShards}</span>
