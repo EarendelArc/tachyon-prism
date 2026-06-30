@@ -1,11 +1,21 @@
+export type PluginRunStatus = "error" | "idle" | "ok";
+
 export interface PluginRuntimeState {
   enabled: boolean;
   installed: boolean;
   lastRunAt: string;
+  lastRunStatus: PluginRunStatus;
+  lastResult: string;
   runCount: number;
 }
 
 export type PluginStateSnapshot = Record<string, PluginRuntimeState>;
+
+export interface PluginRunRecordOptions {
+  now?: Date;
+  result?: string;
+  status?: PluginRunStatus;
+}
 
 const storageKey = "tachyon.prism.plugins.v1";
 
@@ -14,6 +24,8 @@ export function emptyPluginState(): PluginRuntimeState {
     enabled: false,
     installed: false,
     lastRunAt: "",
+    lastRunStatus: "idle",
+    lastResult: "",
     runCount: 0,
   };
 }
@@ -32,6 +44,8 @@ export function normalizePluginState(
           enabled: Boolean(current.enabled),
           installed: Boolean(current.installed),
           lastRunAt: typeof current.lastRunAt === "string" ? current.lastRunAt : "",
+          lastRunStatus: pluginRunStatusValue(current.lastRunStatus),
+          lastResult: typeof current.lastResult === "string" ? current.lastResult : "",
           runCount: numberValue(current.runCount),
         },
       ];
@@ -87,17 +101,21 @@ export function togglePluginEnabled(
 export function recordPluginRun(
   snapshot: PluginStateSnapshot,
   pluginId: string,
-  now = new Date(),
+  nowOrOptions: Date | PluginRunRecordOptions = new Date(),
 ): PluginStateSnapshot {
   const current = snapshot[pluginId] ?? emptyPluginState();
   if (!current.installed || !current.enabled) {
     throw new Error("Plugin must be installed and enabled before running");
   }
+  const options = nowOrOptions instanceof Date ? { now: nowOrOptions } : nowOrOptions;
+  const now = options.now ?? new Date();
   return {
     ...snapshot,
     [pluginId]: {
       ...current,
       lastRunAt: now.toISOString(),
+      lastRunStatus: options.status ?? "ok",
+      lastResult: options.result ?? current.lastResult,
       runCount: current.runCount + 1,
     },
   };
@@ -115,6 +133,10 @@ function numberValue(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? Math.floor(value)
     : 0;
+}
+
+function pluginRunStatusValue(value: unknown): PluginRunStatus {
+  return value === "ok" || value === "error" ? value : "idle";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

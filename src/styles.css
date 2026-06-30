@@ -1130,6 +1130,39 @@ p,
   line-height: 1.25;
 }
 
+.plugin-result {
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.68);
+  display: grid;
+  gap: 3px;
+  min-height: 42px;
+  padding: 8px;
+}
+
+.plugin-result span {
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 11px;
+}
+
+.plugin-result strong {
+  color: rgba(255, 255, 255, 0.84);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-result.ok strong {
+  color: #00d39a;
+}
+
+.plugin-result.error strong {
+  color: #ff6c62;
+}
+
 .plugin-rich-card footer {
   align-items: center;
   display: flex;

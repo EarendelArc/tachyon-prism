@@ -69,7 +69,8 @@ $env:Path = "$cargoBin;$env:Path"
 Push-Location $repoRoot
 try {
   Invoke-Checked $node $tscCli --noEmit
-  Invoke-Checked $node $viteCli build --configLoader native
+  # Vite 8/Rolldown can emit absolute HTML asset names on Windows with native loader.
+  Invoke-Checked $node $viteCli build --configLoader runner
 
   $config = Get-Content -Raw -LiteralPath $tauriConfig | ConvertFrom-Json
   $config.build.beforeBuildCommand = $null

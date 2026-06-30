@@ -304,19 +304,26 @@ const zh = {
   policyGroups: "策略组",
   pluginAllowNodeRead: "允许插件读取节点",
   pluginAutoUpdate: "自动更新插件",
+  pluginAllInstalled: "已安装并启用全部内置插件",
   pluginCenter: "插件中心",
   pluginDisabled: "已停用",
   pluginEnabled: "已启用",
   pluginInstalled: "已安装",
   pluginLastRun: "最后运行",
+  pluginLastResult: "最后结果",
   pluginNeverRun: "未运行",
+  pluginNoResult: "暂无结果",
   pluginNotInstalled: "未安装",
+  pluginRunCompleted: "{title} 运行完成",
   pluginRollingDesc: "提升 Prism 升级体验，获取更快更新通道。",
+  pluginRollingApplied: "已切换 Xray 与 Tachyon Core 到预览通道",
   pluginRollingTitle: "滚动发行",
   pluginRunCount: "运行次数",
   pluginSettings: "插件设置",
   pluginStatsDesc: "高效流量统计插件，支持按域名、进程聚合。",
+  pluginStatsSnapshot: "Xray ↑{xrayUp} ↓{xrayDown} / Tachyon ↑{tachyonUp} ↓{tachyonDown}",
   pluginStatsTitle: "流量统计",
+  pluginSwitchNeedLatency: "请先刷新延迟再运行节点智能切换",
   pluginSwitchDesc: "实现动态代理选择机制，包含故障转移。",
   pluginSwitchTitle: "节点智能切换",
   pluginTriggerApp: "APP激活后",
@@ -324,7 +331,10 @@ const zh = {
   pluginTriggerNode: "节点变化",
   pluginTriggerUpdate: "更新订阅时",
   pluginTransformDesc: "节点格式转换插件，支持 v2Ray 格式导入。",
+  pluginTransformSaved: "已为 {node} 保存 Xray 配置草稿",
   pluginTransformTitle: "节点转换",
+  pluginUnknown: "未知插件",
+  pluginUpdatesChecked: "内置插件已是最新版本",
   processName: "进程名",
   purple: "紫色",
   quickStart: "快速启动",
@@ -474,19 +484,26 @@ const en: typeof zh = {
   policyGroups: "Policy Groups",
   pluginAllowNodeRead: "Allow plugins to read nodes",
   pluginAutoUpdate: "Auto-update plugins",
+  pluginAllInstalled: "All built-in plugins installed and enabled",
   pluginCenter: "Plugin Center",
   pluginDisabled: "Disabled",
   pluginEnabled: "Enabled",
   pluginInstalled: "Installed",
   pluginLastRun: "Last run",
+  pluginLastResult: "Last result",
   pluginNeverRun: "Never run",
+  pluginNoResult: "No result yet",
   pluginNotInstalled: "Not installed",
+  pluginRunCompleted: "{title} run completed",
   pluginRollingDesc: "Improve Prism update experience with faster preview channels.",
+  pluginRollingApplied: "Xray and Tachyon Core switched to preview channels",
   pluginRollingTitle: "Rolling Release",
   pluginRunCount: "Runs",
   pluginSettings: "Plugin Settings",
   pluginStatsDesc: "Efficient traffic statistics by domain and process.",
+  pluginStatsSnapshot: "Xray ↑{xrayUp} ↓{xrayDown} / Tachyon ↑{tachyonUp} ↓{tachyonDown}",
   pluginStatsTitle: "Traffic Stats",
+  pluginSwitchNeedLatency: "Refresh latency before running Smart Node Switch",
   pluginSwitchDesc: "Dynamic proxy selection with failover.",
   pluginSwitchTitle: "Smart Node Switch",
   pluginTriggerApp: "After app activation",
@@ -494,7 +511,10 @@ const en: typeof zh = {
   pluginTriggerNode: "Node change",
   pluginTriggerUpdate: "On subscription update",
   pluginTransformDesc: "Node format converter with v2Ray-style imports.",
+  pluginTransformSaved: "Saved Xray config draft for {node}",
   pluginTransformTitle: "Node Transform",
+  pluginUnknown: "Unknown plugin",
+  pluginUpdatesChecked: "Built-in plugins are up to date",
   processName: "Process name",
   purple: "Purple",
   quickStart: "Quick Start",
@@ -886,6 +906,13 @@ function subscriptionImportMessage(report: SubscriptionParseReport, ui: typeof z
 
 function templateValue(template: string, key: string, value: string): string {
   return template.replace(`{${key}}`, value);
+}
+
+function templateValues(template: string, values: Record<string, string>): string {
+  return Object.entries(values).reduce(
+    (current, [key, value]) => current.replace(`{${key}}`, value),
+    template,
+  );
 }
 
 function trafficRateSample(previous: TrafficTotals, current: TrafficTotals, elapsedMs: number): TrafficSample {
@@ -1386,9 +1413,56 @@ export function App() {
     );
   }
 
+  function installAllPlugins() {
+    const nextState = pluginCatalogIds.reduce<PluginStateSnapshot>(
+      (current, pluginId) => installPluginState(current, pluginId),
+      pluginState,
+    );
+    persistPluginState(nextState, ui.pluginAllInstalled);
+  }
+
+  function checkPluginUpdates() {
+    setMessage(ui.pluginUpdatesChecked);
+  }
+
   async function runPlugin(pluginId: string, pluginTitle: string) {
     try {
-      const nextPluginState = recordPluginRun(pluginState, pluginId);
+      if (pluginId === "rolling-release") {
+        const settings = await saveRuntimeSettings({
+          ...runtimeInputs,
+          tachyonCoreReleaseChannel: "preview",
+          xrayReleaseChannel: "preview",
+        });
+        setRuntimeInputs(settings);
+        const result = ui.pluginRollingApplied;
+        persistPluginState(recordPluginRun(pluginState, pluginId, { result }), result);
+        return;
+      }
+
+      if (pluginId === "node-transform") {
+        if (!activeNode) {
+          throw new Error(ui.noNodeSelected);
+        }
+        await writeDrafts("xray");
+        const result = templateValue(ui.pluginTransformSaved, "node", activeNode.name);
+        persistPluginState(recordPluginRun(pluginState, pluginId, { result }), result);
+        return;
+      }
+
+      if (pluginId === "traffic-stats") {
+        const stats = await getXrayTrafficStats();
+        setXrayTrafficStats(stats);
+        const totals = telemetryBytes(telemetry.latestTelemetry, stats);
+        const result = templateValues(ui.pluginStatsSnapshot, {
+          tachyonDown: formatBytes(totals.tachyonDown),
+          tachyonUp: formatBytes(totals.tachyonUp),
+          xrayDown: formatBytes(totals.xrayDown),
+          xrayUp: formatBytes(totals.xrayUp),
+        });
+        persistPluginState(recordPluginRun(pluginState, pluginId, { result }), result);
+        return;
+      }
+
       if (pluginId === "smart-node-switch") {
         let latencyMap = nodeLatencies;
         const hasMeasuredNodes = subscription.nodes.some(
@@ -1404,17 +1478,21 @@ export function App() {
               nodeLatencySortValue(left, latencyMap) - nodeLatencySortValue(right, latencyMap),
           )[0];
         if (!bestNode) {
-          throw new Error("Refresh latency before running Smart Node Switch");
+          throw new Error(ui.pluginSwitchNeedLatency);
         }
         const snapshot = selectSubscriptionNode(subscription, bestNode.id);
         saveSubscriptionSnapshot(snapshot);
         setSubscription(snapshot);
+        const result = `${pluginTitle} -> ${bestNode.name}`;
+        const nextPluginState = recordPluginRun(pluginState, pluginId, { result });
         savePluginState(nextPluginState);
         setPluginState(nextPluginState);
-        setMessage(`${pluginTitle} switched to ${bestNode.name}`);
+        setMessage(result);
         return;
       }
-      persistPluginState(nextPluginState, `${pluginTitle} run completed`);
+
+      const result = templateValue(ui.pluginRunCompleted, "title", pluginTitle);
+      persistPluginState(recordPluginRun(pluginState, pluginId, { result }), result);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Plugin run failed");
     }
@@ -2207,6 +2285,8 @@ export function App() {
 
         {activeView === "plugins" ? (
           <PluginsView
+            onCheckUpdates={checkPluginUpdates}
+            onInstallAll={installAllPlugins}
             onInstall={installPlugin}
             onRun={runPlugin}
             onToggle={togglePlugin}
@@ -2881,13 +2961,17 @@ function SubscriptionsView({
 }
 
 function PluginsView({
+  onCheckUpdates,
   onInstall,
+  onInstallAll,
   onRun,
   onToggle,
   pluginState,
   ui,
 }: {
+  onCheckUpdates: () => void;
   onInstall: (pluginId: string, pluginTitle: string) => void;
+  onInstallAll: () => void;
   onRun: (pluginId: string, pluginTitle: string) => void;
   onToggle: (pluginId: string, pluginTitle: string) => void;
   pluginState: PluginStateSnapshot;
@@ -2940,8 +3024,8 @@ function PluginsView({
           <button type="button">
             {installed}/{plugins.length} {ui.pluginInstalled}
           </button>
-          <button type="button">{ui.checkUpdates}</button>
-          <button className="primary-action" type="button">
+          <button type="button" onClick={onCheckUpdates}>{ui.checkUpdates}</button>
+          <button className="primary-action" type="button" onClick={onInstallAll}>
             + {ui.add}
           </button>
         </div>
@@ -2980,6 +3064,10 @@ function PluginsView({
               <div className="plugin-meta">
                 <span>{ui.pluginRunCount}: {state.runCount}</span>
                 <span>{ui.pluginLastRun}: {lastRun}</span>
+              </div>
+              <div className={`plugin-result ${state.lastRunStatus}`}>
+                <span>{ui.pluginLastResult}</span>
+                <strong>{state.lastResult || ui.pluginNoResult}</strong>
               </div>
               <footer>
                 <a href="#source">{ui.source}</a>
