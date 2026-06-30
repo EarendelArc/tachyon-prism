@@ -78,8 +78,8 @@ individual start/stop controls.
 
 | Layer | Tool | Count |
 | --- | --- | --- |
-| Rust backend | `cargo test` | 40 tests |
-| Frontend domain | Vitest | 3 suites (configDrafts, subscriptions, gameProfiles) |
+| Rust backend | `cargo test` | 64 tests |
+| Frontend domain | Vitest | 5 suites plus 1 live opt-in suite |
 | TypeScript types | `tsc --noEmit` | Enforced in CI |
 
 CI runs all three layers on every push (ubuntu, windows, macos).

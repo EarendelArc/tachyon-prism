@@ -69,8 +69,8 @@ Runtime 面板实时显示两个核心的进程状态，并支持单独启动/停止控制。
 
 | 层 | 工具 | 数量 |
 | --- | --- | --- |
-| Rust 后端 | `cargo test` | 40 个测试 |
-| 前端领域 | Vitest | 3 个套件（configDrafts、subscriptions、gameProfiles） |
+| Rust 后端 | `cargo test` | 64 个测试 |
+| 前端领域 | Vitest | 5 个常规套件 + 1 个需手动启用的 live 套件 |
 | TypeScript 类型 | `tsc --noEmit` | 在 CI 中强制执行 |
 
 CI 在每次推送时运行所有三层（ubuntu、windows、macos）。
