@@ -3,6 +3,7 @@ import {
   activeSubscription,
   buildXrayOutboundDraft,
   createSubscriptionSnapshot,
+  loadSubscriptionSnapshot,
   parseSubscription,
   removeSubscription,
   selectSubscription,
@@ -19,6 +20,15 @@ describe("parseSubscription", () => {
     expect(nodes[0].protocol).toBe("vmess");
     expect(nodes[0].address).toBe("10.0.0.1");
     expect(nodes[0].port).toBe(443);
+    expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
+      vnext: [
+        {
+          address: "10.0.0.1",
+          port: 443,
+          users: [{ id: "test-uuid", alterId: 0, security: "auto" }],
+        },
+      ],
+    });
   });
 
   it("parses VLESS URIs", () => {
@@ -32,6 +42,15 @@ describe("parseSubscription", () => {
     expect(nodes[0].name).toBe("My VLESS");
     expect(nodes[0].transport).toBe("websocket");
     expect(nodes[0].security).toBe("tls");
+    expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
+      vnext: [
+        {
+          address: "10.0.0.1",
+          port: 443,
+          users: [{ id: "test-uuid", encryption: "none" }],
+        },
+      ],
+    });
   });
 
   it("maps SplitHTTP share parameters to Xray xhttp stream settings", () => {
@@ -58,6 +77,9 @@ describe("parseSubscription", () => {
     expect(nodes[0].port).toBe(8443);
     expect(nodes[0].credential).toBe("password");
     expect(nodes[0].name).toBe("Trojan Node");
+    expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
+      servers: [{ address: "example.com", port: 8443, password: "password" }],
+    });
   });
 
   it("parses Shadowsocks URIs with SIP002 format", () => {
@@ -68,6 +90,16 @@ describe("parseSubscription", () => {
     expect(nodes[0].address).toBe("10.0.0.1");
     expect(nodes[0].port).toBe(8388);
     expect(nodes[0].name).toBe("SS Node");
+    expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
+      servers: [
+        {
+          address: "10.0.0.1",
+          port: 8388,
+          method: "aes-256-gcm",
+          password: "password",
+        },
+      ],
+    });
   });
 
   it("parses Hysteria URIs", () => {
@@ -88,6 +120,37 @@ describe("parseSubscription", () => {
     expect(nodes[0].address).toBe("10.0.0.1");
     expect(nodes[0].port).toBe(1080);
     expect(nodes[0].credential).toContain("user");
+    expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
+      servers: [
+        {
+          address: "10.0.0.1",
+          port: 1080,
+          users: [{ user: "user", pass: "pass" }],
+        },
+      ],
+    });
+  });
+
+  it("parses HTTP outbound URIs into Xray server arrays", () => {
+    const uri = "http://user:pass@proxy.example.com:8080#HTTP Proxy";
+    const nodes = parseSubscription(uri);
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]).toMatchObject({
+      name: "HTTP Proxy",
+      protocol: "http",
+      address: "proxy.example.com",
+      port: 8080,
+      credential: "user:***",
+    });
+    expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
+      servers: [
+        {
+          address: "proxy.example.com",
+          port: 8080,
+          users: [{ user: "user", pass: "pass" }],
+        },
+      ],
+    });
   });
 
   it("parses WireGuard URIs", () => {
@@ -454,6 +517,73 @@ describe("selectSubscriptionNode", () => {
     expect(() => selectSubscriptionNode(snapshot, "nonexistent")).toThrow(
       "Selected node no longer exists",
     );
+  });
+});
+
+describe("loadSubscriptionSnapshot", () => {
+  it("upgrades stored URI nodes to canonical Xray outbounds", () => {
+    const uri = "vless://uuid@example.com:443?encryption=none#Stored VLESS";
+    const parsed = parseSubscription(uri)[0];
+    const legacyNode: ProxyNode = {
+      ...parsed,
+      outbound: {
+        protocol: "vless",
+        settings: {
+          address: "example.com",
+          encryption: "none",
+          id: "uuid",
+          port: 443,
+        },
+      },
+    };
+    const rawSnapshot = {
+      sourceUrl: "https://example.com/sub",
+      updatedAt: "2026-06-30T00:00:00.000Z",
+      nodes: [legacyNode],
+      selectedNodeId: legacyNode.id,
+      subscriptions: [
+        {
+          id: "subscription-test",
+          name: "Stored",
+          sourceUrl: "https://example.com/sub",
+          updatedAt: "2026-06-30T00:00:00.000Z",
+          nodes: [legacyNode],
+        },
+      ],
+      selectedSubscriptionId: "subscription-test",
+    };
+    const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    const store = new Map<string, string>([
+      ["tachyon.prism.subscription.v1", JSON.stringify(rawSnapshot)],
+    ]);
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => store.get(key) ?? null,
+        removeItem: (key: string) => store.delete(key),
+        setItem: (key: string, value: string) => store.set(key, value),
+      },
+    });
+
+    try {
+      const loaded = loadSubscriptionSnapshot();
+      expect(activeSubscription(loaded)?.name).toBe("Stored");
+      expect(buildXrayOutboundDraft(loaded.nodes[0]).settings).toMatchObject({
+        vnext: [
+          {
+            address: "example.com",
+            port: 443,
+            users: [{ id: "uuid", encryption: "none" }],
+          },
+        ],
+      });
+    } finally {
+      if (previous) {
+        Object.defineProperty(globalThis, "localStorage", previous);
+      } else {
+        Reflect.deleteProperty(globalThis, "localStorage");
+      }
+    }
   });
 });
 

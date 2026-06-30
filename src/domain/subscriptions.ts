@@ -766,17 +766,33 @@ function parseVLESSOrTrojanUri(
   const params = paramsToObject(parsed.searchParams);
   const credential = stringOrUndefined(decodeURIComponent(parsed.username));
   const streamSettings = streamSettingsFromParams(parsed.searchParams);
-  const settings: Record<string, unknown> = {
-    address: parsed.hostname,
-    port,
-  };
+  let settings: Record<string, unknown>;
 
   if (protocol === "vless") {
-    settings.id = credential ?? "";
-    settings.encryption = parsed.searchParams.get("encryption") || "none";
-    copyParam(parsed.searchParams, settings, "flow", "flow");
+    const user: Record<string, unknown> = {
+      id: credential ?? "",
+      encryption: parsed.searchParams.get("encryption") || "none",
+    };
+    copyParam(parsed.searchParams, user, "flow", "flow");
+    settings = {
+      vnext: [
+        {
+          address: parsed.hostname,
+          port,
+          users: [compactRecord(user)],
+        },
+      ],
+    };
   } else {
-    settings.password = credential ?? "";
+    settings = {
+      servers: [
+        {
+          address: parsed.hostname,
+          port,
+          password: credential ?? "",
+        },
+      ],
+    };
   }
 
   const outbound = compactOutbound({
@@ -823,10 +839,19 @@ function nodeFromVMessShare(value: Record<string, unknown>, rawUri: string): Pro
   const outbound = compactOutbound({
     protocol: "vmess",
     settings: {
-      address,
-      port,
-      id,
-      security: stringValue(value.scy) || stringValue(value.security) || "auto",
+      vnext: [
+        {
+          address,
+          port,
+          users: [
+            compactRecord({
+              id,
+              alterId: numberValue(value.aid),
+              security: stringValue(value.scy) || stringValue(value.security) || "auto",
+            }),
+          ],
+        },
+      ],
     },
     streamSettings: streamSettingsFromParams(searchParams),
   });
@@ -863,10 +888,14 @@ function parseShadowsocksUri(rawUri: string): ProxyNode | null {
   const outbound = compactOutbound({
     protocol: "shadowsocks",
     settings: {
-      address: parsed.hostname,
-      port,
-      method,
-      password,
+      servers: [
+        {
+          address: parsed.hostname,
+          port,
+          method,
+          password,
+        },
+      ],
     },
   });
 
@@ -889,16 +918,21 @@ function parseSocksOrHTTPUri(
 
   const user = stringOrUndefined(decodeURIComponent(parsed.username));
   const pass = stringOrUndefined(decodeURIComponent(parsed.password));
-  const settings: Record<string, unknown> = {
+  const server: Record<string, unknown> = {
     address: parsed.hostname,
     port,
   };
   if (user) {
-    settings.user = user;
+    server.users = [
+      compactRecord({
+        user,
+        pass,
+      }),
+    ];
   }
-  if (pass) {
-    settings.pass = pass;
-  }
+  const settings: Record<string, unknown> = {
+    servers: [compactRecord(server)],
+  };
 
   const streamSettings =
     parsed.protocol === "https:" ? { security: "tls", tlsSettings: { serverName: parsed.hostname } } : {};
@@ -1308,6 +1342,14 @@ function normalizeStoredNode(value: unknown): ProxyNode | null {
   if (!id || !name || protocol === "unknown" || !address || !rawUri) {
     return null;
   }
+  const storedOutbound = isRecord(value.outbound)
+    ? (cloneRecord(value.outbound) as XrayOutboundObject)
+    : undefined;
+  const reparsed = parseProxyUri(rawUri);
+  const outbound =
+    reparsed?.outbound && (!storedOutbound || outboundRequiresCanonicalUpgrade(protocol, storedOutbound))
+      ? reparsed.outbound
+      : storedOutbound;
 
   return {
     id,
@@ -1320,9 +1362,28 @@ function normalizeStoredNode(value: unknown): ProxyNode | null {
     transport: stringOrUndefined(stringValue(value.transport)),
     sni: stringOrUndefined(stringValue(value.sni)),
     parameters: asStringRecord(value.parameters),
-    outbound: isRecord(value.outbound) ? (cloneRecord(value.outbound) as XrayOutboundObject) : undefined,
+    outbound,
     rawUri,
   };
+}
+
+function outboundRequiresCanonicalUpgrade(
+  protocol: ProxyProtocol,
+  outbound: XrayOutboundObject,
+): boolean {
+  const settings = asRecord(outbound.settings);
+  switch (protocol) {
+    case "vless":
+    case "vmess":
+      return "address" in settings || "id" in settings || !Array.isArray(settings.vnext);
+    case "trojan":
+    case "shadowsocks":
+    case "socks":
+    case "http":
+      return "address" in settings || "server" in settings || !Array.isArray(settings.servers);
+    default:
+      return false;
+  }
 }
 
 function normalizeSubscriptionProfiles(value: unknown): SubscriptionProfile[] {
