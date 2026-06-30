@@ -270,7 +270,13 @@ describe("buildCoreClientConfigDraft", () => {
   it("includes TGP settings", () => {
     const config = buildCoreClientConfigDraft(mockCoreOptions);
     const tgp = config.tgp as Record<string, unknown>;
-    expect(tgp.fec).toBeDefined();
+    expect(tgp.fec).toMatchObject({
+      data_shards: 4,
+      parity_shards: 2,
+      group_timeout: "20ms",
+      dynamic: true,
+      adapt_window: 32,
+    });
     expect(tgp.pacing).toBeDefined();
     expect(tgp.connection_migration).toBe(true);
   });
