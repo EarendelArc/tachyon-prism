@@ -9,6 +9,10 @@ All notable changes to Tachyon Prism will be documented in this file.
   Tachyon Core managed downloads.
 - Tachyon Core release discovery can consume prerelease alpha builds when the
   `preview` channel is selected.
+- Tachyon Core TGP FEC runtime settings in the Core settings page, including
+  data shards, parity shards, group timeout, adaptive FEC, and adaptation window.
+- Live subscription smoke test gated by `TACHYON_LIVE_SUBSCRIPTION_URL` so real
+  subscription parsing can be verified without exposing node details in logs.
 - GitHub Actions release workflow for unsigned Prism desktop bundles on Windows
   x64, Windows ARM64, macOS x64, macOS ARM64, Linux x64, and Linux ARM64.
 - Real-time telemetry client consuming Core SSE stream (`src/domain/telemetry.ts`).
@@ -18,6 +22,18 @@ All notable changes to Tachyon Prism will be documented in this file.
 - Architecture documentation (`docs/architecture.md`, EN + ZH).
 - Getting-started guide (`docs/getting-started.md`, EN + ZH).
 - Documentation section in README with links to all docs.
+
+### Fixed
+- Generate canonical Xray outbound settings from URI and Clash/Mihomo
+  subscriptions (`vnext` / `servers`) instead of display-only shorthand fields.
+- Upgrade previously saved URI subscription nodes on load so old cached nodes
+  get canonical Xray outbound settings without requiring a manual re-import.
+- Stabilize the custom Windows titlebar drag/no-drag regions and verify no
+  visible console window appears in native smoke tests.
+
+### Verified
+- Real subscription URL smoke test, default frontend tests, TypeScript
+  typecheck, Vite production build, native window smoke, and UI screenshot smoke.
 
 ## [v0.1.0-alpha.1]
 
