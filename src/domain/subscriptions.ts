@@ -1107,6 +1107,7 @@ function parseShadowsocksUri(rawUri: string): ProxyNode | null {
   }
 
   const params = paramsToObject(parsed.searchParams);
+  const streamSettings = shadowsocksPluginStreamSettings(parsed.searchParams);
   const outbound = compactOutbound({
     protocol: "shadowsocks",
     settings: {
@@ -1119,12 +1120,15 @@ function parseShadowsocksUri(rawUri: string): ProxyNode | null {
         },
       ],
     },
+    streamSettings,
   });
 
   return nodeFromUri(rawUri, parsed, "shadowsocks", outbound, {
     credential: `${method}:${password}`,
     parameters: params,
-    transport: parsed.searchParams.get("plugin") ?? undefined,
+    transport: stringOrUndefined(
+      stringValue(streamSettings.network) || parsed.searchParams.get("plugin"),
+    ),
   });
 }
 
@@ -1354,12 +1358,20 @@ function transportSettingsFromParams(
   params: URLSearchParams,
 ): { key: string; value: Record<string, unknown> } | null {
   switch (network) {
+    case "raw":
+      return {
+        key: "rawSettings",
+        value: compactRecord({
+          header: rawHeaderFromParams(params),
+        }),
+      };
     case "websocket":
       return {
         key: "wsSettings",
         value: compactRecord({
           path: stringOrUndefined(params.get("path")),
-          headers: params.get("host") ? { Host: params.get("host") } : undefined,
+          headers: hostHeaders(params),
+          acceptProxyProtocol: booleanParam(params.get("acceptProxyProtocol")),
         }),
       };
     case "grpc":
@@ -1368,6 +1380,18 @@ function transportSettingsFromParams(
         value: compactRecord({
           serviceName: stringOrUndefined(params.get("serviceName") ?? params.get("service")),
           authority: stringOrUndefined(params.get("authority") ?? params.get("host")),
+          multiMode: booleanParam(params.get("multiMode")),
+          user_agent: stringOrUndefined(params.get("user_agent") ?? params.get("userAgent")),
+          idle_timeout: integerParam(params.get("idle_timeout") ?? params.get("idleTimeout")),
+          health_check_timeout: integerParam(
+            params.get("health_check_timeout") ?? params.get("healthCheckTimeout"),
+          ),
+          permit_without_stream: booleanParam(
+            params.get("permit_without_stream") ?? params.get("permitWithoutStream"),
+          ),
+          initial_windows_size: integerParam(
+            params.get("initial_windows_size") ?? params.get("initialWindowsSize"),
+          ),
         }),
       };
     case "httpupgrade":
@@ -1376,6 +1400,8 @@ function transportSettingsFromParams(
         value: compactRecord({
           path: stringOrUndefined(params.get("path")),
           host: stringOrUndefined(params.get("host")),
+          headers: hostHeaders(params),
+          acceptProxyProtocol: booleanParam(params.get("acceptProxyProtocol")),
         }),
       };
     case "xhttp":
@@ -1385,6 +1411,7 @@ function transportSettingsFromParams(
           path: stringOrUndefined(params.get("path")),
           host: stringOrUndefined(params.get("host")),
           mode: stringOrUndefined(params.get("mode")),
+          extra: jsonParam(params.get("extra")),
         }),
       };
     case "mkcp":
@@ -1411,12 +1438,91 @@ function transportSettingsFromParams(
   }
 }
 
+function shadowsocksPluginStreamSettings(params: URLSearchParams): Record<string, unknown> {
+  const plugin = params.get("plugin");
+  if (!plugin) {
+    return {};
+  }
+
+  const parts = plugin.split(";").map((item) => item.trim()).filter(Boolean);
+  const name = parts.shift()?.toLowerCase() ?? "";
+  const pluginParams = new URLSearchParams();
+  let hasTLS = false;
+  for (const part of parts) {
+    if (part === "tls") {
+      hasTLS = true;
+      continue;
+    }
+    const [key, ...rest] = part.split("=");
+    if (!key) {
+      continue;
+    }
+    pluginParams.set(key, rest.join("="));
+  }
+
+  if (name !== "v2ray-plugin" && name !== "xray-plugin") {
+    return {};
+  }
+
+  const mode = pluginParams.get("mode")?.toLowerCase();
+  if (mode === "websocket" || mode === "ws") {
+    pluginParams.set("type", "ws");
+  } else if (mode === "quic") {
+    pluginParams.set("type", "quic");
+  }
+  if (hasTLS && !pluginParams.has("security")) {
+    pluginParams.set("security", "tls");
+  }
+  return streamSettingsFromParams(pluginParams);
+}
+
+function rawHeaderFromParams(params: URLSearchParams): Record<string, unknown> | undefined {
+  const type = stringOrUndefined(params.get("headerType") ?? params.get("header"));
+  const requestHost = splitList(params.get("host"));
+  const requestPath = splitList(params.get("path"));
+  const response = stringOrUndefined(params.get("response"));
+  if (!type && !requestHost && !requestPath && !response) {
+    return undefined;
+  }
+  return compactRecord({
+    type,
+    request: requestHost || requestPath
+      ? compactRecord({
+          headers: compactRecord({
+            Host: requestHost,
+          }),
+          path: requestPath,
+        })
+      : undefined,
+    response: response ? compactRecord({ version: response }) : undefined,
+  });
+}
+
+function hostHeaders(params: URLSearchParams): Record<string, string> | undefined {
+  const host = params.get("host");
+  return host ? { Host: host } : undefined;
+}
+
 function tlsSettingsFromParams(params: URLSearchParams): Record<string, unknown> {
   return compactRecord({
     serverName: stringOrUndefined(params.get("sni") ?? params.get("peer")),
+    verifyPeerCertByName: stringOrUndefined(
+      params.get("verifyPeerCertByName") ?? params.get("verifyPeerCertByNames"),
+    ),
     fingerprint: stringOrUndefined(params.get("fp") ?? params.get("fingerprint")),
     alpn: splitList(params.get("alpn")),
     allowInsecure: booleanParam(params.get("allowInsecure") ?? params.get("insecure")),
+    minVersion: stringOrUndefined(params.get("minVersion")),
+    maxVersion: stringOrUndefined(params.get("maxVersion")),
+    cipherSuites: stringOrUndefined(params.get("cipherSuites")),
+    disableSystemRoot: booleanParam(params.get("disableSystemRoot")),
+    enableSessionResumption: booleanParam(params.get("enableSessionResumption")),
+    pinnedPeerCertSha256: stringOrUndefined(
+      params.get("pinnedPeerCertSha256") ?? params.get("pinnedPeerCertSHA256"),
+    ),
+    curvePreferences: splitList(params.get("curvePreferences")),
+    masterKeyLog: stringOrUndefined(params.get("masterKeyLog")),
+    echConfigList: stringOrUndefined(params.get("echConfigList") ?? params.get("ech")),
   });
 }
 
@@ -1424,8 +1530,9 @@ function realitySettingsFromParams(params: URLSearchParams): Record<string, unkn
   return compactRecord({
     serverName: stringOrUndefined(params.get("sni") ?? params.get("peer")),
     fingerprint: stringOrUndefined(params.get("fp") ?? params.get("fingerprint")),
-    publicKey: stringOrUndefined(params.get("pbk") ?? params.get("publicKey")),
+    password: stringOrUndefined(params.get("pbk") ?? params.get("publicKey") ?? params.get("password")),
     shortId: stringOrUndefined(params.get("sid") ?? params.get("shortId")),
+    mldsa65Verify: stringOrUndefined(params.get("mldsa65Verify")),
     spiderX: stringOrUndefined(params.get("spx") ?? params.get("spiderX")),
   });
 }
@@ -1822,6 +1929,18 @@ function copyNumericParam(
   if (Number.isInteger(value)) {
     target[targetKey] = value;
   }
+}
+
+function integerParam(value: string | null): number | undefined {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isInteger(parsed) ? parsed : undefined;
+}
+
+function jsonParam(value: string | null): unknown {
+  if (!value) {
+    return undefined;
+  }
+  return parseJSON(value) ?? undefined;
 }
 
 function stringOrUndefined(value: string | null): string | undefined {

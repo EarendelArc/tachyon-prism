@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri as coreIsTauri } from "@tauri-apps/api/core";
 
 export class TauriUnavailableError extends Error {
   constructor(command: string) {
@@ -10,9 +10,10 @@ export class TauriUnavailableError extends Error {
 export function isTauriRuntime(): boolean {
   const root = globalThis as typeof globalThis & {
     __TAURI_INTERNALS__?: unknown;
+    isTauri?: boolean;
     window?: { __TAURI_INTERNALS__?: unknown };
   };
-  return Boolean(root.__TAURI_INTERNALS__ || root.window?.__TAURI_INTERNALS__);
+  return Boolean(coreIsTauri() || root.isTauri || root.__TAURI_INTERNALS__ || root.window?.__TAURI_INTERNALS__);
 }
 
 export async function invokeDesktop<T>(

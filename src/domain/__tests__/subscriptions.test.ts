@@ -78,6 +78,33 @@ describe("parseSubscription", () => {
     });
   });
 
+  it("maps current Reality and TLS share parameters into Xray stream settings", () => {
+    const realityUri = "vless://uuid@example.com:443?type=tcp&security=reality&sni=www.example.com&pbk=public-key&sid=0123&mldsa65Verify=pq-verify&spx=/probe&fp=chrome#Reality";
+    const tlsUri = "trojan://password@tls.example.com:443?security=tls&sni=edge.example.com&echConfigList=ech-list&pinnedPeerCertSha256=sha256-pin&alpn=h2,http/1.1#TLS";
+    const [reality, tls] = parseSubscription([realityUri, tlsUri].join("\n"));
+
+    expect(reality.outbound?.streamSettings).toMatchObject({
+      network: "raw",
+      security: "reality",
+      realitySettings: {
+        serverName: "www.example.com",
+        password: "public-key",
+        shortId: "0123",
+        mldsa65Verify: "pq-verify",
+        spiderX: "/probe",
+      },
+    });
+    expect(tls.outbound?.streamSettings).toMatchObject({
+      security: "tls",
+      tlsSettings: {
+        serverName: "edge.example.com",
+        echConfigList: "ech-list",
+        pinnedPeerCertSha256: "sha256-pin",
+        alpn: ["h2", "http/1.1"],
+      },
+    });
+  });
+
   it("parses Trojan URIs", () => {
     const uri = "trojan://password@example.com:8443#Trojan Node";
     const nodes = parseSubscription(uri);
@@ -126,6 +153,23 @@ describe("parseSubscription", () => {
           password: "password",
         },
       ],
+    });
+  });
+
+  it("maps Shadowsocks v2ray-plugin options to equivalent Xray stream settings", () => {
+    const plugin = encodeURIComponent("v2ray-plugin;mode=websocket;tls;host=cdn.example.com;path=/ss");
+    const uri = `ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@10.0.0.1:8388?plugin=${plugin}#SS WS`;
+    const nodes = parseSubscription(uri);
+
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].transport).toBe("websocket");
+    expect(nodes[0].outbound?.streamSettings).toMatchObject({
+      network: "websocket",
+      security: "tls",
+      wsSettings: {
+        path: "/ss",
+        headers: { Host: "cdn.example.com" },
+      },
     });
   });
 
