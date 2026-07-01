@@ -650,11 +650,23 @@ function clashOutboundSettings(
     case "wireguard":
       return compactRecord({
         secretKey: clashValue(record, ["private-key", "secret-key", "secretKey"]),
-        address: splitList(clashValue(record, ["ip", "address"])),
+        address: clashList(record, ["ip", "ipv6", "interface-address", "local-address"]),
+        noKernelTun: clashBooleanOrUndefined(record, ["no-kernel-tun", "noKernelTun"]),
+        mtu: clashInteger(record, ["mtu"]),
+        reserved: clashIntegerList(record, ["reserved"]),
+        workers: clashInteger(record, ["workers"]),
+        domainStrategy: clashValue(record, ["domain-strategy", "domainStrategy"]),
         peers: [
           compactRecord({
             endpoint: `${address}:${port}`,
             publicKey: clashValue(record, ["public-key", "publicKey"]),
+            preSharedKey: clashValue(record, [
+              "pre-shared-key",
+              "preshared-key",
+              "preSharedKey",
+            ]),
+            keepAlive: clashInteger(record, ["keepalive", "keep-alive", "keepAlive"]),
+            allowedIPs: clashList(record, ["allowed-ips", "allowedIPs", "allowed_ips"]),
           }),
         ],
       });
@@ -790,6 +802,7 @@ function splitInlineYamlItems(value: string): string[] {
   const items: string[] = [];
   let quote = "";
   let depth = 0;
+  let squareDepth = 0;
   let start = 0;
   for (let index = 0; index < value.length; index += 1) {
     const char = value[index];
@@ -799,7 +812,11 @@ function splitInlineYamlItems(value: string): string[] {
       depth += 1;
     } else if (!quote && char === "}") {
       depth -= 1;
-    } else if (!quote && depth === 0 && char === ",") {
+    } else if (!quote && char === "[") {
+      squareDepth += 1;
+    } else if (!quote && char === "]") {
+      squareDepth -= 1;
+    } else if (!quote && depth === 0 && squareDepth === 0 && char === ",") {
       items.push(value.slice(start, index).trim());
       start = index + 1;
     }
@@ -835,6 +852,30 @@ function clashValue(record: Record<string, string>, keys: string[]): string {
 function clashBoolean(record: Record<string, string>, keys: string[]): boolean {
   const value = clashValue(record, keys).toLowerCase();
   return value === "true" || value === "1" || value === "yes";
+}
+
+function clashBooleanOrUndefined(
+  record: Record<string, string>,
+  keys: string[],
+): boolean | undefined {
+  const value = clashValue(record, keys).toLowerCase();
+  if (!value) {
+    return undefined;
+  }
+  return value === "true" || value === "1" || value === "yes";
+}
+
+function clashInteger(record: Record<string, string>, keys: string[]): number | undefined {
+  const value = Number.parseInt(clashValue(record, keys), 10);
+  return Number.isInteger(value) ? value : undefined;
+}
+
+function clashList(record: Record<string, string>, keys: string[]): string[] | undefined {
+  return splitList(clashValue(record, keys));
+}
+
+function clashIntegerList(record: Record<string, string>, keys: string[]): number[] | undefined {
+  return integerList(clashValue(record, keys));
 }
 
 function setParamIfPresent(params: URLSearchParams, key: string, value: string): void {
@@ -1161,31 +1202,46 @@ function parseHysteriaUri(rawUri: string, parsed: URL): ProxyNode | null {
 function parseWireGuardUri(rawUri: string, parsed: URL): ProxyNode | null {
   const port = parsePort(parsed.port);
   const publicKey = stringOrUndefined(decodeURIComponent(parsed.username));
-  const secretKey = stringOrUndefined(parsed.searchParams.get("secretKey"));
+  const secretKey = stringOrUndefined(
+    parsed.searchParams.get("secretKey") ??
+      parsed.searchParams.get("privateKey") ??
+      parsed.searchParams.get("private-key"),
+  );
   if (!parsed.hostname || port === 0 || !publicKey || !secretKey) {
     return null;
   }
 
-  const address = parsed.searchParams.getAll("address");
-  const reserved = parsed.searchParams
-    .getAll("reserved")
-    .flatMap((value) => value.split(","))
-    .map((value) => Number.parseInt(value.trim(), 10))
-    .filter((value) => Number.isInteger(value));
+  const address = stringListFromParams(parsed.searchParams, ["address", "ip"]);
+  const reserved = integerListFromParams(parsed.searchParams, ["reserved"]);
+  const peer = compactRecord({
+    endpoint: `${parsed.hostname}:${port}`,
+    publicKey,
+    preSharedKey: stringOrUndefined(
+      parsed.searchParams.get("preSharedKey") ??
+        parsed.searchParams.get("preshared-key") ??
+        parsed.searchParams.get("pre-shared-key"),
+    ),
+    keepAlive: integerParam(
+      parsed.searchParams.get("keepAlive") ??
+        parsed.searchParams.get("keepalive") ??
+        parsed.searchParams.get("keep-alive"),
+    ),
+    allowedIPs: stringListFromParams(parsed.searchParams, ["allowedIPs", "allowed-ips"]),
+  });
   const settings: Record<string, unknown> = {
     secretKey,
-    address: address.length > 0 ? address : undefined,
-    peers: [
-      {
-        endpoint: `${parsed.hostname}:${port}`,
-        publicKey,
-      },
-    ],
+    address,
+    peers: [peer],
+    reserved,
   };
-  if (reserved.length > 0) {
-    settings.reserved = reserved;
-  }
   copyNumericParam(parsed.searchParams, settings, "mtu", "mtu");
+  copyNumericParam(parsed.searchParams, settings, "workers", "workers");
+  const noKernelTun = booleanParam(
+    parsed.searchParams.get("noKernelTun") ?? parsed.searchParams.get("no-kernel-tun"),
+  );
+  if (noKernelTun !== undefined) {
+    settings.noKernelTun = noKernelTun;
+  }
   copyParam(parsed.searchParams, settings, "domainStrategy", "domainStrategy");
 
   const outbound = compactOutbound({ protocol: "wireguard", settings });
@@ -1943,6 +1999,33 @@ function splitList(value: string | null): string[] | undefined {
     .map((item) => item.trim().replace(/^["']|["']$/g, ""))
     .filter(Boolean);
   return items && items.length > 0 ? items : undefined;
+}
+
+function integerList(value: string | null): number[] | undefined {
+  const items = splitList(value)
+    ?.map((item) => Number.parseInt(item, 10))
+    .filter((item) => Number.isInteger(item));
+  return items && items.length > 0 ? items : undefined;
+}
+
+function stringListFromParams(
+  params: URLSearchParams,
+  keys: string[],
+): string[] | undefined {
+  const items = keys.flatMap((key) =>
+    params.getAll(key).flatMap((value) => splitList(value) ?? []),
+  );
+  return items.length > 0 ? items : undefined;
+}
+
+function integerListFromParams(
+  params: URLSearchParams,
+  keys: string[],
+): number[] | undefined {
+  const items = keys.flatMap((key) =>
+    params.getAll(key).flatMap((value) => integerList(value) ?? []),
+  );
+  return items.length > 0 ? items : undefined;
 }
 
 function decodeBase64(value: string): string | null {

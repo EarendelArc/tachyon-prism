@@ -313,12 +313,30 @@ describe("parseSubscription", () => {
   });
 
   it("parses WireGuard URIs", () => {
-    const uri = "wireguard://cHVibGljLWtleQ==@10.0.0.1:51820?secretKey=c2VjcmV0LWtleQ==&address=10.1.0.2/24&mtu=1420#WG Node";
+    const uri = "wireguard://cHVibGljLWtleQ==@10.0.0.1:51820?secretKey=c2VjcmV0LWtleQ==&address=10.1.0.2/24,fd00::2/128&reserved=1,2,3&mtu=1420&workers=2&noKernelTun=true&domainStrategy=ForceIP&preSharedKey=psk&keepAlive=25&allowedIPs=0.0.0.0/0,::/0#WG Node";
     const nodes = parseSubscription(uri);
     expect(nodes).toHaveLength(1);
     expect(nodes[0].protocol).toBe("wireguard");
     expect(nodes[0].address).toBe("10.0.0.1");
     expect(nodes[0].port).toBe(51820);
+    expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
+      secretKey: "c2VjcmV0LWtleQ==",
+      address: ["10.1.0.2/24", "fd00::2/128"],
+      reserved: [1, 2, 3],
+      mtu: 1420,
+      workers: 2,
+      noKernelTun: true,
+      domainStrategy: "ForceIP",
+      peers: [
+        {
+          endpoint: "10.0.0.1:51820",
+          publicKey: "cHVibGljLWtleQ==",
+          preSharedKey: "psk",
+          keepAlive: 25,
+          allowedIPs: ["0.0.0.0/0", "::/0"],
+        },
+      ],
+    });
   });
 
   it("parses base64-encoded subscription payloads", () => {
@@ -531,6 +549,7 @@ proxies:
     alpn: [h2, http/1.1]
     sni: tls.example.com
   - { name: Clash Hy2, type: hysteria2, server: hy2.example.com, port: 443, password: hy-secret, up: 50, down: 200, udp-idle-timeout: 20s }
+  - { name: Clash WG, type: wireguard, server: wg.example.com, port: 51820, private-key: private-key, public-key: public-key, ip: [10.0.0.2/32, fd00::2/128], reserved: [1, 2, 3], mtu: 1280, workers: 2, no-kernel-tun: true, pre-shared-key: psk, keepalive: 25, allowed-ips: [0.0.0.0/0, ::/0] }
 proxy-groups:
   - name: Selector
     type: select
@@ -541,7 +560,7 @@ proxy-groups:
 
     const nodes = parseSubscription(payload);
 
-    expect(nodes).toHaveLength(4);
+    expect(nodes).toHaveLength(5);
     expect(nodes[0]).toMatchObject({
       name: "Clash VLESS Reality",
       protocol: "vless",
@@ -610,6 +629,30 @@ proxy-groups:
         auth: "hy-secret",
         udpIdleTimeout: 20,
       },
+    });
+    expect(nodes[4]).toMatchObject({
+      name: "Clash WG",
+      protocol: "wireguard",
+      address: "wg.example.com",
+      port: 51820,
+      credential: "private-key",
+    });
+    expect(nodes[4].outbound?.settings).toMatchObject({
+      secretKey: "private-key",
+      address: ["10.0.0.2/32", "fd00::2/128"],
+      reserved: [1, 2, 3],
+      mtu: 1280,
+      workers: 2,
+      noKernelTun: true,
+      peers: [
+        {
+          endpoint: "wg.example.com:51820",
+          publicKey: "public-key",
+          preSharedKey: "psk",
+          keepAlive: 25,
+          allowedIPs: ["0.0.0.0/0", "::/0"],
+        },
+      ],
     });
   });
 

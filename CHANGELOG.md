@@ -67,6 +67,9 @@ All notable changes to Tachyon Prism will be documented in this file.
 - Align Xray transport parsing with current Project X transport behavior:
   current mKCP fields are preserved, while deprecated QUIC markers no longer
   emit an invalid `network: "quic"` value.
+- Preserve richer WireGuard settings from URI and Clash/Mihomo subscriptions,
+  including interface addresses, reserved bytes, workers, no-kernel-tun, and
+  peer pre-shared-key / keepalive / allowed-ips fields.
 
 ### Verified
 - Real subscription URL smoke test, Prism/Core config contract test, default
