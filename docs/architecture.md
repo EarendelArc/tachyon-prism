@@ -1,6 +1,6 @@
 # Tachyon Prism Architecture
 
-[中文说明](architecture.zh-CN.md)
+[涓枃璇存槑](architecture.zh-CN.md)
 
 Prism is a Tauri desktop shell with a React frontend and a Rust backend.
 
@@ -41,8 +41,9 @@ Prism generates two JSON files from the selected node and user settings:
 
 - `xray-client.json`: local SOCKS inbound + Xray outbound from the selected node.
 - `client.json`: Tachyon Core client config for the TGP game path, including
-  game profiles under `client.routing.game_profiles` and launcher policy under
-  `client.routing.launchers`.
+  game profiles under `client.routing.game_profiles`, launcher policy under
+  `client.routing.launchers`, TGP bind addresses under
+  `client.proxy.local_addrs`, and the multipath switch under `tgp.multipath`.
 
 The generated configs are written to the Tauri app config directory and can also
 be copied to clipboard from the Config panel.
@@ -78,7 +79,7 @@ individual start/stop controls.
 
 | Layer | Tool | Count |
 | --- | --- | --- |
-| Rust backend | `cargo test` | 65 tests |
+| Rust backend | `cargo test` | 66 tests |
 | Frontend domain | Vitest | 6 suites plus 1 live opt-in suite |
 | TypeScript types | `tsc --noEmit` | Enforced in CI |
 

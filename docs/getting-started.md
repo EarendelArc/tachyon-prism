@@ -51,7 +51,7 @@ TUN mode.
 
 Go to **Settings > Core** and find **Config Drafts**:
 
-- Prism generates `xray-client.json` and `client.json` from your selected node, game profiles, launcher settings, and runtime ports.
+- Prism generates `xray-client.json` and `client.json` from your selected node, game profiles, launcher settings, runtime ports, TGP local bind addresses, and the multipath switch.
 - Click **Save** to write them to the Prism config directory.
 - Click **Validate Configs** to run `xray run -test -config` and `tachyon-core validate --config` before launching.
 - You can also **Copy** either config to the clipboard.

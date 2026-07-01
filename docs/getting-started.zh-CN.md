@@ -48,7 +48,7 @@ Windows 上 Prism 还会检查 Tachyon Core 所需的 `wintun.dll` sidecar。Pri
 
 进入 **设置 > 核心**，找到 **配置草稿**：
 
-- Prism 会根据当前节点、游戏配置、启动器设置和运行端口生成 `xray-client.json` 与 `client.json`。
+- Prism 会根据当前节点、游戏配置、启动器设置、运行端口、TGP 本地绑定地址和多路径开关生成 `xray-client.json` 与 `client.json`。
 - 点击 **保存** 把配置写入 Prism 配置目录。
 - 点击 **验证配置**，启动前运行 `xray run -test -config` 和 `tachyon-core validate --config`。
 - 也可以把任意一份配置复制到剪贴板。
