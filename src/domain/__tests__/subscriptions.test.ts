@@ -78,13 +78,11 @@ describe("parseSubscription", () => {
     expect(nodes[0].port).toBe(443);
     expect(nodes[0].transport).toBe("websocket");
     expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
-      vnext: [
-        {
-          address: "10.0.0.1",
-          port: 443,
-          users: [{ id: "test-uuid", alterId: 0, security: "auto" }],
-        },
-      ],
+      address: "10.0.0.1",
+      port: 443,
+      id: "test-uuid",
+      alterId: 0,
+      security: "auto",
     });
     expect(buildXrayOutboundDraft(nodes[0]).streamSettings).toMatchObject({
       network: "websocket",
@@ -108,13 +106,10 @@ describe("parseSubscription", () => {
     expect(nodes[0].transport).toBe("websocket");
     expect(nodes[0].security).toBe("tls");
     expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
-      vnext: [
-        {
-          address: "10.0.0.1",
-          port: 443,
-          users: [{ id: "test-uuid", encryption: "none" }],
-        },
-      ],
+      address: "10.0.0.1",
+      port: 443,
+      id: "test-uuid",
+      encryption: "none",
     });
   });
 
@@ -204,7 +199,9 @@ describe("parseSubscription", () => {
     expect(nodes[0].credential).toBe("password");
     expect(nodes[0].name).toBe("Trojan Node");
     expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
-      servers: [{ address: "example.com", port: 8443, password: "password" }],
+      address: "example.com",
+      port: 8443,
+      password: "password",
     });
   });
 
@@ -234,14 +231,10 @@ describe("parseSubscription", () => {
     expect(nodes[0].port).toBe(8388);
     expect(nodes[0].name).toBe("SS Node");
     expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
-      servers: [
-        {
-          address: "10.0.0.1",
-          port: 8388,
-          method: "aes-256-gcm",
-          password: "password",
-        },
-      ],
+      address: "10.0.0.1",
+      port: 8388,
+      method: "aes-256-gcm",
+      password: "password",
     });
   });
 
@@ -293,17 +286,14 @@ describe("parseSubscription", () => {
     expect(nodes[0].port).toBe(1080);
     expect(nodes[0].credential).toContain("user");
     expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
-      servers: [
-        {
-          address: "10.0.0.1",
-          port: 1080,
-          users: [{ user: "user", pass: "pass" }],
-        },
-      ],
+      address: "10.0.0.1",
+      port: 1080,
+      user: "user",
+      pass: "pass",
     });
   });
 
-  it("parses HTTP outbound URIs into Xray server arrays", () => {
+  it("parses HTTP outbound URIs into current Xray settings", () => {
     const uri = "http://user:pass@proxy.example.com:8080#HTTP Proxy";
     const nodes = parseSubscription(uri);
     expect(nodes).toHaveLength(1);
@@ -315,13 +305,10 @@ describe("parseSubscription", () => {
       credential: "user:***",
     });
     expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
-      servers: [
-        {
-          address: "proxy.example.com",
-          port: 8080,
-          users: [{ user: "user", pass: "pass" }],
-        },
-      ],
+      address: "proxy.example.com",
+      port: 8080,
+      user: "user",
+      pass: "pass",
     });
   });
 
@@ -573,19 +560,11 @@ proxy-groups:
       },
     });
     expect(nodes[0].outbound?.settings).toMatchObject({
-      vnext: [
-        {
-          address: "vless.example.com",
-          port: 443,
-          users: [
-            {
-              id: "vless-uuid",
-              encryption: "none",
-              flow: "xtls-rprx-vision",
-            },
-          ],
-        },
-      ],
+      address: "vless.example.com",
+      port: 443,
+      id: "vless-uuid",
+      encryption: "none",
+      flow: "xtls-rprx-vision",
     });
     expect(nodes[1]).toMatchObject({
       name: "Clash SS",
@@ -595,14 +574,10 @@ proxy-groups:
       credential: "2022-blake3-aes-128-gcm:ss-secret",
     });
     expect(nodes[1].outbound?.settings).toMatchObject({
-      servers: [
-        {
-          address: "ss.example.com",
-          port: 8388,
-          method: "2022-blake3-aes-128-gcm",
-          password: "ss-secret",
-        },
-      ],
+      address: "ss.example.com",
+      port: 8388,
+      method: "2022-blake3-aes-128-gcm",
+      password: "ss-secret",
     });
     expect(nodes[2]).toMatchObject({
       name: "Clash Trojan TLS",
@@ -847,13 +822,10 @@ describe("loadSubscriptionSnapshot", () => {
       const loaded = loadSubscriptionSnapshot();
       expect(activeSubscription(loaded)?.name).toBe("Stored");
       expect(buildXrayOutboundDraft(loaded.nodes[0]).settings).toMatchObject({
-        vnext: [
-          {
-            address: "example.com",
-            port: 443,
-            users: [{ id: "uuid", encryption: "none" }],
-          },
-        ],
+        address: "example.com",
+        port: 443,
+        id: "uuid",
+        encryption: "none",
       });
     } finally {
       if (previous) {
@@ -877,9 +849,9 @@ describe("buildXrayOutboundDraft", () => {
       outbound: {
         protocol: "vmess",
         settings: {
-          vnext: [
-            { address: "10.0.0.1", port: 443, users: [{ id: "uuid" }] },
-          ],
+          address: "10.0.0.1",
+          port: 443,
+          id: "uuid",
         },
       },
     };

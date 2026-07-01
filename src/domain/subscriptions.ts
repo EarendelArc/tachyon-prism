@@ -603,57 +603,33 @@ function clashOutboundSettings(
 ): Record<string, unknown> {
   switch (protocol) {
     case "vless":
-      return {
-        vnext: [
-          {
-            address,
-            port,
-            users: [
-              compactRecord({
-                id: clashValue(record, ["uuid", "id"]),
-                encryption: clashValue(record, ["encryption"]) || "none",
-                flow: clashValue(record, ["flow"]),
-              }),
-            ],
-          },
-        ],
-      };
+      return compactRecord({
+        address,
+        port,
+        id: clashValue(record, ["uuid", "id"]),
+        encryption: clashValue(record, ["encryption"]) || "none",
+        flow: clashValue(record, ["flow"]),
+      });
     case "vmess":
-      return {
-        vnext: [
-          {
-            address,
-            port,
-            users: [
-              compactRecord({
-                id: clashValue(record, ["uuid", "id"]),
-                security: clashValue(record, ["cipher", "security"]) || "auto",
-              }),
-            ],
-          },
-        ],
-      };
+      return compactRecord({
+        address,
+        port,
+        id: clashValue(record, ["uuid", "id"]),
+        security: clashValue(record, ["cipher", "security"]) || "auto",
+      });
     case "trojan":
-      return {
-        servers: [
-          compactRecord({
-            address,
-            port,
-            password: clashValue(record, ["password"]),
-          }),
-        ],
-      };
+      return compactRecord({
+        address,
+        port,
+        password: clashValue(record, ["password"]),
+      });
     case "shadowsocks":
-      return {
-        servers: [
-          compactRecord({
-            address,
-            port,
-            method: clashValue(record, ["cipher", "method"]),
-            password: clashValue(record, ["password"]),
-          }),
-        ],
-      };
+      return compactRecord({
+        address,
+        port,
+        method: clashValue(record, ["cipher", "method"]),
+        password: clashValue(record, ["password"]),
+      });
     case "hysteria":
       return compactRecord({
         version: clashValue(record, ["type"]).toLowerCase() === "hysteria" ? 1 : 2,
@@ -666,11 +642,10 @@ function clashOutboundSettings(
       const pass = clashValue(record, ["password", "pass"]);
       const server: Record<string, unknown> = { address, port };
       if (user) {
-        server.users = [compactRecord({ user, pass })];
+        server.user = user;
+        server.pass = pass;
       }
-      return {
-        servers: [compactRecord(server)],
-      };
+      return compactRecord(server);
     }
     case "wireguard":
       return compactRecord({
@@ -983,30 +958,20 @@ function parseVLESSOrTrojanUri(
   let settings: Record<string, unknown>;
 
   if (protocol === "vless") {
-    const user: Record<string, unknown> = {
+    const settingsDraft: Record<string, unknown> = {
+      address: parsed.hostname,
+      port,
       id: credential ?? "",
       encryption: parsed.searchParams.get("encryption") || "none",
     };
-    copyParam(parsed.searchParams, user, "flow", "flow");
-    settings = {
-      vnext: [
-        {
-          address: parsed.hostname,
-          port,
-          users: [compactRecord(user)],
-        },
-      ],
-    };
+    copyParam(parsed.searchParams, settingsDraft, "flow", "flow");
+    settings = compactRecord(settingsDraft);
   } else {
-    settings = {
-      servers: [
-        {
-          address: parsed.hostname,
-          port,
-          password: credential ?? "",
-        },
-      ],
-    };
+    settings = compactRecord({
+      address: parsed.hostname,
+      port,
+      password: credential ?? "",
+    });
   }
 
   const outbound = compactOutbound({
@@ -1064,19 +1029,11 @@ function nodeFromVMessShare(value: Record<string, unknown>, rawUri: string): Pro
   const outbound = compactOutbound({
     protocol: "vmess",
     settings: {
-      vnext: [
-        {
-          address,
-          port,
-          users: [
-            compactRecord({
-              id,
-              alterId: numberValue(value.aid),
-              security: stringValue(value.scy) || stringValue(value.security) || "auto",
-            }),
-          ],
-        },
-      ],
+      address,
+      port,
+      id,
+      alterId: numberValue(value.aid),
+      security: stringValue(value.scy) || stringValue(value.security) || "auto",
     },
     streamSettings: streamSettingsFromParams(streamParams),
   });
@@ -1114,14 +1071,10 @@ function parseShadowsocksUri(rawUri: string): ProxyNode | null {
   const outbound = compactOutbound({
     protocol: "shadowsocks",
     settings: {
-      servers: [
-        {
-          address: parsed.hostname,
-          port,
-          method,
-          password,
-        },
-      ],
+      address: parsed.hostname,
+      port,
+      method,
+      password,
     },
     streamSettings,
   });
@@ -1147,21 +1100,14 @@ function parseSocksOrHTTPUri(
 
   const user = stringOrUndefined(decodeURIComponent(parsed.username));
   const pass = stringOrUndefined(decodeURIComponent(parsed.password));
-  const server: Record<string, unknown> = {
+  const settings: Record<string, unknown> = {
     address: parsed.hostname,
     port,
   };
   if (user) {
-    server.users = [
-      compactRecord({
-        user,
-        pass,
-      }),
-    ];
+    settings.user = user;
+    settings.pass = pass;
   }
-  const settings: Record<string, unknown> = {
-    servers: [compactRecord(server)],
-  };
 
   const streamSettings =
     parsed.protocol === "https:" ? { security: "tls", tlsSettings: { serverName: parsed.hostname } } : {};
@@ -1726,12 +1672,12 @@ function outboundRequiresCanonicalUpgrade(
   switch (protocol) {
     case "vless":
     case "vmess":
-      return "address" in settings || "id" in settings || !Array.isArray(settings.vnext);
+      return Array.isArray(settings.vnext);
     case "trojan":
     case "shadowsocks":
     case "socks":
     case "http":
-      return "address" in settings || "server" in settings || !Array.isArray(settings.servers);
+      return Array.isArray(settings.servers);
     default:
       return false;
   }

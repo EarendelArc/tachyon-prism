@@ -23,13 +23,10 @@ const mockVMessNode: ProxyNode = {
   outbound: {
     protocol: "vmess",
     settings: {
-      vnext: [
-        {
-          address: "10.0.0.1",
-          port: 443,
-          users: [{ id: "test-uuid", security: "auto" }],
-        },
-      ],
+      address: "10.0.0.1",
+      port: 443,
+      id: "test-uuid",
+      security: "auto",
     },
   },
 };
@@ -45,13 +42,9 @@ const mockTrojanNode: ProxyNode = {
   outbound: {
     protocol: "trojan",
     settings: {
-      servers: [
-        {
-          address: "trojan.example.com",
-          port: 8443,
-          password: "password123",
-        },
-      ],
+      address: "trojan.example.com",
+      port: 8443,
+      password: "password123",
     },
     streamSettings: {
       network: "tcp",
