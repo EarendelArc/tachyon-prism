@@ -41,8 +41,14 @@ All notable changes to Tachyon Prism will be documented in this file.
 - Documentation section in README with links to all docs.
 
 ### Fixed
-- Generate canonical Xray outbound settings from URI and Clash/Mihomo
-  subscriptions (`vnext` / `servers`) instead of display-only shorthand fields.
+- Generate current Xray outbound settings from URI and Clash/Mihomo
+  subscriptions using flat `settings.address` / `settings.port` fields instead
+  of legacy `vnext` / `servers` arrays, while still reading old JSON outbounds.
+- Restore the shared i18n dictionary so Chinese and English status strings do
+  not fall back to mojibake text.
+- Add a Windows native titlebar hit-test/subclass path so custom frameless
+  windows can drag from the top title region even when WebView2 child windows
+  receive the mouse event first.
 - Preserve desktop subscription fetch errors from the Tauri backend instead of
   masking them with browser CORS fallback errors.
 - `Start All` now attempts Xray Core and Tachyon Core independently, so one
@@ -63,8 +69,9 @@ All notable changes to Tachyon Prism will be documented in this file.
 
 ### Verified
 - Real subscription URL smoke test, Prism/Core config contract test, default
-  frontend tests, TypeScript typecheck, Vite production build, native window
-  smoke, and UI screenshot smoke.
+  frontend tests, TypeScript typecheck, Rust check/tests, and Vite production
+  build. Native window smoke should be rerun when desktop interaction testing is
+  convenient again.
 - Parsed VMess WebSocket, Trojan-Go-compatible, and Hysteria subscription nodes
   round-trip into generated Xray client config drafts.
 
