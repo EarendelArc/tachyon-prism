@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activeSubscription,
   buildXrayOutboundDraft,
   createSubscriptionSnapshot,
+  fetchSubscriptionText,
   loadSubscriptionSnapshot,
   parseSubscription,
   parseSubscriptionWithReport,
@@ -12,6 +13,60 @@ import {
   totalSubscriptionNodes,
 } from "../subscriptions";
 import type { ProxyNode } from "../subscriptions";
+
+const tauriMocks = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  isTauri: vi.fn(() => false),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: tauriMocks.invoke,
+  isTauri: tauriMocks.isTauri,
+}));
+
+const originalFetch = globalThis.fetch;
+
+beforeEach(() => {
+  tauriMocks.invoke.mockReset();
+  tauriMocks.isTauri.mockReturnValue(false);
+});
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
+
+describe("fetchSubscriptionText", () => {
+  it("uses browser fetch only when Tauri is unavailable", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () => "vless://uuid@example.com:443#Node",
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    await expect(fetchSubscriptionText("https://example.com/sub")).resolves.toContain("vless://");
+    expect(tauriMocks.invoke).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://example.com/sub",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          accept: expect.stringContaining("text/plain"),
+        }),
+      }),
+    );
+  });
+
+  it("preserves desktop fetch errors instead of masking them with CORS fallback", async () => {
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.invoke.mockRejectedValue(new Error("request failed: 502"));
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    await expect(fetchSubscriptionText("https://example.com/sub")).rejects.toThrow(
+      "request failed: 502",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
 
 describe("parseSubscription", () => {
   it("parses a VMess URI", () => {

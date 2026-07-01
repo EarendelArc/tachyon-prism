@@ -1,4 +1,4 @@
-import { invokeDesktop } from "./tauri";
+import { invokeDesktop, isTauriRuntime } from "./tauri";
 
 export type XrayOutboundProtocol =
   | "blackhole"
@@ -113,7 +113,10 @@ export async function fetchSubscriptionText(sourceUrl: string): Promise<string> 
 
   try {
     return await invokeDesktop<string>("fetch_subscription_text", { sourceUrl: url });
-  } catch {
+  } catch (error) {
+    if (isTauriRuntime()) {
+      throw error;
+    }
     const response = await fetch(url, {
       headers: {
         accept: "text/plain, application/json, application/octet-stream, */*",

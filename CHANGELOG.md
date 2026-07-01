@@ -43,6 +43,8 @@ All notable changes to Tachyon Prism will be documented in this file.
 ### Fixed
 - Generate canonical Xray outbound settings from URI and Clash/Mihomo
   subscriptions (`vnext` / `servers`) instead of display-only shorthand fields.
+- Preserve desktop subscription fetch errors from the Tauri backend instead of
+  masking them with browser CORS fallback errors.
 - Preserve VMess share-link transport settings correctly, including WebSocket
   links where VMess `type` means header type rather than network.
 - Parse Trojan-Go-compatible links as Xray Trojan outbounds when their
