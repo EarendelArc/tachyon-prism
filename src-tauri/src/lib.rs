@@ -2926,6 +2926,14 @@ impl ManagedProcess {
         self.config_path = Some(path_string(&config));
         self.started_at = Some(now_epoch_seconds());
         self.last_error = None;
+        std::thread::sleep(Duration::from_millis(150));
+        self.refresh(label)?;
+        if self.child.is_none() {
+            return Err(self
+                .last_error
+                .clone()
+                .unwrap_or_else(|| format!("{label} exited immediately")));
+        }
         Ok(self.snapshot())
     }
 
@@ -3639,6 +3647,35 @@ mod tests {
 
         validate_process_start_inputs("xray", ManagedBinaryKind::Xray, &binary, &config)
             .expect("Xray does not require Tachyon sidecars");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn managed_process_reports_immediate_exit_as_start_failure() {
+        let dir = std::env::temp_dir().join("tachyon-test-immediate-exit");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("xray-client.json");
+        std::fs::write(&config, b"{}").unwrap();
+        let binary = std::env::current_exe().expect("current test binary");
+        let mut process = ManagedProcess::default();
+
+        let error = match process.start(
+            "xray",
+            ManagedBinaryKind::Xray,
+            path_string(&binary),
+            path_string(&config),
+            &["--help"],
+        ) {
+            Ok(_) => panic!("short-lived child must not be reported as running"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.contains("exited immediately") || error.contains("exited with"),
+            "unexpected error: {error}",
+        );
+        assert_ne!(process.status().state, "running");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
