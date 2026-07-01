@@ -169,6 +169,7 @@ const emptyRuntimeInputs = {
   tachyonFecDynamic: true,
   tachyonFecGroupTimeoutMs: 20,
   tachyonFecParityShards: 2,
+  tachyonConnectionMigration: true,
   tachyonLocalAddrs: "",
   tachyonMultipath: false,
   tachyonServerAddress: "",
@@ -257,6 +258,8 @@ const zh = {
   tachyonAdaptiveFecDesc: "动态冗余调节",
   tachyonFecShards: "TGP FEC 分片",
   tachyonFecTiming: "TGP FEC 时序",
+  tachyonConnectionMigration: "TGP 连接迁移",
+  tachyonConnectionMigrationDesc: "允许 IP 或网络切换时保持游戏会话",
   tachyonLocalAddrs: "TGP 本地绑定地址",
   tachyonMultipath: "TGP 多路径",
   tachyonMultipathDesc: "同时使用多块网卡发送游戏 UDP",
@@ -455,6 +458,8 @@ const en: typeof zh = {
   tachyonAdaptiveFecDesc: "Dynamic parity tuning",
   tachyonFecShards: "TGP FEC Shards",
   tachyonFecTiming: "TGP FEC Timing",
+  tachyonConnectionMigration: "TGP Connection Migration",
+  tachyonConnectionMigrationDesc: "Keep game sessions alive across IP or network changes",
   tachyonLocalAddrs: "TGP Local Bind Addresses",
   tachyonMultipath: "TGP Multipath",
   tachyonMultipathDesc: "Send game UDP over multiple interfaces",
@@ -814,6 +819,7 @@ function draftText(
         fecDynamic: runtimeSettings.tachyonFecDynamic,
         fecGroupTimeoutMs: runtimeSettings.tachyonFecGroupTimeoutMs,
         fecParityShards: runtimeSettings.tachyonFecParityShards,
+        connectionMigration: runtimeSettings.tachyonConnectionMigration,
         grpcListen: runtimeSettings.tachyonGrpcListen,
         grpcPort: runtimeSettings.tachyonGrpcPort,
         ipcListen: runtimeSettings.tachyonIpcListen,
@@ -3401,6 +3407,23 @@ function SettingsView({
                   />
                 </label>
                 <label className="wide-field">
+                  <span>{ui.tachyonConnectionMigration}</span>
+                  <label className="mini-check">
+                    <input
+                      checked={runtimeInputs.tachyonConnectionMigration || runtimeInputs.tachyonMultipath}
+                      disabled={runtimeInputs.tachyonMultipath}
+                      type="checkbox"
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({
+                          ...current,
+                          tachyonConnectionMigration: event.target.checked,
+                        }))
+                      }
+                    />
+                    {ui.tachyonConnectionMigrationDesc}
+                  </label>
+                </label>
+                <label className="wide-field">
                   <span>{ui.tachyonMultipath}</span>
                   <label className="mini-check">
                     <input
@@ -3410,6 +3433,9 @@ function SettingsView({
                         setRuntimeInputs((current) => ({
                           ...current,
                           tachyonMultipath: event.target.checked,
+                          tachyonConnectionMigration: event.target.checked
+                            ? true
+                            : current.tachyonConnectionMigration,
                         }))
                       }
                     />

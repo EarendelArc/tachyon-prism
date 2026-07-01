@@ -21,6 +21,7 @@ export interface RuntimeSettings {
   tachyonFecDynamic: boolean;
   tachyonFecGroupTimeoutMs: number;
   tachyonFecParityShards: number;
+  tachyonConnectionMigration: boolean;
   tachyonLocalAddrs: string;
   tachyonMultipath: boolean;
   tachyonServerAddress: string;
@@ -341,6 +342,7 @@ function previewRuntimeSettings(): RuntimeSettings {
     tachyonFecDynamic: true,
     tachyonFecGroupTimeoutMs: 20,
     tachyonFecParityShards: 2,
+    tachyonConnectionMigration: true,
     tachyonLocalAddrs: "",
     tachyonMultipath: false,
     tachyonServerAddress: "",

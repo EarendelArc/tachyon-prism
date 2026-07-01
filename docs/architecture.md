@@ -43,7 +43,8 @@ Prism generates two JSON files from the selected node and user settings:
 - `client.json`: Tachyon Core client config for the TGP game path, including
   game profiles under `client.routing.game_profiles`, launcher policy under
   `client.routing.launchers`, TGP bind addresses under
-  `client.proxy.local_addrs`, and the multipath switch under `tgp.multipath`.
+  `client.proxy.local_addrs`, connection migration under
+  `tgp.connection_migration`, and the multipath switch under `tgp.multipath`.
 
 The generated configs are written to the Tauri app config directory and can also
 be copied to clipboard from the Config panel.

@@ -818,6 +818,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
             "Tachyon Server",
             "TGP Server",
             "TGP Local Bind Addresses",
+            "TGP Connection Migration",
             "TGP Multipath",
             "Xray SOCKS",
             "Xray Stats API",

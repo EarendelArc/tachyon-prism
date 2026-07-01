@@ -24,6 +24,7 @@ export interface CoreClientDraftOptions {
   fecParityShards?: number;
   gameProfiles?: GameProfile[];
   launchers?: LauncherSettings;
+  connectionMigration?: boolean;
   localAddrs?: string[];
   grpcListen?: string;
   grpcPort?: number;
@@ -120,8 +121,12 @@ export function buildCoreClientConfigDraft(
   if (!remoteEndpoint) {
     throw new Error("Tachyon server address is required");
   }
+  const connectionMigration = options.connectionMigration ?? true;
   if (options.multipath && localAddrs.length < 2) {
     throw new Error("Tachyon multipath requires at least two local bind addresses");
+  }
+  if (options.multipath && !connectionMigration) {
+    throw new Error("Tachyon multipath requires connection migration");
   }
   const gameProfiles = options.gameProfiles ?? [];
   const launchers = options.launchers ?? defaultLauncherSettings;
@@ -171,7 +176,7 @@ export function buildCoreClientConfigDraft(
         initial_rate_pps: 128,
         max_rate_pps: 1000,
       },
-      connection_migration: true,
+      connection_migration: connectionMigration,
       multipath: options.multipath ?? false,
       handshake_timeout: "5s",
       session_idle_timeout: "60s",

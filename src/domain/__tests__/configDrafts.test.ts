@@ -312,6 +312,17 @@ describe("buildCoreClientConfigDraft", () => {
     ).toThrow(/multipath/);
   });
 
+  it("throws when multipath is enabled without connection migration", () => {
+    expect(() =>
+      buildCoreClientConfigDraft({
+        serverAddr: "relay.example.com:443",
+        localAddrs: ["127.0.0.1:0", "127.0.0.2:0"],
+        connectionMigration: false,
+        multipath: true,
+      }),
+    ).toThrow(/connection migration/);
+  });
+
   it("sets proxy endpoint from Tachyon server settings", () => {
     const config = buildCoreClientConfigDraft({
       serverAddr: "relay.example.com:443",
@@ -351,6 +362,16 @@ describe("buildCoreClientConfigDraft", () => {
     });
     expect(tgp.pacing).toBeDefined();
     expect(tgp.connection_migration).toBe(true);
+  });
+
+  it("can disable TGP connection migration without multipath", () => {
+    const config = buildCoreClientConfigDraft({
+      ...mockCoreOptions,
+      connectionMigration: false,
+    });
+    const tgp = config.tgp as Record<string, unknown>;
+    expect(tgp.connection_migration).toBe(false);
+    expect(tgp.multipath).toBe(false);
   });
 
   it("includes IPC settings", () => {

@@ -53,6 +53,8 @@ struct RuntimeSettings {
     tachyon_fec_group_timeout_ms: u32,
     #[serde(default)]
     tachyon_fec_parity_shards: u32,
+    #[serde(default = "default_true")]
+    tachyon_connection_migration: bool,
     #[serde(default)]
     tachyon_local_addrs: String,
     #[serde(default)]
@@ -2022,6 +2024,8 @@ fn normalize_runtime_settings(
             0,
             32,
         ),
+        tachyon_connection_migration: settings.tachyon_connection_migration
+            || settings.tachyon_multipath,
         tachyon_local_addrs: normalize_address_list(settings.tachyon_local_addrs),
         tachyon_multipath: settings.tachyon_multipath,
         tachyon_server_address: non_empty_or(
@@ -2086,6 +2090,7 @@ fn default_runtime_settings(app: &tauri::AppHandle) -> Result<RuntimeSettings, S
         tachyon_fec_dynamic: true,
         tachyon_fec_group_timeout_ms: 20,
         tachyon_fec_parity_shards: 2,
+        tachyon_connection_migration: true,
         tachyon_local_addrs: String::new(),
         tachyon_multipath: false,
         tachyon_server_address: String::new(),
@@ -3831,6 +3836,7 @@ mod tests {
     fn serde_defaults_enable_adaptive_tachyon_fec() {
         let missing: RuntimeSettings = serde_json::from_str("{}").expect("settings");
         assert!(missing.tachyon_fec_dynamic);
+        assert!(missing.tachyon_connection_migration);
         assert!(!missing.tachyon_multipath);
         assert!(!missing.tachyon_tun_auto_route);
         assert!(!missing.tachyon_tun_dns_hijack);
