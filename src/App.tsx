@@ -250,6 +250,10 @@ const zh = {
   sortByDelay: "按延迟排序",
   start: "启动",
   startAll: "启动全部",
+  startAllComplete: "Xray Core 与 Tachyon Core 已启动",
+  startAllPartial: "Xray Core {xray} / Tachyon Core {tachyon}",
+  runtimeStarted: "已启动",
+  runtimeFailed: "启动失败",
   stop: "停止",
   stopAll: "停止全部",
   subscriptions: "订阅",
@@ -450,6 +454,10 @@ const en: typeof zh = {
   sortByDelay: "Sort by latency",
   start: "Start",
   startAll: "Start All",
+  startAllComplete: "Xray Core and Tachyon Core started",
+  startAllPartial: "Xray Core {xray} / Tachyon Core {tachyon}",
+  runtimeStarted: "started",
+  runtimeFailed: "failed",
   stop: "Stop",
   stopAll: "Stop All",
   subscriptions: "Subscriptions",
@@ -1959,12 +1967,18 @@ export function App() {
 
   async function startAllRuntime() {
     const xrayStarted = await startRuntime("xray");
-    if (!xrayStarted) {
-      await refreshRuntime();
-      return;
-    }
-    await startRuntime("tachyonCore");
+    const tachyonStarted = await startRuntime("tachyonCore");
     await refreshRuntime();
+    if (xrayStarted && tachyonStarted) {
+      setMessage(ui.startAllComplete);
+    } else if (xrayStarted || tachyonStarted) {
+      setMessage(
+        templateValues(ui.startAllPartial, {
+          xray: xrayStarted ? ui.runtimeStarted : ui.runtimeFailed,
+          tachyon: tachyonStarted ? ui.runtimeStarted : ui.runtimeFailed,
+        }),
+      );
+    }
   }
 
   async function stopAllRuntime() {

@@ -45,6 +45,8 @@ All notable changes to Tachyon Prism will be documented in this file.
   subscriptions (`vnext` / `servers`) instead of display-only shorthand fields.
 - Preserve desktop subscription fetch errors from the Tauri backend instead of
   masking them with browser CORS fallback errors.
+- `Start All` now attempts Xray Core and Tachyon Core independently, so one
+  core failing readiness checks no longer prevents the other from starting.
 - Preserve VMess share-link transport settings correctly, including WebSocket
   links where VMess `type` means header type rather than network.
 - Parse Trojan-Go-compatible links as Xray Trojan outbounds when their
