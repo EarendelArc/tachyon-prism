@@ -153,7 +153,6 @@ describe("buildXrayClientConfigDraft", () => {
     const inbounds = config.inbounds as Array<Record<string, unknown>>;
     const outbounds = config.outbounds as Array<Record<string, unknown>>;
     const apiInbound = inbounds.find((inbound) => inbound.tag === "tachyon-xray-api-in");
-    const apiOutbound = outbounds.find((outbound) => outbound.tag === "tachyon-xray-api");
     const api = config.api as Record<string, unknown>;
     const policy = config.policy as Record<string, unknown>;
     const routing = config.routing as Record<string, unknown>;
@@ -165,7 +164,7 @@ describe("buildXrayClientConfigDraft", () => {
       protocol: "tunnel",
     });
     expect((apiInbound?.settings as Record<string, unknown>).rewriteAddress).toBe("127.0.0.1");
-    expect(apiOutbound).toMatchObject({ protocol: "freedom" });
+    expect(outbounds.some((outbound) => outbound.tag === "tachyon-xray-api")).toBe(false);
     expect(api.services).toEqual(["StatsService"]);
     expect(config.stats).toEqual({});
     expect(policy).toBeDefined();

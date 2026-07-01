@@ -92,10 +92,6 @@ export function buildXrayClientConfigDraft(
         rewriteAddress: "127.0.0.1",
       },
     });
-    outbounds.push({
-      tag: "tachyon-xray-api",
-      protocol: "freedom",
-    });
     config.api = {
       tag: "tachyon-xray-api",
       services: ["StatsService"],
