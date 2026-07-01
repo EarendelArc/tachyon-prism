@@ -204,6 +204,11 @@ def assert_contains(text: str, *needles: str) -> None:
         raise AssertionError(f"missing text: {missing}\n--- page text ---\n{text[:1600]}")
 
 
+def assert_contains_any(text: str, *needles: str) -> None:
+    if not any(needle in text for needle in needles):
+        raise AssertionError(f"missing any text: {needles}\n--- page text ---\n{text[:1600]}")
+
+
 def assert_no_runtime_error(text: str) -> None:
     forbidden = [
         "Cannot read properties",
@@ -747,13 +752,15 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         )
         assert_contains(text, "Smoke URL", "Smoke URL VLESS", "Smoke URL Trojan")
         text = update_all_subscriptions(cdp)
-        assert_contains(text, "1 subscriptions updated", "Smoke URL VLESS", "Smoke URL Trojan")
+        assert_contains_any(text, "1 subscriptions updated", "1 个订阅已更新")
+        assert_contains(text, "Smoke URL VLESS", "Smoke URL Trojan")
         text = import_sample_subscription(cdp)
         assert_contains(text, "Smoke", "Smoke VLESS", "Smoke Trojan", "Smoke Hysteria")
         text = import_clash_subscription(cdp)
         assert_contains(text, "Clash Smoke", "Clash Smoke VLESS", "Clash Smoke SS")
         text = choose_node(cdp, "Clash Smoke SS")
-        assert_contains(text, "Clash Smoke SS", "Node selected")
+        assert_contains(text, "Clash Smoke SS")
+        assert_contains_any(text, "Node selected", "节点已选择")
         assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "subscriptions-desktop.png")
 
@@ -765,7 +772,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         cdp.screenshot(output_dir / "configs-desktop.png")
 
         text = switch_routing_mode(cdp, "global")
-        assert_contains(text, "mode selected")
+        assert_contains_any(text, "mode selected", "模式已选择")
         if active_routing_mode(cdp) != "global":
             raise AssertionError("global routing mode did not become active")
         summary = xray_routing_summary(cdp)
@@ -773,7 +780,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
             raise AssertionError(f"global routing config mismatch: {summary}")
 
         text = switch_routing_mode(cdp, "direct")
-        assert_contains(text, "mode selected")
+        assert_contains_any(text, "mode selected", "模式已选择")
         if active_routing_mode(cdp) != "direct":
             raise AssertionError("direct routing mode did not become active")
         summary = xray_routing_summary(cdp)
@@ -781,7 +788,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
             raise AssertionError(f"direct routing config mismatch: {summary}")
 
         text = switch_routing_mode(cdp, "rule")
-        assert_contains(text, "mode selected")
+        assert_contains_any(text, "mode selected", "模式已选择")
         if active_routing_mode(cdp) != "rule":
             raise AssertionError("rule routing mode did not become active")
         summary = xray_routing_summary(cdp)
@@ -821,7 +828,8 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         )
         assert_no_runtime_error(text)
         text = click_validate_configs(cdp)
-        assert_contains(text, "Available configs validated", "Xray", "Tachyon Core", "OK")
+        assert_contains_any(text, "Available configs validated", "可用配置已验证")
+        assert_contains(text, "Xray", "Tachyon Core", "OK")
         assert_desktop_interaction_polish(cdp)
         assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "settings-core-desktop-en.png")

@@ -364,6 +364,20 @@ const zh = {
   subscriptionSkipped: "跳过 {count} 条",
   subscriptionUnsupported: "不支持协议：{protocols}",
   subscriptionUrl: "订阅地址",
+  configFilesSaved: "配置文件已保存",
+  configsValidated: "可用配置已验证",
+  configsValidationErrors: "配置验证完成，但存在错误",
+  labelCopied: "{label} 已复制",
+  latencyRefreshed: "延迟已刷新",
+  noConfigDraftAvailable: "没有可用的配置草稿",
+  noRemoteSubscriptions: "没有可更新的远程订阅",
+  nodeSelected: "节点已选择",
+  readyAddSubscription: "准备添加订阅",
+  routingModeSelected: "{mode} 模式已选择",
+  subscriptionRemoved: "订阅已移除",
+  subscriptionSelected: "订阅已选择",
+  subscriptionsUpdated: "{count} 个订阅已更新",
+  subscriptionsUpdatedPartial: "{ok}/{total} 个订阅已更新",
   systemProxy: "系统代理",
   theme: "主题",
   totalTraffic: "总流量",
@@ -545,6 +559,20 @@ const en: typeof zh = {
   subscriptionSkipped: "{count} skipped",
   subscriptionUnsupported: "unsupported: {protocols}",
   subscriptionUrl: "Subscription URL",
+  configFilesSaved: "Config files saved",
+  configsValidated: "Available configs validated",
+  configsValidationErrors: "Config validation finished with errors",
+  labelCopied: "{label} copied",
+  latencyRefreshed: "Latency refreshed",
+  noConfigDraftAvailable: "No config draft available",
+  noRemoteSubscriptions: "No remote subscriptions to update",
+  nodeSelected: "Node selected",
+  readyAddSubscription: "Ready to add subscription",
+  routingModeSelected: "{mode} mode selected",
+  subscriptionRemoved: "Subscription removed",
+  subscriptionSelected: "Subscription selected",
+  subscriptionsUpdated: "{count} subscriptions updated",
+  subscriptionsUpdatedPartial: "{ok}/{total} subscriptions updated",
   systemProxy: "System Proxy",
   theme: "Theme",
   totalTraffic: "Total Traffic",
@@ -1252,7 +1280,7 @@ export function App() {
       (item) => item.sourceUrl && item.sourceUrl !== "manual",
     );
     if (remoteSubscriptions.length === 0) {
-      setMessage("No remote subscriptions to update");
+      setMessage(ui.noRemoteSubscriptions);
       return;
     }
 
@@ -1290,8 +1318,16 @@ export function App() {
     setSubscription(nextSnapshot);
     setMessage(
       failures.length > 0
-        ? `${remoteSubscriptions.length - failures.length}/${remoteSubscriptions.length} subscriptions updated`
-        : `${remoteSubscriptions.length} subscriptions updated`,
+        ? templateValue(
+            templateValue(
+              ui.subscriptionsUpdatedPartial,
+              "ok",
+              String(remoteSubscriptions.length - failures.length),
+            ),
+            "total",
+            String(remoteSubscriptions.length),
+          )
+        : templateValue(ui.subscriptionsUpdated, "count", String(remoteSubscriptions.length)),
     );
     void refreshNodeLatencies(updatedNodes, false);
   }
@@ -1332,7 +1368,7 @@ export function App() {
     const nextLatencies = { ...nodeLatencies, ...Object.fromEntries(results) };
     setNodeLatencies(nextLatencies);
     if (announce) {
-      setMessage("Latency refreshed");
+      setMessage(ui.latencyRefreshed);
     }
     return nextLatencies;
   }
@@ -1361,7 +1397,7 @@ export function App() {
       const snapshot = selectSubscription(subscription, subscriptionId);
       saveSubscriptionSnapshot(snapshot);
       setSubscription(snapshot);
-      setMessage("Subscription selected");
+      setMessage(ui.subscriptionSelected);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Subscription selection failed");
     }
@@ -1373,7 +1409,7 @@ export function App() {
       saveSubscriptionSnapshot(snapshot);
       setSubscription(snapshot);
       setNodePickerOpen(false);
-      setMessage("Node selected");
+      setMessage(ui.nodeSelected);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Node selection failed");
     }
@@ -1384,7 +1420,7 @@ export function App() {
       const snapshot = removeSubscription(subscription, subscriptionId);
       saveSubscriptionSnapshot(snapshot);
       setSubscription(snapshot);
-      setMessage("Subscription removed");
+      setMessage(ui.subscriptionRemoved);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Subscription removal failed");
     }
@@ -1393,7 +1429,7 @@ export function App() {
   function changeRoutingMode(mode: XrayRoutingMode) {
     setRoutingMode(mode);
     saveRoutingMode(mode);
-    setMessage(`${routingModeLabel(mode, ui)} mode selected`);
+    setMessage(templateValue(ui.routingModeSelected, "mode", routingModeLabel(mode, ui)));
   }
 
   function persistPluginState(nextState: PluginStateSnapshot, messageText: string) {
@@ -1509,18 +1545,18 @@ export function App() {
     setSubscriptionName("");
     setSubscriptionUrl("");
     setSubscriptionText("");
-    setMessage("Ready to add subscription");
+    setMessage(ui.readyAddSubscription);
     globalThis.setTimeout?.(() => subscriptionNameInputRef.current?.focus(), 50);
   }
 
   async function copyDraft(label: string, value: string) {
     if (!value) {
-      setMessage("No config draft available");
+      setMessage(ui.noConfigDraftAvailable);
       return;
     }
     try {
       await navigator.clipboard.writeText(value);
-      setMessage(`${label} copied`);
+      setMessage(templateValue(ui.labelCopied, "label", label));
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Copy failed");
     }
@@ -1546,7 +1582,7 @@ export function App() {
     }
 
     if (!drafts.core && !drafts.xray) {
-      throw new Error(drafts.error || "No config draft available");
+      throw new Error(drafts.error || ui.noConfigDraftAvailable);
     }
     if (!drafts.core) {
       const paths = await saveConfigDraft("xray", drafts.xray);
@@ -1566,7 +1602,7 @@ export function App() {
   async function saveDrafts() {
     try {
       await writeDrafts();
-      setMessage("Config files saved");
+      setMessage(ui.configFilesSaved);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Save failed");
     }
@@ -1605,7 +1641,7 @@ export function App() {
         results.push(await runConfigValidation("tachyonCore", paths, settings, false));
       }
       const ok = results.length > 0 && results.every((result) => result.ok);
-      setMessage(ok ? "Available configs validated" : "Config validation finished with errors");
+      setMessage(ok ? ui.configsValidated : ui.configsValidationErrors);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Config validation failed");
     }
