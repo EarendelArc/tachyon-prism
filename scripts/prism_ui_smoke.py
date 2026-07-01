@@ -313,8 +313,8 @@ def assert_desktop_interaction_polish(cdp: CDP) -> None:
           return {
             bodyUserSelect: getComputedStyle(document.body).userSelect,
             inputUserSelect: input ? getComputedStyle(input).userSelect : '',
-            titlebarRegion: titlebar ? getComputedStyle(titlebar).webkitAppRegion : '',
-            buttonRegion: button ? getComputedStyle(button).webkitAppRegion : '',
+            dragRegionCount: document.querySelectorAll('[data-tauri-drag-region]').length,
+            buttonBlockedFromDrag: Boolean(button?.closest('[data-no-window-drag], button')),
             hasScrollbarRule: hasScrollbarRule()
           };
         })()
@@ -324,8 +324,8 @@ def assert_desktop_interaction_polish(cdp: CDP) -> None:
         raise AssertionError(f"body text selection is not disabled: {polish}")
     if polish["inputUserSelect"] and polish["inputUserSelect"] != "text":
         raise AssertionError(f"form text selection is not enabled: {polish}")
-    if polish["titlebarRegion"] != "drag" or polish["buttonRegion"] != "no-drag":
-        raise AssertionError(f"custom window drag regions are not styled correctly: {polish}")
+    if int(polish["dragRegionCount"]) < 2 or not polish["buttonBlockedFromDrag"]:
+        raise AssertionError(f"custom window drag regions are not wired correctly: {polish}")
     if not polish["hasScrollbarRule"]:
         raise AssertionError(f"custom scrollbar style rule missing: {polish}")
 

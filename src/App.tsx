@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
@@ -2032,11 +2033,14 @@ export function App() {
   }
 
   function startWindowDrag(event: React.MouseEvent<HTMLElement>) {
-    if (!isTauriRuntime() || event.button !== 0 || titlebarDragBlocked(event.target)) {
+    if (event.button !== 0 || titlebarDragBlocked(event.target)) {
       return;
     }
     event.preventDefault();
-    void invokeDesktop<void>("window_start_dragging").catch(() => undefined);
+    void getCurrentWindow()
+      .startDragging()
+      .catch(() => invokeDesktop<void>("window_start_dragging"))
+      .catch(() => undefined);
   }
 
   function handleTitlebarDoubleClick(event: React.MouseEvent<HTMLElement>) {

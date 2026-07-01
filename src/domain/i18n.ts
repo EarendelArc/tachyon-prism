@@ -247,7 +247,7 @@ const dictionaries: Record<Language, Record<TranslationKey, string>> = {
     "panel.subscriptions": "订阅管理",
     "panel.trafficRules": "流量规则",
     "plugin.rulePacks": "规则包",
-    "plugin.rulePacksDesc": "共享和导入路由规则集合。",
+    "plugin.rulePacksDesc": "分享和导入路由规则集合。",
     "plugin.scripts": "自动化脚本",
     "plugin.scriptsDesc": "挂接启动、更新和健康检查事件。",
     "plugin.themes": "主题库",

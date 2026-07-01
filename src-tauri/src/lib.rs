@@ -306,6 +306,111 @@ struct WindowBounds {
     size: tauri::PhysicalSize<u32>,
 }
 
+#[cfg(windows)]
+mod native_titlebar {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+    use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumChildWindows, GetClientRect, GetCursorPos, GetParent, SendMessageW, HTCAPTION,
+        WM_LBUTTONDOWN, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+    };
+
+    const TITLEBAR_HEIGHT_PX: i32 = 42;
+    const WINDOW_CONTROL_WIDTH_PX: i32 = 156;
+    const TITLEBAR_SUBCLASS_ID: usize = 1;
+
+    pub fn install(window: &tauri::WebviewWindow) -> Result<(), String> {
+        let hwnd = window
+            .hwnd()
+            .map_err(|error| format!("get native window handle: {error}"))?
+            .0 as HWND;
+        install_subclass(hwnd, hwnd)?;
+        unsafe {
+            EnumChildWindows(hwnd, Some(enum_child_window), hwnd as LPARAM);
+        }
+        Ok(())
+    }
+
+    fn install_subclass(hwnd: HWND, parent: HWND) -> Result<(), String> {
+        let ok = unsafe {
+            SetWindowSubclass(
+                hwnd,
+                Some(titlebar_subclass_proc),
+                TITLEBAR_SUBCLASS_ID,
+                parent as usize,
+            )
+        };
+        if ok == 0 {
+            Err("install native titlebar subclass failed".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    unsafe extern "system" fn enum_child_window(hwnd: HWND, lparam: LPARAM) -> i32 {
+        let parent = lparam as HWND;
+        let _ = install_subclass(hwnd, parent);
+        1
+    }
+
+    unsafe extern "system" fn titlebar_subclass_proc(
+        hwnd: HWND,
+        umsg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _subclass_id: usize,
+        ref_data: usize,
+    ) -> LRESULT {
+        if umsg == WM_NCHITTEST && is_draggable_titlebar_point(hwnd) {
+            return HTCAPTION as LRESULT;
+        }
+        if umsg == WM_LBUTTONDOWN && is_draggable_titlebar_point(hwnd) {
+            let parent = if ref_data == 0 {
+                GetParent(hwnd)
+            } else {
+                ref_data as HWND
+            };
+            if !parent.is_null() {
+                let _ = ReleaseCapture();
+                SendMessageW(parent, WM_NCLBUTTONDOWN, HTCAPTION as WPARAM, lparam);
+                return 0;
+            }
+        }
+        DefSubclassProc(hwnd, umsg, wparam, lparam)
+    }
+
+    unsafe fn is_draggable_titlebar_point(hwnd: HWND) -> bool {
+        let mut point = POINT { x: 0, y: 0 };
+        if GetCursorPos(&mut point) == 0 || ScreenToClient(hwnd, &mut point) == 0 {
+            return false;
+        }
+
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if GetClientRect(hwnd, &mut rect) == 0 {
+            return false;
+        }
+
+        point.y >= 0
+            && point.y < TITLEBAR_HEIGHT_PX
+            && point.x >= 0
+            && point.x < rect.right.saturating_sub(WINDOW_CONTROL_WIDTH_PX)
+    }
+}
+
+#[cfg(not(windows))]
+mod native_titlebar {
+    pub fn install(_window: &tauri::WebviewWindow) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 impl Default for RuntimeState {
     fn default() -> Self {
         Self {
@@ -4092,7 +4197,9 @@ pub fn run() {
                 .find(|window| window.label == "main")
                 .ok_or_else(|| "missing main window config".to_string())?;
 
-            tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?.build()?;
+            let window = tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?
+                .build()?;
+            native_titlebar::install(&window)?;
             Ok(())
         })
         .manage(RuntimeState::default())

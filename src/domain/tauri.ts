@@ -9,11 +9,19 @@ export class TauriUnavailableError extends Error {
 
 export function isTauriRuntime(): boolean {
   const root = globalThis as typeof globalThis & {
+    __TAURI__?: unknown;
     __TAURI_INTERNALS__?: unknown;
     isTauri?: boolean;
-    window?: { __TAURI_INTERNALS__?: unknown };
+    window?: { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown };
   };
-  return Boolean(coreIsTauri() || root.isTauri || root.__TAURI_INTERNALS__ || root.window?.__TAURI_INTERNALS__);
+  return Boolean(
+    coreIsTauri()
+      || root.isTauri
+      || root.__TAURI__
+      || root.__TAURI_INTERNALS__
+      || root.window?.__TAURI__
+      || root.window?.__TAURI_INTERNALS__,
+  );
 }
 
 export async function invokeDesktop<T>(
