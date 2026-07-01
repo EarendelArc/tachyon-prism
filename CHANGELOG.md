@@ -22,6 +22,8 @@ All notable changes to Tachyon Prism will be documented in this file.
 - Runtime settings for Tachyon Core TGP local bind addresses and the multipath
   switch. Generated `client.json` now writes `client.proxy.local_addrs` and
   `tgp.multipath` from Prism's Core settings page.
+- Config draft validation for multipath mode so Prism warns before launch when
+  fewer than two TGP local bind addresses are configured.
 - Windows Wintun sidecar installer for Tachyon Core, including SHA-256
   verification and per-architecture `wintun.dll` extraction.
 - GitHub Actions release workflow for unsigned Prism desktop bundles on Windows

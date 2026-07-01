@@ -302,6 +302,16 @@ describe("buildCoreClientConfigDraft", () => {
     ).toThrow();
   });
 
+  it("throws when multipath is enabled without two local bind addresses", () => {
+    expect(() =>
+      buildCoreClientConfigDraft({
+        serverAddr: "relay.example.com:443",
+        localAddrs: ["127.0.0.1:0"],
+        multipath: true,
+      }),
+    ).toThrow(/multipath/);
+  });
+
   it("sets proxy endpoint from Tachyon server settings", () => {
     const config = buildCoreClientConfigDraft({
       serverAddr: "relay.example.com:443",

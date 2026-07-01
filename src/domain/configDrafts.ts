@@ -120,6 +120,9 @@ export function buildCoreClientConfigDraft(
   if (!remoteEndpoint) {
     throw new Error("Tachyon server address is required");
   }
+  if (options.multipath && localAddrs.length < 2) {
+    throw new Error("Tachyon multipath requires at least two local bind addresses");
+  }
   const gameProfiles = options.gameProfiles ?? [];
   const launchers = options.launchers ?? defaultLauncherSettings;
 
