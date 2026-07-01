@@ -61,8 +61,9 @@ All notable changes to Tachyon Prism will be documented in this file.
   including ALPN lists, skip-cert-verify, auth, and UDP idle timeout.
 - Upgrade previously saved URI subscription nodes on load so old cached nodes
   get canonical Xray outbound settings without requiring a manual re-import.
-- Stabilize the custom Windows titlebar drag/no-drag regions and verify no
-  visible console window appears in native smoke tests.
+- Stabilize the custom Windows titlebar drag/no-drag regions; native window
+  smoke remains the follow-up verification step when desktop interaction tests
+  are safe to run.
 - Align Xray transport parsing with current Project X transport behavior:
   current mKCP fields are preserved, while deprecated QUIC markers no longer
   emit an invalid `network: "quic"` value.
