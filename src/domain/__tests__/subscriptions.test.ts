@@ -78,6 +78,40 @@ describe("parseSubscription", () => {
     });
   });
 
+  it("maps current mKCP share parameters without deprecated header fields", () => {
+    const uri = "vless://uuid@example.com:443?type=kcp&mtu=1200&tti=30&uplinkCapacity=10&downlinkCapacity=100&congestion=1&readBufferSize=4&writeBufferSize=8&headerType=wechat-video&seed=old#KCP";
+    const nodes = parseSubscription(uri);
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].outbound?.streamSettings).toMatchObject({
+      network: "mkcp",
+      kcpSettings: {
+        mtu: 1200,
+        tti: 30,
+        uplinkCapacity: 10,
+        downlinkCapacity: 100,
+        congestion: true,
+        readBufferSize: 4,
+        writeBufferSize: 8,
+      },
+    });
+    const kcpSettings = nodes[0].outbound?.streamSettings?.kcpSettings as Record<string, unknown>;
+    expect(kcpSettings.header).toBeUndefined();
+    expect(kcpSettings.seed).toBeUndefined();
+  });
+
+  it("drops deprecated QUIC transport markers instead of generating invalid Xray network values", () => {
+    const uri = "vless://uuid@example.com:443?type=quic&security=tls&sni=quic.example.com#Old QUIC";
+    const nodes = parseSubscription(uri);
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].outbound?.streamSettings).toMatchObject({
+      security: "tls",
+      tlsSettings: {
+        serverName: "quic.example.com",
+      },
+    });
+    expect(nodes[0].outbound?.streamSettings?.network).toBeUndefined();
+  });
+
   it("maps current Reality and TLS share parameters into Xray stream settings", () => {
     const realityUri = "vless://uuid@example.com:443?type=tcp&security=reality&sni=www.example.com&pbk=public-key&sid=0123&mldsa65Verify=pq-verify&spx=/probe&fp=chrome#Reality";
     const tlsUri = "trojan://password@tls.example.com:443?security=tls&sni=edge.example.com&echConfigList=ech-list&pinnedPeerCertSha256=sha256-pin&alpn=h2,http/1.1#TLS";

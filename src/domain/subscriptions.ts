@@ -1418,10 +1418,13 @@ function transportSettingsFromParams(
       return {
         key: "kcpSettings",
         value: compactRecord({
-          header: params.get("headerType") ?? params.get("type")
-            ? { type: params.get("headerType") ?? params.get("type") }
-            : undefined,
-          seed: stringOrUndefined(params.get("seed")),
+          mtu: integerParam(params.get("mtu")),
+          tti: integerParam(params.get("tti")),
+          uplinkCapacity: integerParam(params.get("uplinkCapacity") ?? params.get("up")),
+          downlinkCapacity: integerParam(params.get("downlinkCapacity") ?? params.get("down")),
+          congestion: booleanParam(params.get("congestion")),
+          readBufferSize: integerParam(params.get("readBufferSize") ?? params.get("readBuffer")),
+          writeBufferSize: integerParam(params.get("writeBufferSize") ?? params.get("writeBuffer")),
         }),
       };
     case "hysteria":
@@ -1468,7 +1471,7 @@ function shadowsocksPluginStreamSettings(params: URLSearchParams): Record<string
   if (mode === "websocket" || mode === "ws") {
     pluginParams.set("type", "ws");
   } else if (mode === "quic") {
-    pluginParams.set("type", "quic");
+    return {};
   }
   if (hasTLS && !pluginParams.has("security")) {
     pluginParams.set("security", "tls");
@@ -1844,6 +1847,7 @@ function normalizeNetwork(value: string | null): string {
     hu: "httpupgrade",
     hy2: "hysteria",
     hysteria2: "hysteria",
+    quic: "",
   };
   return aliases[normalized] ?? normalized;
 }
