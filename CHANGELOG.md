@@ -19,6 +19,9 @@ All notable changes to Tachyon Prism will be documented in this file.
   validating generated Tachyon Core client JSON with the real Core binary.
 - Runtime switches for Tachyon Core TUN auto-route and DNS hijack generation,
   both defaulting off for TGP-only safe mode.
+- Runtime settings for Tachyon Core TGP local bind addresses and the multipath
+  switch. Generated `client.json` now writes `client.proxy.local_addrs` and
+  `tgp.multipath` from Prism's Core settings page.
 - Windows Wintun sidecar installer for Tachyon Core, including SHA-256
   verification and per-architecture `wintun.dll` extraction.
 - GitHub Actions release workflow for unsigned Prism desktop bundles on Windows
@@ -44,6 +47,9 @@ All notable changes to Tachyon Prism will be documented in this file.
   get canonical Xray outbound settings without requiring a manual re-import.
 - Stabilize the custom Windows titlebar drag/no-drag regions and verify no
   visible console window appears in native smoke tests.
+- Align Xray transport parsing with current Project X transport behavior:
+  current mKCP fields are preserved, while deprecated QUIC markers no longer
+  emit an invalid `network: "quic"` value.
 
 ### Verified
 - Real subscription URL smoke test, Prism/Core config contract test, default
