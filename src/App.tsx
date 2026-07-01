@@ -169,6 +169,8 @@ const emptyRuntimeInputs = {
   tachyonFecDynamic: true,
   tachyonFecGroupTimeoutMs: 20,
   tachyonFecParityShards: 2,
+  tachyonLocalAddrs: "",
+  tachyonMultipath: false,
   tachyonServerAddress: "",
   tachyonTgpServerAddress: "",
   tachyonTelemetryIntervalMs: 500,
@@ -255,6 +257,9 @@ const zh = {
   tachyonAdaptiveFecDesc: "动态冗余调节",
   tachyonFecShards: "TGP FEC 分片",
   tachyonFecTiming: "TGP FEC 时序",
+  tachyonLocalAddrs: "TGP 本地绑定地址",
+  tachyonMultipath: "TGP 多路径",
+  tachyonMultipathDesc: "同时使用多块网卡发送游戏 UDP",
   tachyonServer: "Tachyon 服务器",
   tachyonTgpServer: "TGP 服务器",
   tachyonTunAutoRoute: "TUN 全局路由",
@@ -450,6 +455,9 @@ const en: typeof zh = {
   tachyonAdaptiveFecDesc: "Dynamic parity tuning",
   tachyonFecShards: "TGP FEC Shards",
   tachyonFecTiming: "TGP FEC Timing",
+  tachyonLocalAddrs: "TGP Local Bind Addresses",
+  tachyonMultipath: "TGP Multipath",
+  tachyonMultipathDesc: "Send game UDP over multiple interfaces",
   tachyonServer: "Tachyon Server",
   tachyonTgpServer: "TGP Server",
   tachyonTunAutoRoute: "TUN Auto Route",
@@ -811,6 +819,8 @@ function draftText(
         ipcListen: runtimeSettings.tachyonIpcListen,
         ipcPort: runtimeSettings.tachyonIpcPort,
         launchers: launcherSettings,
+        localAddrs: parseLocalAddrs(runtimeSettings.tachyonLocalAddrs),
+        multipath: runtimeSettings.tachyonMultipath,
         serverAddr: runtimeSettings.tachyonServerAddress,
         telemetryIntervalMs: runtimeSettings.tachyonTelemetryIntervalMs,
         tgpServerAddr: runtimeSettings.tachyonTgpServerAddress,
@@ -851,6 +861,13 @@ function draftText(
     xray,
     xrayError,
   };
+}
+
+function parseLocalAddrs(value: string): string[] {
+  return value
+    .split(/[\n,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function telemetryBytes(data: TelemetryData | null, xrayStats: XrayTrafficStats): TrafficTotals {
@@ -3372,6 +3389,32 @@ function SettingsView({
                       setRuntimeInputs((current) => ({ ...current, tachyonTgpServerAddress: event.target.value }))
                     }
                   />
+                </label>
+                <label className="wide-field">
+                  <span>{ui.tachyonLocalAddrs}</span>
+                  <textarea
+                    placeholder={"127.0.0.1:0\n192.168.1.10:0"}
+                    value={runtimeInputs.tachyonLocalAddrs}
+                    onChange={(event) =>
+                      setRuntimeInputs((current) => ({ ...current, tachyonLocalAddrs: event.target.value }))
+                    }
+                  />
+                </label>
+                <label className="wide-field">
+                  <span>{ui.tachyonMultipath}</span>
+                  <label className="mini-check">
+                    <input
+                      checked={runtimeInputs.tachyonMultipath}
+                      type="checkbox"
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({
+                          ...current,
+                          tachyonMultipath: event.target.checked,
+                        }))
+                      }
+                    />
+                    {ui.tachyonMultipathDesc}
+                  </label>
                 </label>
                 <label>
                   <span>Xray SOCKS</span>

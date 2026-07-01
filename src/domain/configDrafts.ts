@@ -24,10 +24,12 @@ export interface CoreClientDraftOptions {
   fecParityShards?: number;
   gameProfiles?: GameProfile[];
   launchers?: LauncherSettings;
+  localAddrs?: string[];
   grpcListen?: string;
   grpcPort?: number;
   ipcListen?: string;
   ipcPort?: number;
+  multipath?: boolean;
   serverAddr?: string;
   telemetryIntervalMs?: number;
   tgpServerAddr?: string;
@@ -114,6 +116,7 @@ export function buildCoreClientConfigDraft(
 ): Record<string, unknown> {
   const remoteEndpoint = normalizeEndpoint(options.serverAddr);
   const tgpEndpoint = normalizeEndpoint(options.tgpServerAddr) || remoteEndpoint;
+  const localAddrs = normalizeList(options.localAddrs);
   if (!remoteEndpoint) {
     throw new Error("Tachyon server address is required");
   }
@@ -150,6 +153,7 @@ export function buildCoreClientConfigDraft(
       proxy: {
         server_addr: remoteEndpoint,
         tgp_server_addr: tgpEndpoint,
+        local_addrs: localAddrs,
       },
     },
     tgp: {
@@ -165,7 +169,7 @@ export function buildCoreClientConfigDraft(
         max_rate_pps: 1000,
       },
       connection_migration: true,
-      multipath: false,
+      multipath: options.multipath ?? false,
       handshake_timeout: "5s",
       session_idle_timeout: "60s",
     },
@@ -249,4 +253,8 @@ function endpoint(listen: string, port: number): string {
 
 function normalizeEndpoint(value = ""): string {
   return value.trim().replace(/^tachyon:\/\//i, "").replace(/^tgp:\/\//i, "");
+}
+
+function normalizeList(values: string[] = []): string[] {
+  return values.map((value) => value.trim()).filter(Boolean);
 }

@@ -748,6 +748,11 @@ p,
   grid-column: 1 / -1;
 }
 
+.core-settings-grid textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
 .input-pair {
   display: grid;
   gap: 8px;

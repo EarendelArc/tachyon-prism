@@ -817,6 +817,8 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
             text,
             "Tachyon Server",
             "TGP Server",
+            "TGP Local Bind Addresses",
+            "TGP Multipath",
             "Xray SOCKS",
             "Xray Stats API",
             "TUN Privilege",

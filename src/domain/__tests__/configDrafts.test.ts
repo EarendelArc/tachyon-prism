@@ -306,11 +306,16 @@ describe("buildCoreClientConfigDraft", () => {
     const config = buildCoreClientConfigDraft({
       serverAddr: "relay.example.com:443",
       tgpServerAddr: "game-relay.example.com:443",
+      localAddrs: [" 127.0.0.1:0 ", "", "127.0.0.2:0"],
+      multipath: true,
     });
     const client = config.client as Record<string, unknown>;
     const proxy = client.proxy as Record<string, unknown>;
+    const tgp = config.tgp as Record<string, unknown>;
     expect(proxy.server_addr).toBe("relay.example.com:443");
     expect(proxy.tgp_server_addr).toBe("game-relay.example.com:443");
+    expect(proxy.local_addrs).toEqual(["127.0.0.1:0", "127.0.0.2:0"]);
+    expect(tgp.multipath).toBe(true);
   });
 
   it("includes LAN direct rules with default routing rules", () => {

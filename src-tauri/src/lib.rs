@@ -54,6 +54,10 @@ struct RuntimeSettings {
     #[serde(default)]
     tachyon_fec_parity_shards: u32,
     #[serde(default)]
+    tachyon_local_addrs: String,
+    #[serde(default)]
+    tachyon_multipath: bool,
+    #[serde(default)]
     tachyon_server_address: String,
     #[serde(default)]
     tachyon_tgp_server_address: String,
@@ -2018,6 +2022,8 @@ fn normalize_runtime_settings(
             0,
             32,
         ),
+        tachyon_local_addrs: normalize_address_list(settings.tachyon_local_addrs),
+        tachyon_multipath: settings.tachyon_multipath,
         tachyon_server_address: non_empty_or(
             settings.tachyon_server_address,
             defaults.tachyon_server_address,
@@ -2080,6 +2086,8 @@ fn default_runtime_settings(app: &tauri::AppHandle) -> Result<RuntimeSettings, S
         tachyon_fec_dynamic: true,
         tachyon_fec_group_timeout_ms: 20,
         tachyon_fec_parity_shards: 2,
+        tachyon_local_addrs: String::new(),
+        tachyon_multipath: false,
         tachyon_server_address: String::new(),
         tachyon_tgp_server_address: String::new(),
         tachyon_telemetry_interval_ms: 500,
@@ -2119,6 +2127,15 @@ fn non_empty_or(value: String, fallback: String) -> String {
     } else {
         cleaned
     }
+}
+
+fn normalize_address_list(value: String) -> String {
+    value
+        .split(|ch| ch == '\n' || ch == ',')
+        .map(clean_path_input)
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn non_zero_u16_or(value: u16, fallback: u16) -> u16 {
@@ -3790,6 +3807,14 @@ mod tests {
     }
 
     #[test]
+    fn normalize_address_list_trims_empty_lines_and_commas() {
+        assert_eq!(
+            normalize_address_list(" 127.0.0.1:0\n\n, 192.168.1.10:0 ".to_string()),
+            "127.0.0.1:0\n192.168.1.10:0"
+        );
+    }
+
+    #[test]
     fn non_zero_u16_or_falls_back_only_for_zero() {
         assert_eq!(non_zero_u16_or(0, 10808), 10808);
         assert_eq!(non_zero_u16_or(10085, 10808), 10085);
@@ -3806,6 +3831,7 @@ mod tests {
     fn serde_defaults_enable_adaptive_tachyon_fec() {
         let missing: RuntimeSettings = serde_json::from_str("{}").expect("settings");
         assert!(missing.tachyon_fec_dynamic);
+        assert!(!missing.tachyon_multipath);
         assert!(!missing.tachyon_tun_auto_route);
         assert!(!missing.tachyon_tun_dns_hijack);
 
