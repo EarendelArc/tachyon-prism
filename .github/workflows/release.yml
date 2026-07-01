@@ -42,11 +42,11 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v5.0.0
         with:
-          node-version: "26.1.0"
+          node-version: "26.4.0"
           cache: npm
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@1.96.1
 
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
@@ -126,11 +126,11 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v5.0.0
         with:
-          node-version: "26.1.0"
+          node-version: "26.4.0"
           cache: npm
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@1.96.1
         with:
           targets: ${{ matrix.rust_target }}
 
