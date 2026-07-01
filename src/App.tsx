@@ -1899,7 +1899,11 @@ export function App() {
   }
 
   async function startAllRuntime() {
-    await startRuntime("xray");
+    const xrayStarted = await startRuntime("xray");
+    if (!xrayStarted) {
+      await refreshRuntime();
+      return;
+    }
     await startRuntime("tachyonCore");
     await refreshRuntime();
   }
