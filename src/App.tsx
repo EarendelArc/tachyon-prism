@@ -2316,7 +2316,10 @@ export function App() {
       <section className="prism-content">
         {activeView === "overview" ? (
           <OverviewView
+            activeNode={activeNode}
+            latencyMap={nodeLatencies}
             nodeCount={subscriptionNodeCount}
+            onOpenNodePicker={() => setNodePickerOpen(true)}
             onRoutingModeChange={changeRoutingMode}
             routingMode={routingMode}
             telemetry={telemetry}
@@ -2484,7 +2487,10 @@ export function App() {
 }
 
 function OverviewView({
+  activeNode,
+  latencyMap,
   nodeCount,
+  onOpenNodePicker,
   onRoutingModeChange,
   routingMode,
   telemetry,
@@ -2497,7 +2503,10 @@ function OverviewView({
   xrayStatsQueriedAt,
   ui,
 }: {
+  activeNode: ProxyNode | undefined;
+  latencyMap: NodeLatencyMap;
   nodeCount: number;
+  onOpenNodePicker: () => void;
   onRoutingModeChange: (mode: XrayRoutingMode) => void;
   routingMode: XrayRoutingMode;
   telemetry: TelemetryState;
@@ -2557,6 +2566,10 @@ function OverviewView({
                 state: "checking",
               },
   ];
+  const activeNodeLatency = activeNode ? nodeLatencyLabel(activeNode, ui, latencyMap) : "--";
+  const activeNodeProtocol = activeNode ? activeNode.protocol.toUpperCase() : "--";
+  const activeNodeTransport = activeNode?.transport || "udp";
+  const activeNodeAvailable = activeNode ? nodeAvailable(activeNode, latencyMap) : false;
 
   return (
     <div className="overview-page page-enter">
@@ -2622,6 +2635,22 @@ function OverviewView({
         </section>
 
         <aside className="overview-side">
+          <button
+            className={activeNode ? "current-node-card active" : "current-node-card"}
+            type="button"
+            onClick={onOpenNodePicker}
+          >
+            <span className={activeNodeAvailable ? "status-dot connected" : "status-dot checking"} />
+            <div>
+              <strong>{ui.currentNode}</strong>
+              <b>{activeNode?.name ?? ui.noNodeSelected}</b>
+              <small>
+                {activeNodeProtocol} :: {activeNodeTransport} · {activeNodeLatency} · {nodeCount} nodes
+              </small>
+            </div>
+            <em>⌄</em>
+          </button>
+
           <h2>{ui.workMode}</h2>
           <div className="work-mode-list">
             <button

@@ -704,6 +704,32 @@ def open_and_close_controller(cdp: CDP) -> str:
     )
 
 
+def open_and_close_node_picker(cdp: CDP) -> str:
+    return str(
+        cdp.evaluate(
+            """
+            new Promise((resolve) => {
+              location.hash = 'overview';
+              setTimeout(() => {
+                const picker = document.querySelector('.current-node-card');
+                if (!picker) throw new Error('overview current node picker missing');
+                picker.click();
+                setTimeout(() => {
+                  const text = document.body.innerText;
+                  if (!document.querySelector('.node-drawer')) {
+                    throw new Error('node drawer did not open from overview');
+                  }
+                  document.querySelector('.node-drawer header button')?.click();
+                  setTimeout(() => resolve(text), 300);
+                }, 400);
+              }, 350);
+            })
+            """,
+            await_promise=True,
+        ),
+    )
+
+
 def install_and_run_plugin(cdp: CDP, plugin_title: str) -> str:
     script = """
     new Promise((resolve) => {
@@ -819,6 +845,8 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         text = choose_node(cdp, "Clash Smoke SS")
         assert_contains(text, "Clash Smoke SS")
         assert_contains_any(text, "Node selected", "节点已选择")
+        text = open_and_close_node_picker(cdp)
+        assert_contains(text, "节点选择", "Clash Smoke SS")
         assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "subscriptions-desktop.png")
 

@@ -35,6 +35,8 @@ All notable changes to Tachyon Prism will be documented in this file.
 - Real-time telemetry client consuming Core SSE stream (`src/domain/telemetry.ts`).
 - Live Telemetry panel in overview showing packet counters, TGP sessions, goroutines, and recent routing decisions.
 - Telemetry auto-reconnect with exponential backoff (1s to 30s).
+- Overview current-node card opens the node selector drawer so the primary
+  desktop workflow matches the GUI.for.SingBox-style quick selector.
 - Route list CSS styling.
 - Architecture documentation (`docs/architecture.md`, EN + ZH).
 - Getting-started guide (`docs/getting-started.md`, EN + ZH).
@@ -73,6 +75,8 @@ All notable changes to Tachyon Prism will be documented in this file.
 - Respect the configured Tachyon Core IPC listen address and port for overview
   telemetry and native Core health checks instead of probing a hard-coded
   `127.0.0.1:55123` endpoint.
+- Keep the overview page within the fixed 800x540 desktop smoke-test viewport
+  after adding the current-node selector entry.
 
 ### Verified
 - Real subscription URL smoke test, Prism/Core config contract test, default
