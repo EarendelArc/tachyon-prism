@@ -133,6 +133,53 @@ def wait_json(url: str, timeout: float = 10.0) -> Any:
     raise RuntimeError(f"timed out waiting for {url}: {last_error}")
 
 
+def read_edge_stderr(edge: subprocess.Popen[str]) -> str:
+    if edge.stderr is None:
+        return "(stderr was not captured)"
+    try:
+        _, stderr = edge.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            edge.stderr.close()
+        except Exception:
+            pass
+        return "(timed out while reading Edge stderr)"
+    except Exception as error:  # noqa: BLE001 - best-effort diagnostics.
+        return f"(failed to read Edge stderr: {error})"
+    stderr = (stderr or "").strip()
+    return stderr or "(no stderr)"
+
+
+def wait_edge_tabs(edge: subprocess.Popen[str], debug_port: int, timeout: float = 30.0) -> Any:
+    deadline = time.time() + timeout
+    last_error: Exception | None = None
+    url = f"http://127.0.0.1:{debug_port}/json/list"
+    while time.time() < deadline:
+        if edge.poll() is not None:
+            stderr = read_edge_stderr(edge)
+            raise RuntimeError(
+                "Edge exited before DevTools became ready "
+                f"(exit code {edge.returncode}, port {debug_port}). stderr:\n{stderr}",
+            )
+        try:
+            return wait_json(url, timeout=2.0)
+        except Exception as error:  # noqa: BLE001 - diagnostic retry loop.
+            last_error = error
+            time.sleep(0.2)
+    raise RuntimeError(f"timed out waiting for Edge DevTools {url}: {last_error}")
+
+
+def stop_edge(edge: subprocess.Popen[str]) -> None:
+    if edge.poll() is not None:
+        return
+    edge.terminate()
+    try:
+        edge.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        edge.kill()
+        edge.wait(timeout=5)
+
+
 def page_text(cdp: CDP) -> str:
     return str(cdp.evaluate("document.body.innerText"))
 
@@ -694,31 +741,42 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     server = start_server(port)
     debug_port = free_port()
-    user_dir = tempfile.TemporaryDirectory(prefix="tachyon-prism-edge-")
-    edge = subprocess.Popen(
-        [
-            str(edge_path),
-            "--headless=new",
-            "--disable-background-networking",
-            "--disable-extensions",
-            "--disable-gpu",
-            "--hide-scrollbars",
-            "--no-default-browser-check",
-            "--no-first-run",
-            f"--remote-debugging-port={debug_port}",
-            "--remote-allow-origins=*",
-            f"--user-data-dir={user_dir.name}",
-            "--window-size=800,540",
-            f"http://127.0.0.1:{port}/",
-        ],
-        stderr=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        text=True,
+    # Crashpad can briefly keep files locked on Windows after Edge exits.
+    user_dir = tempfile.TemporaryDirectory(
+        prefix="tachyon-prism-edge-",
+        ignore_cleanup_errors=True,
     )
-
     cdp: CDP | None = None
+    edge: subprocess.Popen[str] | None = None
     try:
-        tabs = wait_json(f"http://127.0.0.1:{debug_port}/json/list")
+        edge = subprocess.Popen(
+            [
+                str(edge_path),
+                "--headless",
+                "--disable-background-networking",
+                "--disable-breakpad",
+                "--disable-crash-reporter",
+                "--disable-extensions",
+                "--disable-gpu",
+                "--disable-gpu-sandbox",
+                "--hide-scrollbars",
+                "--no-default-browser-check",
+                "--no-first-run",
+                "--no-sandbox",
+                "--remote-debugging-address=127.0.0.1",
+                f"--remote-debugging-port={debug_port}",
+                "--remote-allow-origins=*",
+                f"--user-data-dir={user_dir.name}",
+                "--window-size=800,540",
+                f"http://127.0.0.1:{port}/",
+            ],
+            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            encoding="utf-8",
+            errors="replace",
+            text=True,
+        )
+        tabs = wait_edge_tabs(edge, debug_port)
         page = next(item for item in tabs if item.get("type") == "page")
         cdp = CDP(page["webSocketDebuggerUrl"])
         cdp.call("Runtime.enable")
@@ -841,12 +899,10 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
     finally:
         if cdp is not None:
             cdp.close()
-        edge.terminate()
-        try:
-            edge.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            edge.kill()
+        if edge is not None:
+            stop_edge(edge)
         server.shutdown()
+        server.server_close()
         user_dir.cleanup()
 
 
