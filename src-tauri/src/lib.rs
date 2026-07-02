@@ -62,6 +62,8 @@ struct RuntimeSettings {
     #[serde(default)]
     tachyon_server_address: String,
     #[serde(default)]
+    tachyon_tgp_auth_psk: String,
+    #[serde(default)]
     tachyon_tgp_server_address: String,
     #[serde(default)]
     xray_http_listen: String,
@@ -2157,6 +2159,7 @@ fn normalize_runtime_settings(
             settings.tachyon_server_address,
             defaults.tachyon_server_address,
         ),
+        tachyon_tgp_auth_psk: normalize_tgp_auth_psk(settings.tachyon_tgp_auth_psk)?,
         tachyon_tgp_server_address: non_empty_or(
             settings.tachyon_tgp_server_address,
             defaults.tachyon_tgp_server_address,
@@ -2219,6 +2222,7 @@ fn default_runtime_settings(app: &tauri::AppHandle) -> Result<RuntimeSettings, S
         tachyon_local_addrs: String::new(),
         tachyon_multipath: false,
         tachyon_server_address: String::new(),
+        tachyon_tgp_auth_psk: String::new(),
         tachyon_tgp_server_address: String::new(),
         tachyon_telemetry_interval_ms: 500,
         tachyon_core_release_channel: "preview".to_string(),
@@ -2266,6 +2270,17 @@ fn normalize_address_list(value: String) -> String {
         .filter(|item| !item.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn normalize_tgp_auth_psk(value: String) -> Result<String, String> {
+    let cleaned = value.trim().to_string();
+    if cleaned.is_empty() {
+        Ok(String::new())
+    } else if cleaned.chars().count() < 16 {
+        Err("Tachyon TGP PSK must be at least 16 characters".to_string())
+    } else {
+        Ok(cleaned)
+    }
 }
 
 fn non_zero_u16_or(value: u16, fallback: u16) -> u16 {
@@ -3945,6 +3960,18 @@ mod tests {
     }
 
     #[test]
+    fn normalize_tgp_auth_psk_trims_and_validates_length() {
+        assert_eq!(
+            normalize_tgp_auth_psk(" 0123456789abcdef ".to_string()).unwrap(),
+            "0123456789abcdef"
+        );
+        assert_eq!(normalize_tgp_auth_psk("   ".to_string()).unwrap(), "");
+        assert!(normalize_tgp_auth_psk("too-short".to_string())
+            .expect_err("short PSK should fail")
+            .contains("PSK"));
+    }
+
+    #[test]
     fn non_zero_u16_or_falls_back_only_for_zero() {
         assert_eq!(non_zero_u16_or(0, 10808), 10808);
         assert_eq!(non_zero_u16_or(10085, 10808), 10085);
@@ -3963,8 +3990,10 @@ mod tests {
         assert!(missing.tachyon_fec_dynamic);
         assert!(missing.tachyon_connection_migration);
         assert!(!missing.tachyon_multipath);
+        assert!(missing.tachyon_tgp_auth_psk.is_empty());
         assert!(!missing.tachyon_tun_auto_route);
         assert!(!missing.tachyon_tun_dns_hijack);
+        assert!(RuntimeSettings::default().tachyon_tgp_auth_psk.is_empty());
 
         let disabled: RuntimeSettings =
             serde_json::from_str(r#"{"tachyonFecDynamic":false}"#).expect("settings");

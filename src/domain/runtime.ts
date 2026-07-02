@@ -25,6 +25,7 @@ export interface RuntimeSettings {
   tachyonLocalAddrs: string;
   tachyonMultipath: boolean;
   tachyonServerAddress: string;
+  tachyonTgpAuthPsk: string;
   tachyonTgpServerAddress: string;
   tachyonTelemetryIntervalMs: number;
   tachyonCoreReleaseChannel: ReleaseChannel;
@@ -354,6 +355,7 @@ function previewRuntimeSettings(): RuntimeSettings {
     tachyonLocalAddrs: "",
     tachyonMultipath: false,
     tachyonServerAddress: "",
+    tachyonTgpAuthPsk: "",
     tachyonTgpServerAddress: "",
     tachyonTelemetryIntervalMs: 500,
     tachyonTunAddress: "198.18.0.1/16",

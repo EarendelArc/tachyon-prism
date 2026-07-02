@@ -357,6 +357,33 @@ describe("buildCoreClientConfigDraft", () => {
     expect(tgp.connection_migration).toBe(true);
   });
 
+  it("includes TGP PSK authentication when configured", () => {
+    const config = buildCoreClientConfigDraft({
+      ...mockCoreOptions,
+      tgpAuthPsk: " 0123456789abcdef ",
+    });
+    const tgp = config.tgp as Record<string, unknown>;
+    expect(tgp.auth).toEqual({ psk: "0123456789abcdef" });
+  });
+
+  it("omits TGP PSK authentication when the value is empty", () => {
+    const config = buildCoreClientConfigDraft({
+      ...mockCoreOptions,
+      tgpAuthPsk: "   ",
+    });
+    const tgp = config.tgp as Record<string, unknown>;
+    expect(tgp.auth).toBeUndefined();
+  });
+
+  it("rejects short TGP PSK values", () => {
+    expect(() =>
+      buildCoreClientConfigDraft({
+        ...mockCoreOptions,
+        tgpAuthPsk: "too-short",
+      }),
+    ).toThrow(/PSK/);
+  });
+
   it("can disable TGP connection migration without multipath", () => {
     const config = buildCoreClientConfigDraft({
       ...mockCoreOptions,

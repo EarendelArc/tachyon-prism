@@ -175,6 +175,7 @@ const emptyRuntimeInputs = {
   tachyonLocalAddrs: "",
   tachyonMultipath: false,
   tachyonServerAddress: "",
+  tachyonTgpAuthPsk: "",
   tachyonTgpServerAddress: "",
   tachyonTelemetryIntervalMs: 500,
   tachyonTunAddress: "198.18.0.1/16",
@@ -270,6 +271,8 @@ const zh = {
   tachyonMultipath: "TGP 多路径",
   tachyonMultipathDesc: "同时使用多块网卡发送游戏 UDP",
   tachyonServer: "Tachyon 服务器",
+  tachyonTgpAuthPsk: "TGP 共享密钥 PSK",
+  tachyonTgpAuthPskDesc: "从 Tachyon 游戏服务器 server.json 的 tgp.auth.psk 复制，至少 16 字符；不要使用 Xray 订阅节点内容",
   tachyonTgpServer: "TGP 服务器",
   tachyonTunAutoRoute: "TUN 全局路由",
   tachyonTunDnsHijack: "DNS 劫持",
@@ -474,6 +477,8 @@ const en: typeof zh = {
   tachyonMultipath: "TGP Multipath",
   tachyonMultipathDesc: "Send game UDP over multiple interfaces",
   tachyonServer: "Tachyon Server",
+  tachyonTgpAuthPsk: "TGP Shared PSK",
+  tachyonTgpAuthPskDesc: "Copy tgp.auth.psk from the Tachyon game server server.json; at least 16 characters, not from Xray subscription nodes",
   tachyonTgpServer: "TGP Server",
   tachyonTunAutoRoute: "TUN Auto Route",
   tachyonTunDnsHijack: "DNS Hijack",
@@ -839,6 +844,7 @@ function draftText(
         multipath: runtimeSettings.tachyonMultipath,
         serverAddr: runtimeSettings.tachyonServerAddress,
         telemetryIntervalMs: runtimeSettings.tachyonTelemetryIntervalMs,
+        tgpAuthPsk: runtimeSettings.tachyonTgpAuthPsk,
         tgpServerAddr: runtimeSettings.tachyonTgpServerAddress,
         tunAddress: runtimeSettings.tachyonTunAddress,
         tunAutoRoute: runtimeSettings.tachyonTunAutoRoute,
@@ -3450,6 +3456,19 @@ function SettingsView({
                       setRuntimeInputs((current) => ({ ...current, tachyonTgpServerAddress: event.target.value }))
                     }
                   />
+                </label>
+                <label>
+                  <span>{ui.tachyonTgpAuthPsk}</span>
+                  <input
+                    autoComplete="off"
+                    placeholder="server.json: tgp.auth.psk"
+                    type="password"
+                    value={runtimeInputs.tachyonTgpAuthPsk}
+                    onChange={(event) =>
+                      setRuntimeInputs((current) => ({ ...current, tachyonTgpAuthPsk: event.target.value }))
+                    }
+                  />
+                  <small className="field-hint">{ui.tachyonTgpAuthPskDesc}</small>
                 </label>
                 <label className="wide-field">
                   <span>{ui.tachyonLocalAddrs}</span>

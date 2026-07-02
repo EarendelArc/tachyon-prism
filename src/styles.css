@@ -794,6 +794,12 @@ p,
   font-weight: 800;
 }
 
+.field-hint {
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .core-settings-grid > label.wide-field {
   grid-column: 1 / -1;
 }

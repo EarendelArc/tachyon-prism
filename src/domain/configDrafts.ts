@@ -33,6 +33,7 @@ export interface CoreClientDraftOptions {
   multipath?: boolean;
   serverAddr?: string;
   telemetryIntervalMs?: number;
+  tgpAuthPsk?: string;
   tgpServerAddr?: string;
   tunAddress?: string;
   tunAutoRoute?: boolean;
@@ -130,6 +131,10 @@ export function buildCoreClientConfigDraft(
   }
   const gameProfiles = options.gameProfiles ?? [];
   const launchers = options.launchers ?? defaultLauncherSettings;
+  const tgpAuthPsk = options.tgpAuthPsk?.trim() ?? "";
+  if (tgpAuthPsk && tgpAuthPsk.length < 16) {
+    throw new Error("Tachyon TGP PSK must be at least 16 characters");
+  }
 
   return {
     mode: "client",
@@ -165,6 +170,7 @@ export function buildCoreClientConfigDraft(
       },
     },
     tgp: {
+      ...(tgpAuthPsk ? { auth: { psk: tgpAuthPsk } } : {}),
       fec: {
         data_shards: options.fecDataShards ?? 4,
         parity_shards: options.fecParityShards ?? 2,

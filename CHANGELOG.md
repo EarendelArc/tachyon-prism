@@ -25,6 +25,9 @@ All notable changes to Tachyon Prism will be documented in this file.
 - Runtime setting for Tachyon Core TGP connection migration. Prism now writes
   `tgp.connection_migration`, keeps it enabled by default, and requires it when
   multipath is enabled.
+- Runtime setting for Tachyon Core TGP PSK authentication. Prism now persists
+  the shared key from the Core settings page and writes non-empty values to
+  `tgp.auth.psk` in generated Core client drafts.
 - Config draft validation for multipath mode so Prism warns before launch when
   fewer than two TGP local bind addresses are configured or connection
   migration is disabled.
