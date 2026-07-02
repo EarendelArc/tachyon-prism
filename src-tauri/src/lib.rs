@@ -2650,9 +2650,7 @@ fn latest_xray_release_info(
             return Ok(info);
         }
     }
-    Err(format!(
-        "no compatible Xray release found for channel {channel}"
-    ))
+    Err(release_channel_empty_message("Xray", channel))
 }
 
 fn latest_tachyon_core_release_info(
@@ -2667,15 +2665,25 @@ fn latest_tachyon_core_release_info(
             return Ok(info);
         }
     }
-    Err(format!(
-        "no compatible Tachyon Core release found for channel {channel}"
-    ))
+    Err(release_channel_empty_message("Tachyon Core", channel))
 }
 
 fn release_channel_allows(release: &GithubRelease, channel: &str) -> bool {
     match channel.trim().to_ascii_lowercase().as_str() {
         "preview" | "pre" | "prerelease" => true,
         _ => !release.prerelease,
+    }
+}
+
+fn release_channel_empty_message(name: &str, channel: &str) -> String {
+    match channel.trim().to_ascii_lowercase().as_str() {
+        "stable" => format!(
+            "no compatible {name} stable release found; stable uses full releases only. Switch the release channel to Pre to use prerelease builds."
+        ),
+        "preview" | "pre" | "prerelease" => {
+            format!("no compatible {name} prerelease or stable release found for the Pre channel")
+        }
+        _ => format!("no compatible {name} release found for channel {channel}"),
     }
 }
 
@@ -3695,6 +3703,28 @@ mod tests {
             .expect("stable release");
 
         assert_eq!(info.tag_name, "v0.1.0");
+    }
+
+    #[test]
+    fn stable_release_channel_explains_when_only_prereleases_exist() {
+        let marker = tachyon_core_platform_asset_marker().expect("supported test platform");
+        let preview = GithubRelease {
+            tag_name: "v0.2.0-alpha.1".to_string(),
+            published_at: Some("2026-06-12T00:00:00Z".to_string()),
+            prerelease: true,
+            assets: vec![
+                asset(&format!("tachyon-core_v0.2.0-alpha.1_{marker}.zip"), 123),
+                asset("SHA256SUMS.txt", 512),
+            ],
+        };
+
+        let error = match latest_tachyon_core_release_info(vec![preview], "stable") {
+            Ok(_) => panic!("stable should not silently select prerelease builds"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("stable release"));
+        assert!(error.contains("Switch the release channel to Pre"));
     }
 
     #[test]

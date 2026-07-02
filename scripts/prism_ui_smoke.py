@@ -301,6 +301,10 @@ def assert_content_fits_viewport(cdp: CDP) -> None:
 
 
 def assert_desktop_viewport(cdp: CDP) -> None:
+    assert_viewport(cdp, 800, 540)
+
+
+def assert_viewport(cdp: CDP, width: int, height: int) -> None:
     viewport = cdp.evaluate(
         """
         (() => ({
@@ -311,9 +315,9 @@ def assert_desktop_viewport(cdp: CDP) -> None:
         }))()
         """,
     )
-    if int(viewport["width"]) != 800 or int(viewport["height"]) != 540:
+    if int(viewport["width"]) != width or int(viewport["height"]) != height:
         raise AssertionError(f"desktop viewport changed unexpectedly: {viewport}")
-    if int(viewport["shellWidth"]) < 790 or int(viewport["shellHeight"]) < 530:
+    if int(viewport["shellWidth"]) < width - 10 or int(viewport["shellHeight"]) < height - 10:
         raise AssertionError(f"desktop shell is not filling the viewport: {viewport}")
 
 
@@ -608,6 +612,8 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
 
 
 def configure_tachyon_server(cdp: CDP, server: str) -> str:
+    host, _, port = server.partition(":")
+    port = port or "443"
     return str(
         cdp.evaluate(
             f"""
@@ -616,11 +622,21 @@ def configure_tachyon_server(cdp: CDP, server: str) -> str:
               setTimeout(() => {{
                 document.querySelectorAll('.settings-sidebar button')[1]?.click();
                 setTimeout(() => {{
-                  const input = document.querySelector('input[placeholder="game.example.com:443"]');
-                  if (!input) throw new Error('Tachyon server input missing');
-                  const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value');
-                  descriptor.set.call(input, {json.dumps(server)});
-                  input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                  const setValue = (selector, value) => {{
+                    const input = document.querySelector(selector);
+                    if (!input) throw new Error(`missing Tachyon server profile field: ${{selector}}`);
+                    const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value');
+                    descriptor.set.call(input, value);
+                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                  }};
+                  setValue('input[placeholder="Game Relay"]', 'Smoke Game Relay');
+                  setValue('input[placeholder="game.example.com"]', {json.dumps(host)});
+                  setValue('input[type="number"][max="65535"]', {json.dumps(port)});
+                  setValue('input[placeholder="server.json: tgp.auth.psk"]', 'smoke-psk-012345');
+                  const save = Array.from(document.querySelectorAll('.tachyon-server-panel header button'))
+                    .find((button) => button.textContent.includes('Save') || button.textContent.includes('淇濆瓨'));
+                  if (!save) throw new Error('Tachyon server profile save button missing');
+                  save.click();
                   setTimeout(() => resolve(document.body.innerText), 350);
                 }}, 350);
               }}, 350);
@@ -629,6 +645,56 @@ def configure_tachyon_server(cdp: CDP, server: str) -> str:
             await_promise=True,
         ),
     )
+
+
+def assert_key_pages_at_viewports(cdp: CDP, output_dir: Path) -> None:
+    viewports = [(800, 540), (1024, 720), (1366, 768)]
+    pages = ["overview", "subscriptions", "settings"]
+    for width, height in viewports:
+        set_viewport(cdp, width, height)
+        for page in pages:
+            text = navigate_hash(cdp, page)
+            if page == "settings":
+                text = select_settings_section(cdp, 1)
+            assert_no_runtime_error(text)
+            assert_no_horizontal_overflow(cdp)
+            assert_viewport(cdp, width, height)
+            cdp.screenshot(output_dir / f"{page}-{width}x{height}.png")
+
+
+def core_config_summary(cdp: CDP) -> dict[str, Any]:
+    return cdp.evaluate(
+        """
+        new Promise((resolve) => {
+          location.hash = 'settings';
+          setTimeout(() => {
+            document.querySelectorAll('.settings-sidebar button')[1]?.click();
+            setTimeout(() => {
+              const raw = document.querySelector('textarea[data-config-draft="core"]')?.value ?? '{}';
+              const config = JSON.parse(raw);
+              resolve({
+                serverAddr: config.client?.proxy?.server_addr ?? '',
+                tgpServerAddr: config.client?.proxy?.tgp_server_addr ?? '',
+                psk: config.tgp?.auth?.psk ?? '',
+                tunAutoRoute: config.client?.tun?.auto_route ?? true,
+                tunDnsHijack: config.client?.tun?.dns_hijack ?? true
+              });
+            }, 350);
+          }, 350);
+        })
+        """,
+        await_promise=True,
+    )
+
+
+def smoke_key_pages_at_viewport(cdp: CDP, width: int, height: int, output_dir: Path) -> None:
+    set_viewport(cdp, width, height)
+    for view in ["overview", "subscriptions", "settings"]:
+        text = navigate_hash(cdp, view)
+        assert_no_runtime_error(text)
+        assert_no_horizontal_overflow(cdp)
+        assert_viewport(cdp, width, height)
+        cdp.screenshot(output_dir / f"{view}-{width}x{height}.png")
 
 
 def select_settings_section(cdp: CDP, index: int) -> str:
@@ -901,8 +967,8 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         text = configure_tachyon_server(cdp, "game.example.com:443")
         assert_contains(
             text,
-            "Tachyon Server",
-            "TGP Server",
+            "Tachyon Server Profiles",
+            "Smoke Game Relay",
             "TGP Local Bind Addresses",
             "TGP Connection Migration",
             "TGP Multipath",
@@ -915,6 +981,15 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
             "Telemetry",
             "Validate Configs",
         )
+        core_summary = core_config_summary(cdp)
+        if core_summary != {
+            "serverAddr": "game.example.com:443",
+            "tgpServerAddr": "game.example.com:443",
+            "psk": "smoke-psk-012345",
+            "tunAutoRoute": False,
+            "tunDnsHijack": False,
+        }:
+            raise AssertionError(f"Core config did not use the selected Tachyon profile: {core_summary}")
         assert_no_runtime_error(text)
         text = click_validate_configs(cdp)
         assert_contains_any(text, "Available configs validated", "可用配置已验证")
@@ -922,6 +997,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         assert_desktop_interaction_polish(cdp)
         assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "settings-core-desktop-en.png")
+        assert_key_pages_at_viewports(cdp, output_dir)
 
         print(f"Prism UI smoke test passed. Artifacts: {output_dir}")
     finally:

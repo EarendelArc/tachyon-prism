@@ -773,6 +773,98 @@ p,
   padding-top: 9px;
 }
 
+.runtime-presence {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.045);
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+}
+
+.runtime-presence strong {
+  font-size: 12px;
+}
+
+.runtime-presence span:not(.status-dot) {
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 12px;
+  margin-right: 8px;
+}
+
+.tachyon-server-panel {
+  background: rgba(255, 255, 255, 0.035);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+}
+
+.tachyon-server-panel > header {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.tachyon-server-panel h2 {
+  font-size: 14px;
+  margin: 0;
+}
+
+.tachyon-server-panel p {
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 12px;
+  margin: 3px 0 0;
+}
+
+.tachyon-server-list {
+  display: grid;
+  gap: 8px;
+}
+
+.tachyon-server-card {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 8px;
+}
+
+.tachyon-server-card.active {
+  border-color: rgba(0, 120, 255, 0.52);
+}
+
+.tachyon-server-card > button {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  display: grid;
+  gap: 3px;
+  justify-content: stretch;
+  padding: 0;
+  text-align: left;
+}
+
+.tachyon-server-card > button:hover {
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.tachyon-server-card span,
+.tachyon-server-card small {
+  color: rgba(255, 255, 255, 0.55);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .core-settings-grid {
   display: grid;
   gap: 10px;
@@ -1597,6 +1689,80 @@ p,
   }
 }
 
+@media (max-height: 620px) and (min-width: 761px) {
+  .overview-metrics {
+    gap: 6px;
+  }
+
+  .metric-card {
+    min-height: 44px;
+    padding: 6px 9px;
+  }
+
+  .metric-card h2 {
+    font-size: 13px;
+  }
+
+  .runtime-presence {
+    margin-bottom: 6px;
+    padding: 5px 8px;
+  }
+
+  .overview-grid {
+    gap: 8px;
+  }
+
+  .traffic-section,
+  .overview-side,
+  .work-mode-list {
+    gap: 5px;
+  }
+
+  .traffic-section h2,
+  .overview-side h2 {
+    font-size: 14px;
+    margin: 0;
+  }
+
+  .traffic-card {
+    min-height: 104px;
+    padding: 0 10px 5px;
+  }
+
+  .traffic-card-header {
+    gap: 5px;
+    padding: 5px 0 0;
+  }
+
+  .traffic-source-list {
+    display: none;
+  }
+
+  .legend {
+    gap: 8px;
+  }
+
+  .traffic-chart {
+    height: 76px;
+    margin-top: 0;
+  }
+
+  .chart-empty-detail {
+    display: none;
+  }
+
+  .current-node-card,
+  .mode-option {
+    min-height: 32px;
+    padding: 4px 8px;
+  }
+
+  .current-node-card small,
+  .mode-option span {
+    display: none;
+  }
+}
+
 @media (max-width: 680px) {
   .app-titlebar {
     gap: 10px;
@@ -1679,6 +1845,7 @@ p,
   .core-settings-grid,
   .runtime-row,
   .binary-row,
+  .tachyon-server-card,
   .setting-row {
     grid-template-columns: 1fr;
   }

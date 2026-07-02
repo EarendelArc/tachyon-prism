@@ -33,7 +33,6 @@ import {
   getSystemProxyStatus,
   getXrayTrafficStats,
   disableSystemProxy,
-  enableSystemProxy,
   installLatestTachyonCore,
   installLatestXray,
   installManagedBinary,
@@ -75,6 +74,20 @@ import {
   selectSubscriptionNode,
   totalSubscriptionNodes,
 } from "./domain/subscriptions";
+import {
+  activeTachyonServer,
+  draftFromTachyonServerProfile,
+  emptyTachyonServerDraft,
+  loadTachyonServerSnapshot,
+  removeTachyonServerProfile,
+  saveTachyonServerSnapshot,
+  selectTachyonServerProfile,
+  tachyonServerEndpoint,
+  upsertTachyonServerProfile,
+  type TachyonServerDraft,
+  type TachyonServerProfile,
+  type TachyonServerSnapshot,
+} from "./domain/tachyonServers";
 import type {
   ProxyNode,
   SubscriptionParseReport,
@@ -225,6 +238,7 @@ const zh = {
   directModeDesc: "直接连接所有流量",
   download: "下载",
   enabledProfiles: "启用规则",
+  edit: "编辑",
   globalMode: "全局",
   import: "导入",
   install: "安装",
@@ -271,6 +285,17 @@ const zh = {
   tachyonMultipath: "TGP 多路径",
   tachyonMultipathDesc: "同时使用多块网卡发送游戏 UDP",
   tachyonServer: "Tachyon 服务器",
+  tachyonServerAddress: "服务器地址",
+  tachyonServerName: "服务器名",
+  tachyonServerPort: "端口",
+  tachyonServerRemark: "备注",
+  tachyonServerProfiles: "Tachyon 服务器档案",
+  tachyonServerEditing: "正在编辑 Tachyon 服务器",
+  tachyonServerRemoved: "Tachyon 服务器已删除",
+  tachyonServerSaved: "Tachyon 服务器已保存",
+  tachyonServerSelected: "Tachyon 服务器已选择",
+  tachyonServerNoRemark: "无备注",
+  tachyonServerProfileDesc: "Tachyon 服务器与 Xray 订阅节点独立，保存后用于生成 Core client.json。",
   tachyonTgpAuthPsk: "TGP 共享密钥 PSK",
   tachyonTgpAuthPskDesc: "从 Tachyon 游戏服务器 server.json 的 tgp.auth.psk 复制，至少 16 字符；不要使用 Xray 订阅节点内容",
   tachyonTgpServer: "TGP 服务器",
@@ -315,6 +340,7 @@ const zh = {
   more: "更多",
   noNodeSelected: "未选择节点",
   noSubscriptionNodes: "还没有订阅节点",
+  noTachyonServerProfiles: "还没有 Tachyon 服务器档案",
   notConfigured: "未配置",
   pageVisibility: "页面可见性",
   personalized: "个性化",
@@ -399,6 +425,7 @@ const zh = {
   theme: "主题",
   totalTraffic: "总流量",
   tunMode: "TUN模式",
+  unavailableInThisBuild: "当前版本禁用，避免影响正在进行的游戏",
   unavailable: "不可用",
   uploadRate: "上传速率",
   urlTest: "URLTest",
@@ -431,6 +458,7 @@ const en: typeof zh = {
   directModeDesc: "Direct all traffic",
   download: "Download",
   enabledProfiles: "Enabled Rules",
+  edit: "Edit",
   globalMode: "Global",
   import: "Import",
   install: "Install",
@@ -477,6 +505,17 @@ const en: typeof zh = {
   tachyonMultipath: "TGP Multipath",
   tachyonMultipathDesc: "Send game UDP over multiple interfaces",
   tachyonServer: "Tachyon Server",
+  tachyonServerAddress: "Server address",
+  tachyonServerName: "Server name",
+  tachyonServerPort: "Port",
+  tachyonServerRemark: "Remark",
+  tachyonServerProfiles: "Tachyon Server Profiles",
+  tachyonServerEditing: "Editing Tachyon server",
+  tachyonServerRemoved: "Tachyon server removed",
+  tachyonServerSaved: "Tachyon server saved",
+  tachyonServerSelected: "Tachyon server selected",
+  tachyonServerNoRemark: "No remark",
+  tachyonServerProfileDesc: "Tachyon servers are separate from Xray subscription nodes and feed Core client.json.",
   tachyonTgpAuthPsk: "TGP Shared PSK",
   tachyonTgpAuthPskDesc: "Copy tgp.auth.psk from the Tachyon game server server.json; at least 16 characters, not from Xray subscription nodes",
   tachyonTgpServer: "TGP Server",
@@ -521,6 +560,7 @@ const en: typeof zh = {
   more: "More",
   noNodeSelected: "No node selected",
   noSubscriptionNodes: "No subscription nodes yet",
+  noTachyonServerProfiles: "No Tachyon server profiles yet",
   notConfigured: "Not configured",
   pageVisibility: "Page visibility",
   personalized: "Personalization",
@@ -605,6 +645,7 @@ const en: typeof zh = {
   theme: "Theme",
   totalTraffic: "Total Traffic",
   tunMode: "TUN Mode",
+  unavailableInThisBuild: "Disabled in this build to avoid disrupting active games",
   unavailable: "Unavailable",
   uploadRate: "Upload rate",
   urlTest: "URLTest",
@@ -771,6 +812,28 @@ function setReleaseChannelForKind(
     : { ...settings, tachyonCoreReleaseChannel: channel };
 }
 
+function runtimeWithTachyonServer(
+  settings: RuntimeSettings,
+  server: TachyonServerProfile | undefined,
+): RuntimeSettings {
+  if (!server) {
+    return {
+      ...settings,
+      tachyonTunAutoRoute: false,
+      tachyonTunDnsHijack: false,
+    };
+  }
+  const endpoint = tachyonServerEndpoint(server);
+  return {
+    ...settings,
+    tachyonServerAddress: endpoint,
+    tachyonTgpAuthPsk: server.psk,
+    tachyonTgpServerAddress: endpoint,
+    tachyonTunAutoRoute: false,
+    tachyonTunDnsHijack: false,
+  };
+}
+
 function readinessText(state: ReadinessState): string {
   return state === "ok" ? "OK" : state === "warning" ? "Check" : "Fix";
 }
@@ -847,8 +910,8 @@ function draftText(
         tgpAuthPsk: runtimeSettings.tachyonTgpAuthPsk,
         tgpServerAddr: runtimeSettings.tachyonTgpServerAddress,
         tunAddress: runtimeSettings.tachyonTunAddress,
-        tunAutoRoute: runtimeSettings.tachyonTunAutoRoute,
-        tunDnsHijack: runtimeSettings.tachyonTunDnsHijack,
+        tunAutoRoute: false,
+        tunDnsHijack: false,
         tunMtu: runtimeSettings.tachyonTunMtu,
       }),
     );
@@ -1026,6 +1089,11 @@ export function App() {
   const [subscriptionUrl, setSubscriptionUrl] = useState("");
   const [subscriptionText, setSubscriptionText] = useState("");
   const [subscriptionViewMode, setSubscriptionViewMode] = useState<SubscriptionViewMode>("grid");
+  const [tachyonServers, setTachyonServers] = useState<TachyonServerSnapshot>(
+    loadTachyonServerSnapshot,
+  );
+  const [tachyonServerDraft, setTachyonServerDraft] =
+    useState<TachyonServerDraft>(emptyTachyonServerDraft);
   const [policyGroupViewMode, setPolicyGroupViewMode] = useState<SubscriptionViewMode>("grid");
   const [pluginState, setPluginState] = useState<PluginStateSnapshot>(() =>
     loadPluginState(pluginCatalogIds),
@@ -1078,14 +1146,22 @@ export function App() {
   const ui = language === "zh-CN" ? zh : en;
   const currentSubscription = useMemo(() => activeSubscription(subscription), [subscription]);
   const subscriptionNodeCount = useMemo(() => totalSubscriptionNodes(subscription), [subscription]);
+  const currentTachyonServer = useMemo(
+    () => activeTachyonServer(tachyonServers),
+    [tachyonServers],
+  );
   const activeProfiles = useMemo(
     () => profiles.filter((profile) => profile.enabled).length,
     [profiles],
   );
   const activeNode = useMemo(() => selectedNode(subscription), [subscription]);
+  const effectiveRuntimeInputs = useMemo(
+    () => runtimeWithTachyonServer(runtimeInputs, currentTachyonServer),
+    [currentTachyonServer, runtimeInputs],
+  );
   const drafts = useMemo(
-    () => draftText(activeNode, profiles, launcherSettings, routingMode, runtimeInputs),
-    [activeNode, launcherSettings, profiles, routingMode, runtimeInputs],
+    () => draftText(activeNode, profiles, launcherSettings, routingMode, effectiveRuntimeInputs),
+    [activeNode, effectiveRuntimeInputs, launcherSettings, profiles, routingMode],
   );
   const trafficTotals = useMemo(
     () => telemetryBytes(telemetry.latestTelemetry, xrayTrafficStats),
@@ -1108,14 +1184,22 @@ export function App() {
           },
     );
     items.push(
-      runtimeInputs.tachyonServerAddress.trim()
+      currentTachyonServer
         ? {
-            detail: runtimeInputs.tachyonTgpServerAddress.trim() || runtimeInputs.tachyonServerAddress.trim(),
+            detail: `${currentTachyonServer.name} (${tachyonServerEndpoint(currentTachyonServer)})`,
             label: "Tachyon server",
             state: "ok",
           }
+        : effectiveRuntimeInputs.tachyonServerAddress.trim()
+          ? {
+              detail:
+                effectiveRuntimeInputs.tachyonTgpServerAddress.trim() ||
+                effectiveRuntimeInputs.tachyonServerAddress.trim(),
+              label: "Tachyon server",
+              state: "warning",
+            }
         : {
-            detail: "Configure a Tachyon TGP server before starting Tachyon Core.",
+            detail: "Add and select a Tachyon server profile before starting Tachyon Core.",
             label: "Tachyon server",
             state: "error",
           },
@@ -1184,11 +1268,12 @@ export function App() {
     drafts.error,
     drafts.xray,
     drafts.xrayError,
+    currentTachyonServer,
+    effectiveRuntimeInputs.tachyonServerAddress,
+    effectiveRuntimeInputs.tachyonTgpServerAddress,
     managedBinaries,
     runtimePrivilege,
     runtimeInputs.tachyonCoreBinaryPath,
-    runtimeInputs.tachyonServerAddress,
-    runtimeInputs.tachyonTgpServerAddress,
     runtimeInputs.xrayBinaryPath,
   ]);
   const readinessErrors = useMemo(
@@ -1472,6 +1557,53 @@ export function App() {
     }
   }
 
+  function saveTachyonServerProfile() {
+    try {
+      const snapshot = upsertTachyonServerProfile(tachyonServers, tachyonServerDraft);
+      const server = activeTachyonServer(snapshot);
+      saveTachyonServerSnapshot(snapshot);
+      setTachyonServers(snapshot);
+      setTachyonServerDraft(draftFromTachyonServerProfile(server));
+      setRuntimeInputs((current) => runtimeWithTachyonServer(current, server));
+      setMessage(ui.tachyonServerSaved);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Tachyon server save failed");
+    }
+  }
+
+  function chooseTachyonServerProfile(profileId: string) {
+    try {
+      const snapshot = selectTachyonServerProfile(tachyonServers, profileId);
+      const server = activeTachyonServer(snapshot);
+      saveTachyonServerSnapshot(snapshot);
+      setTachyonServers(snapshot);
+      setTachyonServerDraft(draftFromTachyonServerProfile(server));
+      setRuntimeInputs((current) => runtimeWithTachyonServer(current, server));
+      setMessage(ui.tachyonServerSelected);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Tachyon server selection failed");
+    }
+  }
+
+  function editTachyonServerProfile(profile: TachyonServerProfile) {
+    setTachyonServerDraft(draftFromTachyonServerProfile(profile));
+    setMessage(ui.tachyonServerEditing);
+  }
+
+  function deleteTachyonServerProfile(profileId: string) {
+    try {
+      const snapshot = removeTachyonServerProfile(tachyonServers, profileId);
+      const server = activeTachyonServer(snapshot);
+      saveTachyonServerSnapshot(snapshot);
+      setTachyonServers(snapshot);
+      setTachyonServerDraft(draftFromTachyonServerProfile(server));
+      setRuntimeInputs((current) => runtimeWithTachyonServer(current, server));
+      setMessage(ui.tachyonServerRemoved);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Tachyon server removal failed");
+    }
+  }
+
   function changeRoutingMode(mode: XrayRoutingMode) {
     setRoutingMode(mode);
     saveRoutingMode(mode);
@@ -1677,7 +1809,7 @@ export function App() {
   async function validateAllConfigs() {
     try {
       const paths = await writeDrafts("all");
-      const settings = await saveRuntimeSettings(runtimeInputs);
+      const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
       const results: ConfigValidationResult[] = [];
       if (drafts.xray) {
@@ -1695,7 +1827,7 @@ export function App() {
 
   async function saveRuntimeInputs() {
     try {
-      const settings = await saveRuntimeSettings(runtimeInputs);
+      const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
       setMessage("Runtime paths saved");
     } catch (error) {
@@ -1764,7 +1896,7 @@ export function App() {
   async function checkLatestRelease(kind: ManagedBinaryKind) {
     try {
       setBinaryBusy(true);
-      const settings = await saveRuntimeSettings(runtimeInputs);
+      const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
       const release =
         kind === "xray" ? await getLatestXrayRelease() : await getLatestTachyonCoreRelease();
@@ -1780,7 +1912,7 @@ export function App() {
   async function downloadLatestRelease(kind: ManagedBinaryKind) {
     try {
       setBinaryBusy(true);
-      const settings = await saveRuntimeSettings(runtimeInputs);
+      const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
       const result =
         kind === "xray" ? await installLatestXray() : await installLatestTachyonCore();
@@ -1798,7 +1930,7 @@ export function App() {
   async function installWintun() {
     try {
       setBinaryBusy(true);
-      const settings = await saveRuntimeSettings(runtimeInputs);
+      const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
       const inventory = await installWintunSidecar();
       setManagedBinaries(inventory);
@@ -1841,35 +1973,12 @@ export function App() {
   }
 
   async function toggleSystemProxy() {
-    try {
-      if (systemProxy?.matchesPrism) {
-        const state = await disableSystemProxy();
-        setSystemProxy(state);
-        setMessage("System proxy disabled");
-        return;
-      }
-
-      const settings = await saveRuntimeSettings(runtimeInputs);
-      setRuntimeInputs(settings);
-      const status = await getRuntimeStatus();
-      setRuntimeStatus(status);
-      if (status.xray.state !== "running") {
-        const started = await startRuntime("xray");
-        if (!started) {
-          return;
-        }
-      }
-      const state = await enableSystemProxy();
-      setSystemProxy(state);
-      setMessage(state.matchesPrism ? "System proxy enabled" : "System proxy update pending");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "System proxy update failed");
-    }
+    setMessage(ui.unavailableInThisBuild);
   }
 
   async function probeXrayProxy() {
     try {
-      const settings = await saveRuntimeSettings(runtimeInputs);
+      const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
       const status = await getRuntimeStatus();
       setRuntimeStatus(status);
@@ -1899,7 +2008,7 @@ export function App() {
         }
       }
       const paths = await writeDrafts(kind);
-      const settings = await saveRuntimeSettings(runtimeInputs);
+      const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
       await runConfigValidation(kind, paths, settings, false);
       const status =
@@ -2120,6 +2229,13 @@ export function App() {
   }, [currentSubscription]);
 
   useEffect(() => {
+    if (currentTachyonServer) {
+      setTachyonServerDraft(draftFromTachyonServerProfile(currentTachyonServer));
+      setRuntimeInputs((current) => runtimeWithTachyonServer(current, currentTachyonServer));
+    }
+  }, [currentTachyonServer]);
+
+  useEffect(() => {
     if (subscription.nodes.length === 0) {
       setNodeLatencies({});
       return;
@@ -2278,10 +2394,10 @@ export function App() {
             {ui.systemProxy}
           </button>
           <button
-            aria-pressed={runtimeStatus?.tachyonCore.state === "running"}
-            className={runtimeStatus?.tachyonCore.state === "running" ? "pill active" : "pill"}
+            aria-pressed={false}
+            className="pill"
             type="button"
-            onClick={() => void toggleRuntime("tachyonCore")}
+            onClick={() => setMessage(ui.unavailableInThisBuild)}
           >
             {ui.tunMode}
           </button>
@@ -2323,6 +2439,7 @@ export function App() {
         {activeView === "overview" ? (
           <OverviewView
             activeNode={activeNode}
+            activeTachyonServer={currentTachyonServer}
             latencyMap={nodeLatencies}
             nodeCount={subscriptionNodeCount}
             onOpenNodePicker={() => setNodePickerOpen(true)}
@@ -2336,6 +2453,7 @@ export function App() {
             xrayStatsError={xrayTrafficError}
             xrayStatsQueriedAt={xrayTrafficStats.queriedAt}
             xrayRunning={runtimeStatus?.xray.state === "running"}
+            tachyonRunning={runtimeStatus?.tachyonCore.state === "running"}
             ui={ui}
           />
         ) : null}
@@ -2423,12 +2541,16 @@ export function App() {
             onInstallWintun={() => void installWintun()}
             onRefreshBinaries={() => void refreshManagedBinaries()}
             onRemoveProfile={(id) => void removeProfile(id)}
+            onSaveTachyonServer={saveTachyonServerProfile}
             onSaveDrafts={() => void saveDrafts()}
             onSaveRuntime={() => void saveRuntimeInputs()}
             onScanSteam={() => void scanSteam()}
             onSectionChange={setSettingsSection}
             onStartRuntime={(kind) => void startRuntime(kind)}
             onStopRuntime={(kind) => void stopRuntime(kind)}
+            onSelectTachyonServer={chooseTachyonServerProfile}
+            onEditTachyonServer={editTachyonServerProfile}
+            onDeleteTachyonServer={deleteTachyonServerProfile}
             onUseManaged={(kind) => void useManagedBinary(kind)}
             onValidateConfigs={() => void validateAllConfigs()}
             profiles={profiles}
@@ -2442,11 +2564,14 @@ export function App() {
             setRuntimeInputs={setRuntimeInputs}
             setSteamRoot={setSteamRoot}
             suggestions={suggestions}
+            tachyonServerDraft={tachyonServerDraft}
+            tachyonServers={tachyonServers}
             ui={ui}
             validationResults={validationResults}
             manualProfile={manualProfile}
             steamRoot={steamRoot}
             setReleaseChannelForKind={setReleaseChannelForKind}
+            setTachyonServerDraft={setTachyonServerDraft}
             launcherSettings={launcherSettings}
             updateSteamLauncherSetting={updateSteamLauncherSetting}
           />
@@ -2494,6 +2619,7 @@ export function App() {
 
 function OverviewView({
   activeNode,
+  activeTachyonServer,
   latencyMap,
   nodeCount,
   onOpenNodePicker,
@@ -2507,9 +2633,11 @@ function OverviewView({
   xrayStatsEnabled,
   xrayStatsError,
   xrayStatsQueriedAt,
+  tachyonRunning,
   ui,
 }: {
   activeNode: ProxyNode | undefined;
+  activeTachyonServer: TachyonServerProfile | undefined;
   latencyMap: NodeLatencyMap;
   nodeCount: number;
   onOpenNodePicker: () => void;
@@ -2523,6 +2651,7 @@ function OverviewView({
   xrayStatsEnabled: boolean;
   xrayStatsError: string | null;
   xrayStatsQueriedAt: number | null;
+  tachyonRunning: boolean;
   ui: typeof zh;
 }) {
   const width = 560;
@@ -2584,6 +2713,21 @@ function OverviewView({
         <MetricCard label={ui.totalTraffic} primary={`↑ ${formatBytes(trafficTotals.totalUp)}`} secondary={`↓ ${formatBytes(trafficTotals.totalDown)}`} />
         <MetricCard label={ui.activeConnections} primary={`${telemetry.latestTelemetry?.tgp_sessions ?? 0}`} secondary={`${nodeCount} nodes`} />
         <MetricCard label={ui.memory} primary={`${telemetry.latestTelemetry?.goroutines ?? 0}`} secondary="goroutines" />
+      </div>
+
+      <div className="runtime-presence">
+        <span className={xrayRunning ? "status-dot connected" : "status-dot stopped"} />
+        <strong>{ui.xray}</strong>
+        <span>{xrayRunning ? "online" : "offline"}</span>
+        <span className={tachyonRunning ? "status-dot connected" : "status-dot stopped"} />
+        <strong>{ui.tachyon}</strong>
+        <span>{tachyonRunning ? "online" : "offline"}</span>
+        <strong>Server</strong>
+        <span>
+          {activeTachyonServer
+            ? `${activeTachyonServer.name} (${tachyonServerEndpoint(activeTachyonServer)})`
+            : "No Tachyon server selected"}
+        </span>
       </div>
 
       <div className="overview-grid">
@@ -3258,12 +3402,16 @@ function SettingsView({
   onInstallWintun,
   onRefreshBinaries,
   onRemoveProfile,
+  onSaveTachyonServer,
   onSaveDrafts,
   onSaveRuntime,
   onScanSteam,
   onSectionChange,
   onStartRuntime,
   onStopRuntime,
+  onSelectTachyonServer,
+  onEditTachyonServer,
+  onDeleteTachyonServer,
   onUseManaged,
   onValidateConfigs,
   profiles,
@@ -3279,9 +3427,12 @@ function SettingsView({
   setSteamRoot,
   steamRoot,
   suggestions,
+  tachyonServerDraft,
+  tachyonServers,
   ui,
   updateSteamLauncherSetting,
   validationResults,
+  setTachyonServerDraft,
 }: {
   binaryBusy: boolean;
   binaryInfo: (kind: ManagedBinaryKind) => ManagedBinaryInfo | null;
@@ -3306,12 +3457,16 @@ function SettingsView({
   onInstallWintun: () => void;
   onRefreshBinaries: () => void;
   onRemoveProfile: (id: string) => void;
+  onSaveTachyonServer: () => void;
   onSaveDrafts: () => void;
   onSaveRuntime: () => void;
   onScanSteam: () => void;
   onSectionChange: (section: SettingsSection) => void;
   onStartRuntime: (kind: ManagedBinaryKind) => void;
   onStopRuntime: (kind: ManagedBinaryKind) => void;
+  onSelectTachyonServer: (id: string) => void;
+  onEditTachyonServer: (profile: TachyonServerProfile) => void;
+  onDeleteTachyonServer: (id: string) => void;
   onUseManaged: (kind: ManagedBinaryKind) => void;
   onValidateConfigs: () => void;
   profiles: GameProfile[];
@@ -3331,12 +3486,15 @@ function SettingsView({
   setSteamRoot: (value: string) => void;
   steamRoot: string;
   suggestions: GameProfile[];
+  tachyonServerDraft: TachyonServerDraft;
+  tachyonServers: TachyonServerSnapshot;
   ui: typeof zh;
   updateSteamLauncherSetting: <K extends keyof LauncherSettings["steam"]>(
     key: K,
     value: LauncherSettings["steam"][K],
   ) => void;
   validationResults: ValidationResults;
+  setTachyonServerDraft: React.Dispatch<React.SetStateAction<TachyonServerDraft>>;
 }) {
   const sections: Array<{ id: SettingsSection; label: string }> = [
     { id: "general", label: ui.settingsGeneral },
@@ -3436,40 +3594,98 @@ function SettingsView({
                   <div key={row.label}><span>{row.label}</span><strong>{row.value}</strong></div>
                 ))}
               </div>
+              <div className="tachyon-server-panel">
+                <header>
+                  <div>
+                    <h2>{ui.tachyonServerProfiles}</h2>
+                    <p>Save Tachyon game server profiles separately; they never mix with Xray subscription nodes.</p>
+                  </div>
+                  <button type="button" onClick={onSaveTachyonServer}>{ui.save}</button>
+                </header>
+                <div className="core-settings-grid">
+                  <label>
+                    <span>{ui.tachyonServerName}</span>
+                    <input
+                      placeholder="Game Relay"
+                      value={tachyonServerDraft.name}
+                      onChange={(event) =>
+                        setTachyonServerDraft((current) => ({ ...current, name: event.target.value }))
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>{ui.tachyonServerAddress}</span>
+                    <input
+                      placeholder="game.example.com"
+                      value={tachyonServerDraft.address}
+                      onChange={(event) =>
+                        setTachyonServerDraft((current) => ({ ...current, address: event.target.value }))
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>{ui.tachyonServerPort}</span>
+                    <input
+                      min={1}
+                      max={65535}
+                      type="number"
+                      value={tachyonServerDraft.port}
+                      onChange={(event) =>
+                        setTachyonServerDraft((current) => ({ ...current, port: Number(event.target.value) }))
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>{ui.tachyonTgpAuthPsk}</span>
+                    <input
+                      autoComplete="off"
+                      placeholder="server.json: tgp.auth.psk"
+                      type="password"
+                      value={tachyonServerDraft.psk}
+                      onChange={(event) =>
+                        setTachyonServerDraft((current) => ({ ...current, psk: event.target.value }))
+                      }
+                    />
+                    <small className="field-hint">{ui.tachyonTgpAuthPskDesc}</small>
+                  </label>
+                  <label className="wide-field">
+                    <span>{ui.tachyonServerRemark}</span>
+                    <input
+                      placeholder={ui.tachyonServerRemark}
+                      value={tachyonServerDraft.remark}
+                      onChange={(event) =>
+                        setTachyonServerDraft((current) => ({ ...current, remark: event.target.value }))
+                      }
+                    />
+                  </label>
+                </div>
+                <div className="tachyon-server-list">
+                  {tachyonServers.profiles.map((profile) => (
+                    <article
+                      className={
+                        profile.id === tachyonServers.selectedProfileId
+                          ? "tachyon-server-card active"
+                          : "tachyon-server-card"
+                      }
+                      key={profile.id}
+                    >
+                      <button type="button" onClick={() => onSelectTachyonServer(profile.id)}>
+                        <strong>{profile.name}</strong>
+                        <span>{tachyonServerEndpoint(profile)}</span>
+                        <small>{profile.remark || "No remark"}</small>
+                      </button>
+                      <div className="row-actions">
+                        <button type="button" onClick={() => onEditTachyonServer(profile)}>Edit</button>
+                        <button type="button" onClick={() => onDeleteTachyonServer(profile.id)}>{ui.remove}</button>
+                      </div>
+                    </article>
+                  ))}
+                  {tachyonServers.profiles.length === 0 ? (
+                    <div className="empty-note">No Tachyon server profiles yet</div>
+                  ) : null}
+                </div>
+              </div>
               <div className="core-settings-grid">
-                <label>
-                  <span>{ui.tachyonServer}</span>
-                  <input
-                    placeholder="game.example.com:443"
-                    value={runtimeInputs.tachyonServerAddress}
-                    onChange={(event) =>
-                      setRuntimeInputs((current) => ({ ...current, tachyonServerAddress: event.target.value }))
-                    }
-                  />
-                </label>
-                <label>
-                  <span>{ui.tachyonTgpServer}</span>
-                  <input
-                    placeholder="optional, defaults to Tachyon server"
-                    value={runtimeInputs.tachyonTgpServerAddress}
-                    onChange={(event) =>
-                      setRuntimeInputs((current) => ({ ...current, tachyonTgpServerAddress: event.target.value }))
-                    }
-                  />
-                </label>
-                <label>
-                  <span>{ui.tachyonTgpAuthPsk}</span>
-                  <input
-                    autoComplete="off"
-                    placeholder="server.json: tgp.auth.psk"
-                    type="password"
-                    value={runtimeInputs.tachyonTgpAuthPsk}
-                    onChange={(event) =>
-                      setRuntimeInputs((current) => ({ ...current, tachyonTgpAuthPsk: event.target.value }))
-                    }
-                  />
-                  <small className="field-hint">{ui.tachyonTgpAuthPskDesc}</small>
-                </label>
                 <label className="wide-field">
                   <span>{ui.tachyonLocalAddrs}</span>
                   <textarea
@@ -3649,32 +3865,22 @@ function SettingsView({
                   <span>{ui.tachyonTunAutoRoute}</span>
                   <label className="mini-check">
                     <input
-                      checked={runtimeInputs.tachyonTunAutoRoute}
+                      checked={false}
+                      disabled
                       type="checkbox"
-                      onChange={(event) =>
-                        setRuntimeInputs((current) => ({
-                          ...current,
-                          tachyonTunAutoRoute: event.target.checked,
-                        }))
-                      }
                     />
-                    {ui.tachyonTunAutoRoute}
+                    {ui.unavailableInThisBuild}
                   </label>
                 </label>
                 <label className="wide-field">
                   <span>{ui.tachyonTunDnsHijack}</span>
                   <label className="mini-check">
                     <input
-                      checked={runtimeInputs.tachyonTunDnsHijack}
+                      checked={false}
+                      disabled
                       type="checkbox"
-                      onChange={(event) =>
-                        setRuntimeInputs((current) => ({
-                          ...current,
-                          tachyonTunDnsHijack: event.target.checked,
-                        }))
-                      }
                     />
-                    {ui.tachyonTunDnsHijack}
+                    {ui.unavailableInThisBuild}
                   </label>
                 </label>
                 <label>

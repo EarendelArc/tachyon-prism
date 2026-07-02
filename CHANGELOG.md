@@ -28,6 +28,12 @@ All notable changes to Tachyon Prism will be documented in this file.
 - Runtime setting for Tachyon Core TGP PSK authentication. Prism now persists
   the shared key from the Core settings page and writes non-empty values to
   `tgp.auth.psk` in generated Core client drafts.
+- Independent Tachyon server profiles for game relay name, address, port, PSK,
+  and remarks. Selected profiles now feed generated Core client drafts without
+  mixing with Xray subscription nodes.
+- Overview runtime presence for Xray and Tachyon plus the current Tachyon
+  server profile, with empty traffic charts when no real telemetry is present.
+- UI smoke coverage for 800x540, 1024x720, and 1366x768 key pages.
 - Config draft validation for multipath mode so Prism warns before launch when
   fewer than two TGP local bind addresses are configured or connection
   migration is disabled.
@@ -46,6 +52,8 @@ All notable changes to Tachyon Prism will be documented in this file.
 - Documentation section in README with links to all docs.
 
 ### Fixed
+- Stable release checks now explain when no full release is available and point
+  users to the Pre channel for prerelease Core builds.
 - Generate current Xray outbound settings from URI and Clash/Mihomo
   subscriptions using flat `settings.address` / `settings.port` fields instead
   of legacy `vnext` / `servers` arrays, while still reading old JSON outbounds.
