@@ -151,6 +151,14 @@ export interface SystemProxyState {
   error: string | null;
 }
 
+export function tachyonIpcBaseUrl(
+  settings: Pick<RuntimeSettings, "tachyonIpcListen" | "tachyonIpcPort">,
+): string {
+  const listen = settings.tachyonIpcListen.trim() || "127.0.0.1";
+  const port = settings.tachyonIpcPort > 0 ? settings.tachyonIpcPort : 55123;
+  return `http://${httpHost(listen)}:${port}`;
+}
+
 export async function getRuntimePaths(): Promise<RuntimePaths> {
   if (!isTauriRuntime()) {
     return previewRuntimePaths();
@@ -475,6 +483,13 @@ function previewSystemProxyState(enabled: boolean): SystemProxyState {
     proxyServer: enabled ? expectedProxyServer : "",
     supported: true,
   };
+}
+
+function httpHost(host: string): string {
+  if (host.startsWith("[") && host.endsWith("]")) {
+    return host;
+  }
+  return host.includes(":") ? `[${host}]` : host;
 }
 
 function stoppedPreviewProcess(): ProcessStatus {

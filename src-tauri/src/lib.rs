@@ -436,16 +436,17 @@ struct ManagedProcess {
 }
 
 #[tauri::command]
-fn core_status() -> String {
-    match core_health_check() {
+fn core_status(app: tauri::AppHandle) -> String {
+    match load_runtime_settings(&app).and_then(|settings| core_health_check(&settings)) {
         Ok(status) => status,
         Err(_) => "disconnected".to_string(),
     }
 }
 
-fn core_health_check() -> Result<String, String> {
+fn core_health_check(settings: &RuntimeSettings) -> Result<String, String> {
+    let url = core_health_url(settings);
     let mut response = health_agent()
-        .get("http://127.0.0.1:55123/v1/health")
+        .get(&url)
         .header("User-Agent", "Tachyon-Prism/0.1")
         .call()
         .map_err(|err| format!("core health check: {err}"))?;
@@ -461,6 +462,14 @@ fn core_health_check() -> Result<String, String> {
         .unwrap_or("unknown");
 
     Ok(status.to_string())
+}
+
+fn core_health_url(settings: &RuntimeSettings) -> String {
+    format!(
+        "http://{}:{}/v1/health",
+        http_url_host(&settings.tachyon_ipc_listen),
+        settings.tachyon_ipc_port,
+    )
 }
 
 #[tauri::command]
@@ -1681,6 +1690,17 @@ fn parse_http_probe_url(input: &str) -> Result<HttpProbeTarget, String> {
         absolute_url: format!("http://{authority}{path}"),
         host_header: authority.to_string(),
     })
+}
+
+fn http_url_host(host: &str) -> String {
+    let trimmed = host.trim();
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        return trimmed.to_string();
+    }
+    if trimmed.contains(':') {
+        return format!("[{trimmed}]");
+    }
+    trimmed.to_string()
 }
 
 fn parse_http_status_code(response: &str) -> Option<u16> {
@@ -3997,6 +4017,29 @@ stat: <
     }
 
     #[test]
+    fn core_health_url_uses_runtime_ipc_settings() {
+        let settings = RuntimeSettings {
+            tachyon_ipc_listen: "127.0.0.6".to_string(),
+            tachyon_ipc_port: 55124,
+            ..RuntimeSettings::default()
+        };
+        assert_eq!(
+            core_health_url(&settings),
+            "http://127.0.0.6:55124/v1/health"
+        );
+    }
+
+    #[test]
+    fn core_health_url_wraps_ipv6_hosts() {
+        let settings = RuntimeSettings {
+            tachyon_ipc_listen: "::1".to_string(),
+            tachyon_ipc_port: 55123,
+            ..RuntimeSettings::default()
+        };
+        assert_eq!(core_health_url(&settings), "http://[::1]:55123/v1/health");
+    }
+
+    #[test]
     fn parses_http_status_code_from_proxy_response() {
         assert_eq!(
             parse_http_status_code("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"),
@@ -4197,8 +4240,8 @@ pub fn run() {
                 .find(|window| window.label == "main")
                 .ok_or_else(|| "missing main window config".to_string())?;
 
-            let window = tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?
-                .build()?;
+            let window =
+                tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?.build()?;
             native_titlebar::install(&window)?;
             Ok(())
         })

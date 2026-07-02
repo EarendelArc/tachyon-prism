@@ -70,6 +70,9 @@ All notable changes to Tachyon Prism will be documented in this file.
 - Preserve richer WireGuard settings from URI and Clash/Mihomo subscriptions,
   including interface addresses, reserved bytes, workers, no-kernel-tun, and
   peer pre-shared-key / keepalive / allowed-ips fields.
+- Respect the configured Tachyon Core IPC listen address and port for overview
+  telemetry and native Core health checks instead of probing a hard-coded
+  `127.0.0.1:55123` endpoint.
 
 ### Verified
 - Real subscription URL smoke test, Prism/Core config contract test, default

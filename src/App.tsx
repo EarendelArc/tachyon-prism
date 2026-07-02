@@ -43,6 +43,7 @@ import {
   startXray,
   stopTachyonCore,
   stopXray,
+  tachyonIpcBaseUrl,
   testTcpLatency,
   testXrayProxy,
   validateTachyonCoreConfig,
@@ -1054,7 +1055,14 @@ export function App() {
     recentRoutes: [],
     recentErrors: [],
   }));
-  const telemetryClient = useMemo(() => new TelemetryClient(), []);
+  const telemetryBaseUrl = useMemo(
+    () => tachyonIpcBaseUrl(runtimeInputs),
+    [runtimeInputs.tachyonIpcListen, runtimeInputs.tachyonIpcPort],
+  );
+  const telemetryClient = useMemo(
+    () => new TelemetryClient(telemetryBaseUrl),
+    [telemetryBaseUrl],
+  );
   const [xrayTrafficStats, setXrayTrafficStats] = useState<XrayTrafficStats>(emptyXrayTrafficStats);
   const [xrayTrafficError, setXrayTrafficError] = useState<string | null>(null);
   const [trafficSamples, setTrafficSamples] = useState<TrafficSample[]>([]);
