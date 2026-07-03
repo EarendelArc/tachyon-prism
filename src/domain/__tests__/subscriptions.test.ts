@@ -13,6 +13,11 @@ import {
   totalSubscriptionNodes,
 } from "../subscriptions";
 import type { ProxyNode } from "../subscriptions";
+import {
+  subscriptionCompatibilityFixtures,
+  unsupportedSingBoxJsonFixture,
+  unsupportedSubscriptionFixture,
+} from "./subscriptionFixtures";
 
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -687,6 +692,38 @@ proxy-groups:
           allowedIPs: ["0.0.0.0/0", "::/0"],
         },
       ],
+    });
+  });
+
+  it.each(subscriptionCompatibilityFixtures)(
+    "parses compatibility fixture: $id",
+    ({ payload, expected, outboundMatch }) => {
+      const nodes = parseSubscription(payload);
+
+      expect(nodes).toHaveLength(1);
+      expect(nodes[0]).toMatchObject(expected);
+      expect(nodes[0].name).toBeTruthy();
+      expect(nodes[0].protocol).toBe(expected.protocol);
+      expect(nodes[0].address).toBe(expected.address);
+      expect(nodes[0].port).toBe(expected.port);
+      expect(buildXrayOutboundDraft(nodes[0])).toMatchObject(outboundMatch);
+    },
+  );
+
+  it("reports unsupported protocols from URI and sing-box JSON inputs", () => {
+    expect(parseSubscriptionWithReport(unsupportedSubscriptionFixture)).toMatchObject({
+      nodes: [expect.objectContaining({ name: "OK", protocol: "vless" })],
+      totalEntries: 3,
+      skippedEntries: 2,
+      invalidEntries: 1,
+      unsupportedProtocols: { ssr: 1 },
+    });
+    expect(parseSubscriptionWithReport(unsupportedSingBoxJsonFixture)).toMatchObject({
+      nodes: [],
+      totalEntries: 1,
+      skippedEntries: 1,
+      invalidEntries: 0,
+      unsupportedProtocols: { selector: 1 },
     });
   });
 

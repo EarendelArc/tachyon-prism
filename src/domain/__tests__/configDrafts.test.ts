@@ -11,6 +11,7 @@ import {
 import type { GameProfile, LauncherSettings } from "../gameProfiles";
 import { parseSubscription } from "../subscriptions";
 import type { ProxyNode } from "../subscriptions";
+import { subscriptionCompatibilityFixtures } from "./subscriptionFixtures";
 
 const mockVMessNode: ProxyNode = {
   id: "node-00000001",
@@ -278,6 +279,29 @@ describe("buildXrayClientConfigDraft", () => {
       },
     });
   });
+
+  it.each(subscriptionCompatibilityFixtures)(
+    "generates an Xray client draft for compatibility fixture: $id",
+    ({ payload, outboundMatch }) => {
+      const [node] = parseSubscription(payload);
+      const config = buildXrayClientConfigDraft(node);
+      const outbounds = config.outbounds as Array<Record<string, unknown>>;
+      const proxy = outbounds.find(
+        (outbound) => outbound.tag === "tachyon-proxy",
+      ) as Record<string, unknown> | undefined;
+
+      expect(proxy).toMatchObject({
+        ...outboundMatch,
+        tag: "tachyon-proxy",
+      });
+      expect(outbounds).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ tag: "tachyon-direct", protocol: "freedom" }),
+          expect.objectContaining({ tag: "tachyon-block", protocol: "blackhole" }),
+        ]),
+      );
+    },
+  );
 });
 
 describe("buildCoreClientConfigDraft", () => {

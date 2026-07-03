@@ -1,0 +1,483 @@
+import type { ProxyProtocol } from "../subscriptions";
+
+export interface SubscriptionCompatibilityFixture {
+  id: string;
+  payload: string;
+  expected: {
+    name: string;
+    protocol: ProxyProtocol;
+    address: string;
+    port: number;
+    security?: string;
+    transport?: string;
+    sni?: string;
+  };
+  outboundMatch: Record<string, unknown>;
+}
+
+const vmessWsTls = Buffer.from(
+  JSON.stringify({
+    v: "2",
+    ps: "VMess WS TLS",
+    add: "vmess.example.com",
+    port: "443",
+    id: "vmess-uuid",
+    aid: "0",
+    net: "ws",
+    type: "none",
+    host: "cdn.example.com",
+    path: "/vmess",
+    tls: "tls",
+    sni: "edge.example.com",
+    scy: "auto",
+  }),
+).toString("base64");
+
+export const subscriptionCompatibilityFixtures: SubscriptionCompatibilityFixture[] = [
+  {
+    id: "vless-reality",
+    payload:
+      "vless://vless-reality-uuid@reality.example.com:443?encryption=none&type=tcp&security=reality&sni=www.cloudflare.com&fp=chrome&pbk=reality-public-key&sid=01&flow=xtls-rprx-vision#VLESS Reality",
+    expected: {
+      name: "VLESS Reality",
+      protocol: "vless",
+      address: "reality.example.com",
+      port: 443,
+      security: "reality",
+      transport: "raw",
+      sni: "www.cloudflare.com",
+    },
+    outboundMatch: {
+      protocol: "vless",
+      settings: {
+        address: "reality.example.com",
+        port: 443,
+        id: "vless-reality-uuid",
+        encryption: "none",
+        flow: "xtls-rprx-vision",
+      },
+      streamSettings: {
+        network: "raw",
+        security: "reality",
+        realitySettings: {
+          serverName: "www.cloudflare.com",
+          password: "reality-public-key",
+          shortId: "01",
+        },
+      },
+    },
+  },
+  {
+    id: "vless-ws-tls",
+    payload:
+      "vless://vless-ws-uuid@vless-ws.example.com:443?encryption=none&type=ws&security=tls&sni=edge.example.com&host=cdn.example.com&path=/vless#VLESS WS TLS",
+    expected: {
+      name: "VLESS WS TLS",
+      protocol: "vless",
+      address: "vless-ws.example.com",
+      port: 443,
+      security: "tls",
+      transport: "websocket",
+      sni: "edge.example.com",
+    },
+    outboundMatch: {
+      protocol: "vless",
+      settings: {
+        address: "vless-ws.example.com",
+        port: 443,
+        id: "vless-ws-uuid",
+        encryption: "none",
+      },
+      streamSettings: {
+        network: "websocket",
+        security: "tls",
+        wsSettings: {
+          path: "/vless",
+          headers: { Host: "cdn.example.com" },
+        },
+      },
+    },
+  },
+  {
+    id: "vmess-ws-tls",
+    payload: `vmess://${vmessWsTls}`,
+    expected: {
+      name: "VMess WS TLS",
+      protocol: "vmess",
+      address: "vmess.example.com",
+      port: 443,
+      security: "tls",
+      transport: "websocket",
+      sni: "edge.example.com",
+    },
+    outboundMatch: {
+      protocol: "vmess",
+      settings: {
+        address: "vmess.example.com",
+        port: 443,
+        id: "vmess-uuid",
+        alterId: 0,
+        security: "auto",
+      },
+      streamSettings: {
+        network: "websocket",
+        security: "tls",
+        wsSettings: {
+          path: "/vmess",
+          headers: { Host: "cdn.example.com" },
+        },
+      },
+    },
+  },
+  {
+    id: "trojan-tls",
+    payload:
+      "trojan://trojan-secret@trojan.example.com:443?security=tls&sni=edge.example.com&alpn=h2,http/1.1#Trojan TLS",
+    expected: {
+      name: "Trojan TLS",
+      protocol: "trojan",
+      address: "trojan.example.com",
+      port: 443,
+      security: "tls",
+      sni: "edge.example.com",
+    },
+    outboundMatch: {
+      protocol: "trojan",
+      settings: {
+        address: "trojan.example.com",
+        port: 443,
+        password: "trojan-secret",
+      },
+      streamSettings: {
+        security: "tls",
+        tlsSettings: {
+          serverName: "edge.example.com",
+          alpn: ["h2", "http/1.1"],
+        },
+      },
+    },
+  },
+  {
+    id: "shadowsocks-aead",
+    payload: "ss://YWVzLTI1Ni1nY206c3Mtc2VjcmV0@ss.example.com:8388#Shadowsocks AEAD",
+    expected: {
+      name: "Shadowsocks AEAD",
+      protocol: "shadowsocks",
+      address: "ss.example.com",
+      port: 8388,
+    },
+    outboundMatch: {
+      protocol: "shadowsocks",
+      settings: {
+        address: "ss.example.com",
+        port: 8388,
+        method: "aes-256-gcm",
+        password: "ss-secret",
+      },
+    },
+  },
+  {
+    id: "socks",
+    payload: "socks5://socks-user:socks-pass@socks.example.com:1080#SOCKS Node",
+    expected: {
+      name: "SOCKS Node",
+      protocol: "socks",
+      address: "socks.example.com",
+      port: 1080,
+    },
+    outboundMatch: {
+      protocol: "socks",
+      settings: {
+        address: "socks.example.com",
+        port: 1080,
+        user: "socks-user",
+        pass: "socks-pass",
+      },
+    },
+  },
+  {
+    id: "http",
+    payload: "http://http-user:http-pass@http.example.com:8080#HTTP Node",
+    expected: {
+      name: "HTTP Node",
+      protocol: "http",
+      address: "http.example.com",
+      port: 8080,
+    },
+    outboundMatch: {
+      protocol: "http",
+      settings: {
+        address: "http.example.com",
+        port: 8080,
+        user: "http-user",
+        pass: "http-pass",
+      },
+    },
+  },
+  {
+    id: "hysteria2",
+    payload:
+      "hysteria2://hy-secret@hy2.example.com:443?security=tls&sni=edge.example.com&udpIdleTimeout=25s#Hysteria2 Node",
+    expected: {
+      name: "Hysteria2 Node",
+      protocol: "hysteria",
+      address: "hy2.example.com",
+      port: 443,
+      security: "tls",
+      transport: "hysteria",
+      sni: "edge.example.com",
+    },
+    outboundMatch: {
+      protocol: "hysteria",
+      settings: {
+        version: 2,
+        address: "hy2.example.com",
+        port: 443,
+      },
+      streamSettings: {
+        network: "hysteria",
+        security: "tls",
+        tlsSettings: {
+          serverName: "edge.example.com",
+        },
+        hysteriaSettings: {
+          auth: "hy-secret",
+          udpIdleTimeout: 25,
+        },
+      },
+    },
+  },
+  {
+    id: "tuic",
+    payload:
+      "tuic://tuic-uuid:tuic-secret@tuic.example.com:443?sni=edge.example.com&alpn=h3&congestion=bbr&udpRelayMode=native&zeroRttHandshake=true#TUIC Node",
+    expected: {
+      name: "TUIC Node",
+      protocol: "tuic",
+      address: "tuic.example.com",
+      port: 443,
+      security: "tls",
+      sni: "edge.example.com",
+    },
+    outboundMatch: {
+      protocol: "tuic",
+      settings: {
+        address: "tuic.example.com",
+        port: 443,
+        uuid: "tuic-uuid",
+        password: "tuic-secret",
+        congestion: "bbr",
+        udpRelayMode: "native",
+        zeroRttHandshake: true,
+      },
+    },
+  },
+  {
+    id: "wireguard",
+    payload:
+      "wireguard://wg-public-key@wg.example.com:51820?secretKey=wg-private-key&address=10.8.0.2/32,fd00::2/128&reserved=1,2,3&mtu=1420&preSharedKey=wg-psk&keepAlive=25&allowedIPs=0.0.0.0/0,::/0#WireGuard Node",
+    expected: {
+      name: "WireGuard Node",
+      protocol: "wireguard",
+      address: "wg.example.com",
+      port: 51820,
+    },
+    outboundMatch: {
+      protocol: "wireguard",
+      settings: {
+        secretKey: "wg-private-key",
+        address: ["10.8.0.2/32", "fd00::2/128"],
+        reserved: [1, 2, 3],
+        mtu: 1420,
+        peers: [
+          {
+            endpoint: "wg.example.com:51820",
+            publicKey: "wg-public-key",
+            preSharedKey: "wg-psk",
+            keepAlive: 25,
+            allowedIPs: ["0.0.0.0/0", "::/0"],
+          },
+        ],
+      },
+    },
+  },
+  {
+    id: "clash-mihomo-proxies",
+    payload: `
+proxies:
+  - name: Clash VMess WS TLS
+    type: vmess
+    server: clash-vmess.example.com
+    port: 443
+    uuid: clash-vmess-uuid
+    cipher: auto
+    network: ws
+    tls: true
+    sni: edge.example.com
+    ws-opts:
+      path: /clash
+      headers:
+        Host: cdn.example.com
+`,
+    expected: {
+      name: "Clash VMess WS TLS",
+      protocol: "vmess",
+      address: "clash-vmess.example.com",
+      port: 443,
+      security: "tls",
+      transport: "websocket",
+      sni: "edge.example.com",
+    },
+    outboundMatch: {
+      protocol: "vmess",
+      settings: {
+        address: "clash-vmess.example.com",
+        port: 443,
+        id: "clash-vmess-uuid",
+        security: "auto",
+      },
+      streamSettings: {
+        network: "websocket",
+        security: "tls",
+        wsSettings: {
+          path: "/clash",
+          headers: { Host: "cdn.example.com" },
+        },
+      },
+    },
+  },
+  {
+    id: "xray-full-outbound-json",
+    payload: JSON.stringify({
+      log: { loglevel: "warning" },
+      outbounds: [
+        {
+          tag: "Xray Full Trojan TLS",
+          protocol: "trojan",
+          settings: {
+            servers: [
+              {
+                address: "xray-trojan.example.com",
+                port: 443,
+                password: "xray-trojan-secret",
+              },
+            ],
+          },
+          streamSettings: {
+            security: "tls",
+            tlsSettings: {
+              serverName: "edge.example.com",
+            },
+          },
+        },
+      ],
+    }),
+    expected: {
+      name: "Xray Full Trojan TLS",
+      protocol: "trojan",
+      address: "xray-trojan.example.com",
+      port: 443,
+      security: "tls",
+      sni: "edge.example.com",
+    },
+    outboundMatch: {
+      protocol: "trojan",
+      settings: {
+        servers: [
+          {
+            address: "xray-trojan.example.com",
+            port: 443,
+            password: "xray-trojan-secret",
+          },
+        ],
+      },
+      streamSettings: {
+        security: "tls",
+        tlsSettings: {
+          serverName: "edge.example.com",
+        },
+      },
+    },
+  },
+  {
+    id: "sing-box-full-outbound-json",
+    payload: JSON.stringify({
+      log: { level: "info" },
+      outbounds: [
+        {
+          type: "vless",
+          tag: "sing-box VLESS Reality",
+          server: "sing-vless.example.com",
+          server_port: 443,
+          uuid: "sing-vless-uuid",
+          flow: "xtls-rprx-vision",
+          tls: {
+            enabled: true,
+            server_name: "www.cloudflare.com",
+            utls: { fingerprint: "chrome" },
+            reality: {
+              enabled: true,
+              public_key: "sing-reality-public-key",
+              short_id: "02",
+            },
+          },
+          transport: {
+            type: "ws",
+            path: "/sing",
+            headers: {
+              Host: "cdn.example.com",
+            },
+          },
+        },
+      ],
+    }),
+    expected: {
+      name: "sing-box VLESS Reality",
+      protocol: "vless",
+      address: "sing-vless.example.com",
+      port: 443,
+      security: "reality",
+      transport: "websocket",
+      sni: "www.cloudflare.com",
+    },
+    outboundMatch: {
+      protocol: "vless",
+      settings: {
+        address: "sing-vless.example.com",
+        port: 443,
+        id: "sing-vless-uuid",
+        encryption: "none",
+        flow: "xtls-rprx-vision",
+      },
+      streamSettings: {
+        network: "websocket",
+        security: "reality",
+        realitySettings: {
+          serverName: "www.cloudflare.com",
+          password: "sing-reality-public-key",
+          shortId: "02",
+        },
+        wsSettings: {
+          path: "/sing",
+          headers: { Host: "cdn.example.com" },
+        },
+      },
+    },
+  },
+];
+
+export const unsupportedSubscriptionFixture = [
+  "vless://ok-uuid@ok.example.com:443?encryption=none#OK",
+  "ssr://legacy.example.com:443",
+  "not-a-node",
+].join("\n");
+
+export const unsupportedSingBoxJsonFixture = JSON.stringify({
+  outbounds: [
+    {
+      type: "selector",
+      tag: "sing-box selector",
+      outbounds: ["OK"],
+    },
+  ],
+});

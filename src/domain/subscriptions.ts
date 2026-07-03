@@ -396,14 +396,14 @@ function diagnoseJSONPayload(value: unknown): SubscriptionDiagnostics {
 
   diagnostics.totalEntries = records.length;
   for (const record of records) {
-    const rawProtocol = stringValue(record.protocol);
+    const rawProtocol = outboundProtocolName(record);
     const protocol = normalizeProtocol(rawProtocol);
     if (protocol === "unknown" && rawProtocol !== "unknown") {
       incrementProtocol(diagnostics.unsupportedProtocols, rawProtocol || "unknown");
       diagnostics.skippedEntries += 1;
       continue;
     }
-    if (!nodeFromOutbound(record, JSON.stringify(record))) {
+    if (!nodeFromJSONOutbound(record, JSON.stringify(record))) {
       diagnostics.invalidEntries += 1;
       diagnostics.skippedEntries += 1;
     }
@@ -470,7 +470,7 @@ function jsonOutboundRecords(value: unknown): Array<Record<string, unknown>> {
   if (isRecord(value.outbound)) {
     return [value.outbound];
   }
-  if (typeof value.protocol === "string") {
+  if (typeof value.protocol === "string" || typeof value.type === "string") {
     return [value];
   }
   return [];
@@ -924,23 +924,206 @@ function nodesFromJSON(value: unknown, raw: string): ProxyNode[] {
       if (!isRecord(item)) {
         return [];
       }
-      const node = nodeFromOutbound(item, `${raw}#outbound-${index}`);
+      const node = nodeFromJSONOutbound(item, `${raw}#outbound-${index}`);
       return node ? [node] : [];
     });
   }
 
   if (isRecord(value.outbound)) {
-    const node = nodeFromOutbound(value.outbound, raw);
+    const node = nodeFromJSONOutbound(value.outbound, raw);
     return node ? [node] : [];
   }
 
-  if (typeof value.protocol === "string") {
-    const node = nodeFromOutbound(value, raw);
+  if (typeof value.protocol === "string" || typeof value.type === "string") {
+    const node = nodeFromJSONOutbound(value, raw);
     return node ? [node] : [];
   }
 
   const vmessNode = nodeFromVMessShare(value, raw);
   return vmessNode ? [vmessNode] : [];
+}
+
+function nodeFromJSONOutbound(value: Record<string, unknown>, raw: string): ProxyNode | null {
+  const outbound = normalizedJSONOutbound(value);
+  return outbound ? nodeFromOutbound(outbound, raw) : null;
+}
+
+function normalizedJSONOutbound(value: Record<string, unknown>): Record<string, unknown> | null {
+  if (typeof value.protocol === "string") {
+    return value;
+  }
+  if (typeof value.type === "string") {
+    return singBoxOutboundToXray(value);
+  }
+  return null;
+}
+
+function outboundProtocolName(value: Record<string, unknown>): string {
+  return stringValue(value.protocol) || stringValue(value.type);
+}
+
+function singBoxOutboundToXray(value: Record<string, unknown>): XrayOutboundObject | null {
+  const protocol = normalizeProtocol(stringValue(value.type));
+  if (protocol === "unknown") {
+    return null;
+  }
+
+  const address = stringValue(value.server) || stringValue(value.address);
+  const port = numberValue(value.server_port) || numberValue(value.port);
+  const settings = singBoxOutboundSettings(protocol, value, address, port);
+  if (!settings) {
+    return null;
+  }
+
+  return compactOutbound({
+    tag: stringValue(value.tag),
+    protocol,
+    settings,
+    streamSettings: singBoxStreamSettings(value, protocol),
+  });
+}
+
+function singBoxOutboundSettings(
+  protocol: ProxyProtocol,
+  value: Record<string, unknown>,
+  address: string,
+  port: number,
+): Record<string, unknown> | null {
+  switch (protocol) {
+    case "vless":
+      return compactRecord({
+        address,
+        port,
+        id: stringValue(value.uuid) || stringValue(value.id),
+        encryption: stringValue(value.encryption) || "none",
+        flow: stringValue(value.flow),
+      });
+    case "vmess":
+      return compactRecord({
+        address,
+        port,
+        id: stringValue(value.uuid) || stringValue(value.id),
+        alterId: numberValue(value.alter_id),
+        security: stringValue(value.security) || "auto",
+      });
+    case "trojan":
+      return compactRecord({
+        address,
+        port,
+        password: stringValue(value.password),
+      });
+    case "shadowsocks":
+      return compactRecord({
+        address,
+        port,
+        method: stringValue(value.method),
+        password: stringValue(value.password),
+      });
+    case "socks":
+    case "http":
+      return compactRecord({
+        address,
+        port,
+        user: stringValue(value.username) || stringValue(value.user),
+        pass: stringValue(value.password) || stringValue(value.pass),
+      });
+    case "hysteria":
+      return compactRecord({
+        version: 2,
+        address,
+        port,
+      });
+    case "tuic":
+      return compactRecord({
+        address,
+        port,
+        uuid: stringValue(value.uuid),
+        password: stringValue(value.password),
+        congestion: stringValue(value.congestion_control) || stringValue(value.congestion),
+        udpRelayMode: stringValue(value.udp_relay_mode) || stringValue(value.udpRelayMode),
+        reduceRtt: booleanValue(value.reduce_rtt),
+        zeroRttHandshake: booleanValue(value.zero_rtt_handshake),
+        heartbeat: stringValue(value.heartbeat),
+        disableSNI: booleanValue(value.disable_sni),
+      });
+    case "wireguard": {
+      const peer = compactRecord({
+        endpoint: address && port > 0 ? `${address}:${port}` : stringValue(value.endpoint),
+        publicKey: stringValue(value.peer_public_key) || stringValue(value.public_key),
+        preSharedKey: stringValue(value.pre_shared_key) || stringValue(value.preshared_key),
+        keepAlive: numberValue(value.keepalive) || numberValue(value.keep_alive),
+        allowedIPs: stringListValue(value.allowed_ips),
+      });
+      return compactRecord({
+        secretKey: stringValue(value.private_key) || stringValue(value.secret_key),
+        address: stringListValue(value.local_address) ?? stringListValue(value.address),
+        noKernelTun: booleanValue(value.no_kernel_tun),
+        mtu: numberValue(value.mtu),
+        reserved: numberListValue(value.reserved),
+        workers: numberValue(value.workers),
+        domainStrategy: stringValue(value.domain_strategy),
+        peers: [peer],
+      });
+    }
+    default:
+      return compactRecord({ address, port });
+  }
+}
+
+function singBoxStreamSettings(
+  value: Record<string, unknown>,
+  protocol: ProxyProtocol,
+): Record<string, unknown> {
+  const params = new URLSearchParams();
+  const transport = asRecord(value.transport);
+  const transportType = stringValue(transport.type);
+  if (transportType) {
+    params.set("type", transportType);
+  } else if (protocol === "hysteria") {
+    params.set("type", "hysteria");
+  }
+
+  setParamIfPresent(params, "path", stringValue(transport.path));
+  setParamIfPresent(params, "host", headerValue(asRecord(transport.headers), ["Host", "host"]));
+  setParamIfPresent(
+    params,
+    "serviceName",
+    stringValue(transport.service_name) || stringValue(transport.serviceName),
+  );
+
+  const tls = asRecord(value.tls);
+  const reality = asRecord(tls.reality);
+  const tlsEnabled = booleanValue(tls.enabled) === true || protocol === "tuic";
+  const realityEnabled = booleanValue(reality.enabled) === true || stringValue(reality.public_key) !== "";
+  if (realityEnabled) {
+    params.set("security", "reality");
+  } else if (tlsEnabled) {
+    params.set("security", "tls");
+  }
+
+  setParamIfPresent(params, "sni", stringValue(tls.server_name) || stringValue(tls.serverName));
+  setParamIfPresent(params, "fp", stringValue(asRecord(tls.utls).fingerprint) || stringValue(tls.fingerprint));
+  setParamIfPresent(params, "alpn", stringListValue(tls.alpn)?.join(",") ?? "");
+  if (booleanValue(tls.insecure) !== undefined) {
+    params.set("allowInsecure", String(booleanValue(tls.insecure)));
+  }
+  setParamIfPresent(params, "pbk", stringValue(reality.public_key) || stringValue(reality.publicKey));
+  setParamIfPresent(params, "sid", stringValue(reality.short_id) || stringValue(reality.shortId));
+
+  if (protocol === "hysteria") {
+    setParamIfPresent(
+      params,
+      "auth",
+      stringValue(value.password) || stringValue(value.auth) || stringValue(value.auth_str),
+    );
+    setParamIfPresent(
+      params,
+      "udpIdleTimeout",
+      stringValue(value.udp_idle_timeout) || stringValue(value.udpIdleTimeout),
+    );
+  }
+
+  return streamSettingsFromParams(params);
 }
 
 function nodeFromOutbound(value: Record<string, unknown>, raw: string): ProxyNode | null {
@@ -1976,6 +2159,46 @@ function parseEndpoint(
     };
   }
   return { address: trimmed, port: fallbackPort };
+}
+
+function headerValue(headers: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = stringValue(headers[key]);
+    if (value) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function booleanValue(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return booleanParam(value);
+  }
+  return undefined;
+}
+
+function stringListValue(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) {
+    const items = value
+      .map((item) => stringValue(item).trim())
+      .filter(Boolean);
+    return items.length > 0 ? items : undefined;
+  }
+  return splitList(stringValue(value));
+}
+
+function numberListValue(value: unknown): number[] | undefined {
+  if (Array.isArray(value)) {
+    const items = value
+      .map((item) => (typeof item === "number" ? item : Number.parseInt(stringValue(item), 10)))
+      .filter((item) => Number.isInteger(item));
+    return items.length > 0 ? items : undefined;
+  }
+  return integerList(stringValue(value));
 }
 
 function parsePort(value: string): number {
