@@ -92,6 +92,25 @@ export interface RuntimeInstallResult {
   inventory: ManagedBinaryInventory;
 }
 
+export interface CoreReleaseDiagnostics {
+  kind: ManagedBinaryKind;
+  displayName: string;
+  selectedChannel: ReleaseChannel;
+  resolvedTag: string | null;
+  assetName: string | null;
+  assetUrl: string | null;
+  assetSizeBytes: number | null;
+  checksumAssetName: string | null;
+  checksumUrl: string | null;
+  checksumExpectedSha256: string | null;
+  checksumActualSha256: string | null;
+  checksumMatch: boolean | null;
+  installedPath: string;
+  installedExists: boolean;
+  installedVersion: string | null;
+  lastError: string | null;
+}
+
 export interface ProcessStatus {
   state: ProcessState;
   pid: number | null;
@@ -222,6 +241,15 @@ export async function getLatestTachyonCoreRelease(): Promise<RuntimeReleaseInfo>
 
 export async function installLatestTachyonCore(): Promise<RuntimeInstallResult> {
   return invokeDesktop<RuntimeInstallResult>("install_latest_tachyon_core");
+}
+
+export async function getCoreReleaseDiagnostics(
+  kind: ManagedBinaryKind,
+): Promise<CoreReleaseDiagnostics> {
+  if (!isTauriRuntime()) {
+    return previewCoreReleaseDiagnostics(kind);
+  }
+  return invokeDesktop<CoreReleaseDiagnostics>("core_release_diagnostics", { kind });
 }
 
 export async function installWintunSidecar(): Promise<ManagedBinaryInventory> {
@@ -428,6 +456,32 @@ function previewBinary(kind: ManagedBinaryKind, displayName: string): ManagedBin
     managedSizeBytes: null,
     sidecarDependencies: [],
     targetPath: `Preview mode / ${displayName}`,
+  };
+}
+
+function previewCoreReleaseDiagnostics(kind: ManagedBinaryKind): CoreReleaseDiagnostics {
+  const settings = previewRuntimeSettings();
+  const isXray = kind === "xray";
+  const assetName = isXray
+    ? "Xray-windows-64.zip"
+    : "tachyon-core_v0.1.0-alpha.12_windows_amd64.zip";
+  return {
+    assetName,
+    assetSizeBytes: isXray ? 18153472 : 12320768,
+    assetUrl: `https://example.invalid/${assetName}`,
+    checksumActualSha256: null,
+    checksumAssetName: isXray ? `${assetName}.dgst` : "SHA256SUMS.txt",
+    checksumExpectedSha256: "a".repeat(64),
+    checksumMatch: null,
+    checksumUrl: "https://example.invalid/SHA256SUMS.txt",
+    displayName: isXray ? "Xray Core" : "Tachyon Core",
+    installedExists: false,
+    installedPath: isXray ? settings.xrayBinaryPath : settings.tachyonCoreBinaryPath,
+    installedVersion: null,
+    kind,
+    lastError: null,
+    resolvedTag: isXray ? "v25.3.6" : "v0.1.0-alpha.12",
+    selectedChannel: isXray ? settings.xrayReleaseChannel : settings.tachyonCoreReleaseChannel,
   };
 }
 

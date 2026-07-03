@@ -131,7 +131,7 @@ struct SidecarDependencyInfo {
     exists: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeReleaseInfo {
     tag_name: String,
@@ -150,6 +150,27 @@ struct RuntimeInstallResult {
     sha256: String,
     binary_path: String,
     inventory: ManagedBinaryInventory,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CoreReleaseDiagnostics {
+    kind: String,
+    display_name: String,
+    selected_channel: String,
+    resolved_tag: Option<String>,
+    asset_name: Option<String>,
+    asset_url: Option<String>,
+    asset_size_bytes: Option<u64>,
+    checksum_asset_name: Option<String>,
+    checksum_url: Option<String>,
+    checksum_expected_sha256: Option<String>,
+    checksum_actual_sha256: Option<String>,
+    checksum_match: Option<bool>,
+    installed_path: String,
+    installed_exists: bool,
+    installed_version: Option<String>,
+    last_error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -638,6 +659,15 @@ fn latest_tachyon_core_release(app: tauri::AppHandle) -> Result<RuntimeReleaseIn
 #[tauri::command]
 fn install_latest_tachyon_core(app: tauri::AppHandle) -> Result<RuntimeInstallResult, String> {
     install_latest_tachyon_core_release(&app)
+}
+
+#[tauri::command]
+fn core_release_diagnostics(
+    app: tauri::AppHandle,
+    kind: String,
+) -> Result<CoreReleaseDiagnostics, String> {
+    let binary_kind = ManagedBinaryKind::parse(&kind)?;
+    build_core_release_diagnostics(&app, binary_kind)
 }
 
 #[tauri::command]
@@ -1184,9 +1214,7 @@ fn probe_http_via_socks5(
                     return Ok(ProxyProbeResult {
                         ok: false,
                         status_code: None,
-                        latency_ms: Some(
-                            started.elapsed().as_millis().min(u32::MAX as u128) as u32,
-                        ),
+                        latency_ms: Some(started.elapsed().as_millis().min(u32::MAX as u128) as u32),
                         via: proxy,
                         target_url: target.absolute_url,
                         error: Some(error),
@@ -1306,7 +1334,10 @@ fn socks5_connect(stream: &mut TcpStream, target: &HttpProbeTarget) -> Result<()
         return Err(format!("invalid SOCKS response version: {}", header[0]));
     }
     if header[1] != 0x00 {
-        return Err(format!("SOCKS connect failed: {}", socks5_reply_label(header[1])));
+        return Err(format!(
+            "SOCKS connect failed: {}",
+            socks5_reply_label(header[1])
+        ));
     }
     let address_len = match header[3] {
         0x01 => 4,
@@ -2557,10 +2588,19 @@ fn default_true() -> bool {
 }
 
 fn normalize_release_channel(value: String, fallback: String) -> String {
+    let normalized = normalize_release_channel_value(&value);
+    if normalized == "stable" || normalized == "preview" {
+        normalized
+    } else {
+        fallback
+    }
+}
+
+fn normalize_release_channel_value(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
         "stable" => "stable".to_string(),
         "preview" | "pre" | "prerelease" => "preview".to_string(),
-        _ => fallback,
+        other => other.to_string(),
     }
 }
 
@@ -2816,6 +2856,221 @@ fn install_release_archive(
         binary_path: path_string(&target),
         inventory: managed_binary_inventory(app)?,
     })
+}
+
+fn build_core_release_diagnostics(
+    app: &tauri::AppHandle,
+    kind: ManagedBinaryKind,
+) -> Result<CoreReleaseDiagnostics, String> {
+    let settings = load_runtime_settings(app)?;
+    let channel = release_channel_for_kind(kind, &settings).to_string();
+    let installed_path = configured_binary_path_for_kind(app, kind, &settings)?;
+    let release_result = fetch_core_release_info(kind, &channel);
+    let cached_archive_path = release_result
+        .as_ref()
+        .ok()
+        .and_then(|release| cached_release_archive_path(app, kind, release).ok());
+
+    Ok(core_release_diagnostics_from_parts(
+        kind,
+        &channel,
+        &installed_path,
+        release_result,
+        cached_archive_path.as_deref(),
+        |release| http_get_text(&release.checksum_url),
+    ))
+}
+
+fn core_release_diagnostics_from_parts<F>(
+    kind: ManagedBinaryKind,
+    selected_channel: &str,
+    installed_path: &Path,
+    release_result: Result<RuntimeReleaseInfo, String>,
+    cached_archive_path: Option<&Path>,
+    checksum_text_for: F,
+) -> CoreReleaseDiagnostics
+where
+    F: FnOnce(&RuntimeReleaseInfo) -> Result<String, String>,
+{
+    let installed_exists = installed_path.is_file();
+    let installed_version = if installed_exists {
+        installed_binary_version(kind, installed_path).ok()
+    } else {
+        None
+    };
+    let mut diagnostics = CoreReleaseDiagnostics {
+        kind: kind.key().to_string(),
+        display_name: kind.display_name().to_string(),
+        selected_channel: normalize_release_channel_value(selected_channel),
+        resolved_tag: None,
+        asset_name: None,
+        asset_url: None,
+        asset_size_bytes: None,
+        checksum_asset_name: None,
+        checksum_url: None,
+        checksum_expected_sha256: None,
+        checksum_actual_sha256: None,
+        checksum_match: None,
+        installed_path: path_string(installed_path),
+        installed_exists,
+        installed_version,
+        last_error: None,
+    };
+
+    if installed_exists && diagnostics.installed_version.is_none() {
+        append_diagnostic_error(
+            &mut diagnostics.last_error,
+            format!(
+                "read {} version: version command failed or timed out",
+                kind.display_name()
+            ),
+        );
+    }
+
+    let release = match release_result {
+        Ok(release) => release,
+        Err(error) => {
+            diagnostics.last_error = Some(error);
+            return diagnostics;
+        }
+    };
+
+    diagnostics.resolved_tag = Some(release.tag_name.clone());
+    diagnostics.asset_name = Some(release.asset_name.clone());
+    diagnostics.asset_url = Some(release.asset_url.clone());
+    diagnostics.asset_size_bytes = Some(release.asset_size_bytes);
+    diagnostics.checksum_asset_name = Some(release.checksum_asset_name.clone());
+    diagnostics.checksum_url = Some(release.checksum_url.clone());
+
+    match checksum_text_for(&release)
+        .and_then(|text| find_checksum_for_asset(&text, &release.asset_name))
+    {
+        Ok(expected_sha256) => {
+            diagnostics.checksum_expected_sha256 = Some(expected_sha256.clone());
+            if let Some(archive_path) = cached_archive_path.filter(|path| path.is_file()) {
+                match sha256_file(archive_path) {
+                    Ok(actual_sha256) => {
+                        let matches = actual_sha256.eq_ignore_ascii_case(&expected_sha256);
+                        diagnostics.checksum_actual_sha256 = Some(actual_sha256.clone());
+                        diagnostics.checksum_match = Some(matches);
+                        if !matches {
+                            append_diagnostic_error(
+                                &mut diagnostics.last_error,
+                                format!(
+                                    "checksum mismatch for {}: expected {}, got {}",
+                                    release.asset_name, expected_sha256, actual_sha256
+                                ),
+                            );
+                        }
+                    }
+                    Err(error) => append_diagnostic_error(&mut diagnostics.last_error, error),
+                }
+            }
+        }
+        Err(error) => append_diagnostic_error(&mut diagnostics.last_error, error),
+    }
+
+    diagnostics
+}
+
+fn release_channel_for_kind<'a>(kind: ManagedBinaryKind, settings: &'a RuntimeSettings) -> &'a str {
+    match kind {
+        ManagedBinaryKind::TachyonCore => &settings.tachyon_core_release_channel,
+        ManagedBinaryKind::Xray => &settings.xray_release_channel,
+    }
+}
+
+fn configured_binary_path_for_kind(
+    app: &tauri::AppHandle,
+    kind: ManagedBinaryKind,
+    settings: &RuntimeSettings,
+) -> Result<PathBuf, String> {
+    let configured = match kind {
+        ManagedBinaryKind::TachyonCore => &settings.tachyon_core_binary_path,
+        ManagedBinaryKind::Xray => &settings.xray_binary_path,
+    };
+    let cleaned = clean_path_input(configured);
+    if cleaned.is_empty() {
+        managed_binary_target(app, kind)
+    } else {
+        Ok(PathBuf::from(cleaned))
+    }
+}
+
+fn fetch_core_release_info(
+    kind: ManagedBinaryKind,
+    channel: &str,
+) -> Result<RuntimeReleaseInfo, String> {
+    match kind {
+        ManagedBinaryKind::TachyonCore => fetch_latest_tachyon_core_release(channel),
+        ManagedBinaryKind::Xray => fetch_latest_xray_release(channel),
+    }
+}
+
+fn cached_release_archive_path(
+    app: &tauri::AppHandle,
+    kind: ManagedBinaryKind,
+    release: &RuntimeReleaseInfo,
+) -> Result<PathBuf, String> {
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|err| format!("resolve app config directory: {err}"))?;
+    Ok(config_dir
+        .join("downloads")
+        .join(kind.key())
+        .join(sanitize_file_component(&release.tag_name))
+        .join(&release.asset_name))
+}
+
+fn installed_binary_version(kind: ManagedBinaryKind, path: &Path) -> Result<String, String> {
+    let arg_sets: &[&[&str]] = match kind {
+        ManagedBinaryKind::TachyonCore => &[&["--version"], &["version"]],
+        ManagedBinaryKind::Xray => &[&["version"], &["--version"]],
+    };
+    let mut last_error = String::new();
+    for args in arg_sets {
+        let mut command = Command::new(path);
+        command.args(*args);
+        match command_output_with_timeout(command, Duration::from_secs(2)) {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let details = validation_details(&stdout, &stderr);
+                return Ok(first_non_empty_line(&details));
+            }
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                last_error = validation_details(&stdout, &stderr);
+            }
+            Err(error) => last_error = error,
+        }
+    }
+    Err(format!(
+        "read {} version from {}: {}",
+        kind.display_name(),
+        path.display(),
+        last_error
+    ))
+}
+
+fn first_non_empty_line(input: &str) -> String {
+    input
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim().to_string())
+        .unwrap_or_else(|| input.trim().to_string())
+}
+
+fn append_diagnostic_error(last_error: &mut Option<String>, error: String) {
+    match last_error {
+        Some(existing) if !existing.is_empty() => {
+            existing.push_str("; ");
+            existing.push_str(&error);
+        }
+        _ => *last_error = Some(error),
+    }
 }
 
 fn install_wintun_sidecar_file(app: &tauri::AppHandle) -> Result<ManagedBinaryInventory, String> {
@@ -4199,6 +4454,190 @@ mod tests {
     }
 
     #[test]
+    fn release_diagnostics_keeps_preview_prerelease_selection() {
+        let marker = tachyon_core_platform_asset_marker().expect("supported test platform");
+        let preview = GithubRelease {
+            tag_name: "v0.2.0-alpha.1".to_string(),
+            published_at: Some("2026-07-03T00:00:00Z".to_string()),
+            prerelease: true,
+            assets: vec![
+                asset(&format!("tachyon-core_v0.2.0-alpha.1_{marker}.zip"), 123),
+                asset("SHA256SUMS.txt", 512),
+            ],
+        };
+        let release = latest_tachyon_core_release_info(vec![preview], "preview");
+
+        let diagnostics = core_release_diagnostics_from_parts(
+            ManagedBinaryKind::TachyonCore,
+            "preview",
+            Path::new("missing-tachyon-core"),
+            release,
+            None,
+            |_| {
+                Ok(format!(
+                    "{}  tachyon-core_v0.2.0-alpha.1_{marker}.zip",
+                    "a".repeat(64)
+                ))
+            },
+        );
+
+        assert_eq!(diagnostics.selected_channel, "preview");
+        assert_eq!(diagnostics.resolved_tag.as_deref(), Some("v0.2.0-alpha.1"));
+        assert!(diagnostics.asset_name.as_deref().unwrap().contains(marker));
+        assert_eq!(diagnostics.checksum_match, None);
+    }
+
+    #[test]
+    fn release_diagnostics_reports_stable_empty_state() {
+        let marker = tachyon_core_platform_asset_marker().expect("supported test platform");
+        let preview = GithubRelease {
+            tag_name: "v0.2.0-alpha.1".to_string(),
+            published_at: Some("2026-07-03T00:00:00Z".to_string()),
+            prerelease: true,
+            assets: vec![
+                asset(&format!("tachyon-core_v0.2.0-alpha.1_{marker}.zip"), 123),
+                asset("SHA256SUMS.txt", 512),
+            ],
+        };
+        let release = latest_tachyon_core_release_info(vec![preview], "stable");
+
+        let diagnostics = core_release_diagnostics_from_parts(
+            ManagedBinaryKind::TachyonCore,
+            "stable",
+            Path::new("missing-tachyon-core"),
+            release,
+            None,
+            |_| unreachable!("checksum is not fetched when release resolution fails"),
+        );
+
+        assert_eq!(diagnostics.selected_channel, "stable");
+        assert!(diagnostics.resolved_tag.is_none());
+        assert!(diagnostics.asset_name.is_none());
+        assert!(diagnostics
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("stable release"));
+    }
+
+    #[test]
+    fn release_diagnostics_shows_selected_asset_name() {
+        let release = RuntimeReleaseInfo {
+            tag_name: "v-test".to_string(),
+            asset_name: "xray-windows-64.zip".to_string(),
+            asset_url: "https://example.invalid/xray-windows-64.zip".to_string(),
+            asset_size_bytes: 4096,
+            checksum_asset_name: "xray-windows-64.zip.dgst".to_string(),
+            checksum_url: "https://example.invalid/xray-windows-64.zip.dgst".to_string(),
+            published_at: None,
+        };
+
+        let diagnostics = core_release_diagnostics_from_parts(
+            ManagedBinaryKind::Xray,
+            "stable",
+            Path::new("missing-xray"),
+            Ok(release),
+            None,
+            |_| Ok(format!("{}  xray-windows-64.zip", "b".repeat(64))),
+        );
+
+        assert_eq!(diagnostics.resolved_tag.as_deref(), Some("v-test"));
+        assert_eq!(
+            diagnostics.asset_name.as_deref(),
+            Some("xray-windows-64.zip")
+        );
+        assert_eq!(
+            diagnostics.checksum_asset_name.as_deref(),
+            Some("xray-windows-64.zip.dgst")
+        );
+    }
+
+    #[test]
+    fn release_diagnostics_reports_checksum_match_for_cached_archive() {
+        let dir = unique_temp_dir("tachyon-test-diagnostic-checksum");
+        let archive = dir.join("binary.zip");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&archive, b"diagnostic archive").unwrap();
+        let hash = sha256_file(&archive).unwrap();
+        let release = test_release_info("binary.zip");
+
+        let diagnostics = core_release_diagnostics_from_parts(
+            ManagedBinaryKind::Xray,
+            "stable",
+            Path::new("missing-xray"),
+            Ok(release),
+            Some(&archive),
+            |_| Ok(format!("{hash}  binary.zip")),
+        );
+
+        assert_eq!(
+            diagnostics.checksum_expected_sha256.as_deref(),
+            Some(hash.as_str())
+        );
+        assert_eq!(
+            diagnostics.checksum_actual_sha256.as_deref(),
+            Some(hash.as_str())
+        );
+        assert_eq!(diagnostics.checksum_match, Some(true));
+        assert!(diagnostics.last_error.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn release_diagnostics_uses_checksum_aliases() {
+        let dir = unique_temp_dir("tachyon-test-diagnostic-alias");
+        let archive = dir.join("tachyon-prism-windows-x64_Tachyon.Prism_0.1.0_x64-setup.exe");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&archive, b"diagnostic alias archive").unwrap();
+        let hash = sha256_file(&archive).unwrap();
+        let release =
+            test_release_info("tachyon-prism-windows-x64_Tachyon.Prism_0.1.0_x64-setup.exe");
+
+        let diagnostics = core_release_diagnostics_from_parts(
+            ManagedBinaryKind::Xray,
+            "stable",
+            Path::new("missing-xray"),
+            Ok(release),
+            Some(&archive),
+            |_| {
+                Ok(format!(
+                    "{hash}  tachyon-prism-windows-x64_Tachyon Prism_0.1.0_x64-setup.exe"
+                ))
+            },
+        );
+
+        assert_eq!(diagnostics.checksum_match, Some(true));
+        assert_eq!(
+            diagnostics.checksum_expected_sha256.as_deref(),
+            Some(hash.as_str())
+        );
+        assert!(diagnostics.last_error.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn release_diagnostics_keeps_checksum_download_error() {
+        let release = test_release_info("binary.zip");
+
+        let diagnostics = core_release_diagnostics_from_parts(
+            ManagedBinaryKind::Xray,
+            "stable",
+            Path::new("missing-xray"),
+            Ok(release),
+            None,
+            |_| Err("request https://example.invalid/SHA256SUMS.txt: network down".to_string()),
+        );
+
+        assert_eq!(diagnostics.resolved_tag.as_deref(), Some("v-test"));
+        assert!(diagnostics.checksum_expected_sha256.is_none());
+        assert!(diagnostics
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("network down"));
+    }
+
+    #[test]
     fn ensure_json_object_rejects_arrays() {
         assert!(ensure_json_object("test", "[]").is_err());
         assert!(ensure_json_object("test", "[1, 2]").is_err());
@@ -4680,9 +5119,12 @@ stat: <
             xray_socks_port: socks_port,
             ..RuntimeSettings::default()
         };
-        let report =
-            probe_xray_local_proxies(&settings, "http://example.test/probe", Duration::from_secs(2))
-                .unwrap();
+        let report = probe_xray_local_proxies(
+            &settings,
+            "http://example.test/probe",
+            Duration::from_secs(2),
+        )
+        .unwrap();
 
         assert!(report.ok);
         assert!(report.http.ok);
@@ -4842,6 +5284,26 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
             size,
         }
     }
+
+    fn test_release_info(asset_name: &str) -> RuntimeReleaseInfo {
+        RuntimeReleaseInfo {
+            tag_name: "v-test".to_string(),
+            asset_name: asset_name.to_string(),
+            asset_url: format!("https://example.invalid/{asset_name}"),
+            asset_size_bytes: 123,
+            checksum_asset_name: "SHA256SUMS.txt".to_string(),
+            checksum_url: "https://example.invalid/SHA256SUMS.txt".to_string(),
+            published_at: None,
+        }
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+    }
 }
 
 pub fn run() {
@@ -4879,6 +5341,7 @@ pub fn run() {
             install_latest_xray,
             latest_tachyon_core_release,
             install_latest_tachyon_core,
+            core_release_diagnostics,
             install_wintun_sidecar,
             fetch_subscription_text,
             runtime_status,

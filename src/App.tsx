@@ -25,6 +25,7 @@ import {
 import {
   getLatestTachyonCoreRelease,
   getLatestXrayRelease,
+  getCoreReleaseDiagnostics,
   getManagedBinaries,
   getRuntimePrivilegeStatus,
   getRuntimePaths,
@@ -48,6 +49,7 @@ import {
   validateTachyonCoreConfig,
   validateXrayConfig,
   type ConfigValidationResult,
+  type CoreReleaseDiagnostics,
   type ManagedBinaryInfo,
   type ManagedBinaryInventory,
   type ManagedBinaryKind,
@@ -862,6 +864,30 @@ function setReleaseChannelForKind(
     : { ...settings, tachyonCoreReleaseChannel: channel };
 }
 
+function emptyReleaseDiagnostics(
+  kind: ManagedBinaryKind,
+  selectedChannel: ReleaseChannel,
+): CoreReleaseDiagnostics {
+  return {
+    assetName: null,
+    assetSizeBytes: null,
+    assetUrl: null,
+    checksumActualSha256: null,
+    checksumAssetName: null,
+    checksumExpectedSha256: null,
+    checksumMatch: null,
+    checksumUrl: null,
+    displayName: managedBinaryDisplayName(kind),
+    installedExists: false,
+    installedPath: "",
+    installedVersion: null,
+    kind,
+    lastError: null,
+    resolvedTag: null,
+    selectedChannel,
+  };
+}
+
 function runtimeWithTachyonServer(
   settings: RuntimeSettings,
   server: TachyonServerProfile | undefined,
@@ -1166,6 +1192,9 @@ export function App() {
   const [binarySourceInputs, setBinarySourceInputs] = useState(emptyBinarySourceInputs);
   const [binaryReleases, setBinaryReleases] = useState<
     Partial<Record<ManagedBinaryKind, RuntimeReleaseInfo>>
+  >({});
+  const [releaseDiagnostics, setReleaseDiagnostics] = useState<
+    Partial<Record<ManagedBinaryKind, CoreReleaseDiagnostics>>
   >({});
   const [validationResults, setValidationResults] = useState<ValidationResults>({});
   const [binaryBusy, setBinaryBusy] = useState(false);
@@ -1957,9 +1986,74 @@ export function App() {
       const release =
         kind === "xray" ? await getLatestXrayRelease() : await getLatestTachyonCoreRelease();
       setBinaryReleases((current) => ({ ...current, [kind]: release }));
+      setReleaseDiagnostics((current) => ({
+        ...current,
+        [kind]: {
+          ...(current[kind] ?? emptyReleaseDiagnostics(kind, releaseChannelForKind(settings, kind))),
+          assetName: release.assetName,
+          assetSizeBytes: release.assetSizeBytes,
+          assetUrl: release.assetUrl,
+          checksumAssetName: release.checksumAssetName,
+          checksumUrl: release.checksumUrl,
+          lastError: null,
+          resolvedTag: release.tagName,
+          selectedChannel: releaseChannelForKind(settings, kind),
+        },
+      }));
       setMessage(`${releaseChannelForKind(settings, kind)} ${managedBinaryDisplayName(kind)} ${release.tagName}`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : `${managedBinaryDisplayName(kind)} release check failed`);
+      const message =
+        error instanceof Error ? error.message : `${managedBinaryDisplayName(kind)} release check failed`;
+      setReleaseDiagnostics((current) => ({
+        ...current,
+        [kind]: {
+          ...emptyReleaseDiagnostics(kind, releaseChannelForKind(effectiveRuntimeInputs, kind)),
+          lastError: message,
+        },
+      }));
+      setMessage(message);
+    } finally {
+      setBinaryBusy(false);
+    }
+  }
+
+  async function diagnoseCoreRelease(kind: ManagedBinaryKind) {
+    try {
+      setBinaryBusy(true);
+      const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
+      setRuntimeInputs(settings);
+      const diagnostics = await getCoreReleaseDiagnostics(kind);
+      setReleaseDiagnostics((current) => ({ ...current, [kind]: diagnostics }));
+      if (diagnostics.resolvedTag && diagnostics.assetName) {
+        setBinaryReleases((current) => ({
+          ...current,
+          [kind]: {
+            assetName: diagnostics.assetName ?? "",
+            assetSizeBytes: diagnostics.assetSizeBytes ?? 0,
+            assetUrl: diagnostics.assetUrl ?? "",
+            checksumAssetName: diagnostics.checksumAssetName ?? "",
+            checksumUrl: diagnostics.checksumUrl ?? "",
+            publishedAt: null,
+            tagName: diagnostics.resolvedTag ?? "",
+          },
+        }));
+      }
+      setMessage(
+        diagnostics.lastError
+          ? `${managedBinaryDisplayName(kind)} diagnostics: ${diagnostics.lastError}`
+          : `${managedBinaryDisplayName(kind)} diagnostics ready`,
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : `${managedBinaryDisplayName(kind)} diagnostics failed`;
+      setReleaseDiagnostics((current) => ({
+        ...current,
+        [kind]: {
+          ...emptyReleaseDiagnostics(kind, releaseChannelForKind(effectiveRuntimeInputs, kind)),
+          lastError: message,
+        },
+      }));
+      setMessage(message);
     } finally {
       setBinaryBusy(false);
     }
@@ -1975,6 +2069,24 @@ export function App() {
       setBinaryReleases((current) => ({ ...current, [kind]: result.release }));
       setManagedBinaries(result.inventory);
       setRuntimeInputs(result.inventory.runtimeSettings);
+      setReleaseDiagnostics((current) => ({
+        ...current,
+        [kind]: {
+          ...emptyReleaseDiagnostics(kind, releaseChannelForKind(result.inventory.runtimeSettings, kind)),
+          assetName: result.release.assetName,
+          assetSizeBytes: result.release.assetSizeBytes,
+          assetUrl: result.release.assetUrl,
+          checksumActualSha256: result.sha256,
+          checksumAssetName: result.release.checksumAssetName,
+          checksumExpectedSha256: result.sha256,
+          checksumMatch: true,
+          checksumUrl: result.release.checksumUrl,
+          installedExists: true,
+          installedPath: result.binaryPath,
+          lastError: null,
+          resolvedTag: result.release.tagName,
+        },
+      }));
       setMessage(`${managedBinaryDisplayName(kind)} ${result.release.tagName} installed`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : `${managedBinaryDisplayName(kind)} install failed`);
@@ -2601,6 +2713,7 @@ export function App() {
             onAddManualProfile={() => void addManualProfile()}
             onAddSuggestion={(profile) => void addSuggestion(profile)}
             onCheckLatest={(kind) => void checkLatestRelease(kind)}
+            onDiagnoseRelease={(kind) => void diagnoseCoreRelease(kind)}
             onDownloadLatest={(kind) => void downloadLatestRelease(kind)}
             onInstallWintun={() => void installWintun()}
             onRefreshBinaries={() => void refreshManagedBinaries()}
@@ -2619,6 +2732,7 @@ export function App() {
             onValidateConfigs={() => void validateAllConfigs()}
             profiles={profiles}
             releaseChannelForKind={releaseChannelForKind}
+            releaseDiagnostics={releaseDiagnostics}
             runtimeInputs={runtimeInputs}
             runtimePaths={runtimePaths}
             runtimeRows={runtimeRows}
@@ -3509,6 +3623,7 @@ function SettingsView({
   onAddManualProfile,
   onAddSuggestion,
   onCheckLatest,
+  onDiagnoseRelease,
   onDownloadLatest,
   onInstallWintun,
   onRefreshBinaries,
@@ -3527,6 +3642,7 @@ function SettingsView({
   onValidateConfigs,
   profiles,
   releaseChannelForKind: releaseChannelForKindFn,
+  releaseDiagnostics,
   runtimeInputs,
   runtimePaths,
   runtimeRows,
@@ -3564,6 +3680,7 @@ function SettingsView({
   onAddManualProfile: () => void;
   onAddSuggestion: (profile: GameProfile) => void;
   onCheckLatest: (kind: ManagedBinaryKind) => void;
+  onDiagnoseRelease: (kind: ManagedBinaryKind) => void;
   onDownloadLatest: (kind: ManagedBinaryKind) => void;
   onInstallWintun: () => void;
   onRefreshBinaries: () => void;
@@ -3582,6 +3699,7 @@ function SettingsView({
   onValidateConfigs: () => void;
   profiles: GameProfile[];
   releaseChannelForKind: (settings: RuntimeSettings, kind: ManagedBinaryKind) => ReleaseChannel;
+  releaseDiagnostics: Partial<Record<ManagedBinaryKind, CoreReleaseDiagnostics>>;
   runtimeInputs: RuntimeSettings;
   runtimePaths: RuntimePaths | null;
   runtimeRows: Array<{ label: string; value: string }>;
@@ -4128,6 +4246,7 @@ function SettingsView({
                 {managedBinaryKinds.map((kind) => {
                   const binary = binaryInfo(kind);
                   const release = binaryReleases[kind];
+                  const diagnostics = releaseDiagnostics[kind];
                   const sidecars = binary?.sidecarDependencies ?? [];
                   const missingWintun = sidecars.some(
                     (dependency) =>
@@ -4154,6 +4273,12 @@ function SettingsView({
                           <span>Latest {release.tagName}: {release.assetName} / {formatBytesFn(release.assetSizeBytes)}</span>
                         ) : null}
                       </div>
+                      <ReleaseDiagnosticsPanel
+                        diagnostics={diagnostics}
+                        formatBytes={formatBytesFn}
+                        kind={kind}
+                        selectedChannel={releaseChannelForKindFn(runtimeInputs, kind)}
+                      />
                       <input
                         placeholder={ui.sourceBinaryPath}
                         value={binarySourceInputs[kind]}
@@ -4179,6 +4304,7 @@ function SettingsView({
                         <button type="button" onClick={() => void installBinary(kind)}>{ui.install}</button>
                         <button type="button" onClick={() => onUseManaged(kind)}>{ui.useManaged}</button>
                         <button disabled={binaryBusy} type="button" onClick={() => onCheckLatest(kind)}>{ui.checkLatest}</button>
+                        <button disabled={binaryBusy} type="button" onClick={() => onDiagnoseRelease(kind)}>Diagnose</button>
                         <button disabled={binaryBusy} type="button" onClick={() => onDownloadLatest(kind)}>{ui.installLatest}</button>
                         {kind === "tachyonCore" && missingWintun ? (
                           <button disabled={binaryBusy} type="button" onClick={onInstallWintun}>{ui.installWintun}</button>
@@ -4339,6 +4465,80 @@ function ValidationSummary({ results }: { results: ValidationResults }) {
       })}
     </div>
   );
+}
+
+function ReleaseDiagnosticsPanel({
+  diagnostics,
+  formatBytes: formatBytesFn,
+  kind,
+  selectedChannel,
+}: {
+  diagnostics: CoreReleaseDiagnostics | undefined;
+  formatBytes: (value: number | null) => string;
+  kind: ManagedBinaryKind;
+  selectedChannel: ReleaseChannel;
+}) {
+  const snapshot = diagnostics ?? emptyReleaseDiagnostics(kind, selectedChannel);
+  const checksumLabel =
+    snapshot.checksumMatch === true
+      ? "Match"
+      : snapshot.checksumMatch === false
+        ? "Mismatch"
+        : snapshot.checksumExpectedSha256
+          ? "Not checked"
+          : "Unknown";
+  const hasResolvedRelease = Boolean(snapshot.resolvedTag);
+  return (
+    <div className="release-diagnostics">
+      <div>
+        <span>Channel</span>
+        <strong>{snapshot.selectedChannel === "preview" ? "Pre" : "Stable"}</strong>
+      </div>
+      <div>
+        <span>Resolved tag</span>
+        <strong>{snapshot.resolvedTag ?? (snapshot.lastError ? "Empty" : "--")}</strong>
+      </div>
+      <div className="wide">
+        <span>Asset</span>
+        <strong title={snapshot.assetName ?? undefined}>
+          {snapshot.assetName
+            ? `${snapshot.assetName} / ${formatBytesFn(snapshot.assetSizeBytes)}`
+            : hasResolvedRelease
+              ? "No compatible asset"
+              : "--"}
+        </strong>
+      </div>
+      <div>
+        <span>Checksum</span>
+        <strong className={snapshot.checksumMatch === false ? "bad" : snapshot.checksumMatch ? "good" : ""}>
+          {checksumLabel}
+        </strong>
+      </div>
+      <div>
+        <span>SHA-256</span>
+        <strong title={snapshot.checksumExpectedSha256 ?? undefined}>
+          {shortHash(snapshot.checksumExpectedSha256)}
+        </strong>
+      </div>
+      <div className="wide">
+        <span>Installed</span>
+        <strong title={snapshot.installedPath || undefined}>
+          {snapshot.installedExists ? snapshot.installedVersion ?? "Present, version unknown" : "Not installed"}
+        </strong>
+      </div>
+      {snapshot.lastError ? <p className="diagnostic-error">{snapshot.lastError}</p> : null}
+    </div>
+  );
+}
+
+function shortHash(hash: string | null): string {
+  if (!hash) {
+    return "--";
+  }
+  if (hash.length <= 16) {
+    return hash;
+  }
+  return `${hash.slice(0, 8)}...${hash.slice(-8)}`;
 }
 
 function SettingRow({
