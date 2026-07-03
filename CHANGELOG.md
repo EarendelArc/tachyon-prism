@@ -5,97 +5,128 @@ All notable changes to Tachyon Prism will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- Independent `stable` / `preview` release-channel settings for Xray Core and
-  Tachyon Core managed downloads.
-- Tachyon Core release discovery can consume prerelease alpha builds when the
-  `preview` channel is selected.
-- Tachyon Core TGP FEC runtime settings in the Core settings page, including
-  data shards, parity shards, group timeout, adaptive FEC, and adaptation window.
-- Live subscription smoke test gated by `TACHYON_LIVE_SUBSCRIPTION_URL` so real
-  subscription parsing can be verified without exposing node details in logs.
-- Subscription import diagnostics report skipped entries, duplicate nodes, and
-  unsupported protocols without polluting Tachyon Core.
-- Optional Prism/Core config contract test gated by `TACHYON_CORE_BINARY_PATH`,
-  validating generated Tachyon Core client JSON with the real Core binary.
-- Runtime switches for Tachyon Core TUN auto-route and DNS hijack generation,
-  both defaulting off for TGP-only safe mode.
-- Runtime settings for Tachyon Core TGP local bind addresses and the multipath
-  switch. Generated `client.json` now writes `client.proxy.local_addrs` and
-  `tgp.multipath` from Prism's Core settings page.
-- Runtime setting for Tachyon Core TGP connection migration. Prism now writes
-  `tgp.connection_migration`, keeps it enabled by default, and requires it when
-  multipath is enabled.
-- Runtime setting for Tachyon Core TGP PSK authentication. Prism now persists
-  the shared key from the Core settings page and writes non-empty values to
-  `tgp.auth.psk` in generated Core client drafts.
-- Independent Tachyon server profiles for game relay name, address, port, PSK,
-  and remarks. Selected profiles now feed generated Core client drafts without
-  mixing with Xray subscription nodes.
-- Overview runtime presence for Xray and Tachyon plus the current Tachyon
-  server profile, with empty traffic charts when no real telemetry is present.
-- UI smoke coverage for 800x540, 1024x720, and 1366x768 key pages.
-- Config draft validation for multipath mode so Prism warns before launch when
-  fewer than two TGP local bind addresses are configured or connection
-  migration is disabled.
-- Windows Wintun sidecar installer for Tachyon Core, including SHA-256
-  verification and per-architecture `wintun.dll` extraction.
-- GitHub Actions release workflow for unsigned Prism desktop bundles on Windows
-  x64, Windows ARM64, macOS x64, macOS ARM64, Linux x64, and Linux ARM64.
-- Real-time telemetry client consuming Core SSE stream (`src/domain/telemetry.ts`).
-- Live Telemetry panel in overview showing packet counters, TGP sessions, goroutines, and recent routing decisions.
-- Telemetry auto-reconnect with exponential backoff (1s to 30s).
-- Overview current-node card opens the node selector drawer so the primary
-  desktop workflow matches the GUI.for.SingBox-style quick selector.
-- Route list CSS styling.
-- Architecture documentation (`docs/architecture.md`, EN + ZH).
-- Getting-started guide (`docs/getting-started.md`, EN + ZH).
-- Documentation section in README with links to all docs.
+- Nothing yet.
 
 ### Fixed
-- Stable release checks now explain when no full release is available and point
-  users to the Pre channel for prerelease Core builds.
+- Nothing yet.
+
+### Verified
+- Nothing yet.
+
+## [v0.1.0-alpha.12] - 2026-07-03
+
+### Added
+- Independent Tachyon server profiles for relay name, address, port, PSK, and
+  remarks. The selected profile feeds generated Tachyon Core client drafts and
+  writes non-empty PSKs to `tgp.auth.psk` without mixing Tachyon servers with
+  ordinary Xray subscription nodes.
+- Tachyon Core defaults to the `preview` release channel while alpha Core
+  builds are prereleases. Managed Xray Core and Tachyon Core downloads now have
+  independent `stable` / `preview` release-channel settings; `stable` ignores
+  GitHub prereleases, while `preview` can select prerelease builds.
+- Stable release checks now show a clear message when no compatible full release
+  is available and point users to the Pre channel for prerelease Core builds.
+- Managed release download and install flow for Xray Core and Tachyon Core,
+  including platform asset selection, checksum asset download, SHA-256
+  verification, extraction, and atomic install into Prism's managed `bin`
+  directory.
+- Windows Wintun sidecar installer and readiness checks for Tachyon Core,
+  including SHA-256 verification, per-architecture `wintun.dll` extraction, and
+  startup blocking when required sidecars are missing.
+- `Start All` now starts Xray Core and Tachyon Core independently so one core
+  failing readiness checks does not prevent the other from starting.
+- Startup preflight validation for generated configs: Xray uses
+  `xray run -test -config`, and Tachyon Core uses
+  `tachyon-core validate --config` before launch.
+- Local Xray proxy probe for the selected node through Prism's generated HTTP
+  and SOCKS inbounds. The probe reports HTTP and SOCKS status independently and
+  does not enable OS system proxy or Tachyon TUN mode.
+- Runtime settings for Tachyon Core IPC listen address and port, gRPC listen
+  address and port, telemetry interval, TGP FEC settings, local bind addresses,
+  multipath, and connection migration.
+- Overview runtime presence for Xray and Tachyon, current Xray node, current
+  Tachyon server profile, empty-state traffic charts when no telemetry exists,
+  and dual-source traffic display for Xray StatsService and Tachyon telemetry.
+- UI smoke coverage for 800x540, 1024x720, and 1366x768 key pages, including
+  overview, subscriptions, settings, routing modes, config drafts, and the local
+  HTTP/SOCKS proxy panel.
+- Subscription import diagnostics for skipped entries, duplicate nodes, and
+  unsupported protocols without leaking Xray subscription details into Tachyon
+  Core.
+- Live subscription smoke test gated by `TACHYON_LIVE_SUBSCRIPTION_URL` and
+  optional Prism/Core config contract test gated by `TACHYON_CORE_BINARY_PATH`.
+- Real-time telemetry client consuming the Tachyon Core SSE stream, with
+  auto-reconnect and an overview panel for packet counters, TGP sessions,
+  goroutines, and recent routing decisions.
+- GUI.for.SingBox-style desktop workflow improvements, including the overview
+  current-node card opening the node selector drawer, route-list styling, custom
+  frameless titlebar controls, and fixed-size smoke-tested desktop layouts.
+- Architecture and getting-started documentation in English and Chinese, plus a
+  README documentation index.
+
+### Changed
+- Generated Tachyon Core client drafts force
+  `client.tun.auto_route=false` and `client.tun.dns_hijack=false` in alpha
+  builds, even if an internal caller passes true, so Prism cannot unexpectedly
+  alter OS routing or DNS while users are playing.
+- Tachyon server profile guidance now calls out that the server must configure
+  `allowed_targets`, and that PSK values must come from the Tachyon server's
+  `tgp.auth.psk` rather than any Xray subscription node.
+- Core config draft validation warns before launch when multipath is enabled
+  without at least two local bind addresses or without connection migration.
+
+### Fixed
 - Generate current Xray outbound settings from URI and Clash/Mihomo
   subscriptions using flat `settings.address` / `settings.port` fields instead
-  of legacy `vnext` / `servers` arrays, while still reading old JSON outbounds.
-- Restore the shared i18n dictionary so Chinese and English status strings do
-  not fall back to mojibake text.
-- Add a Windows native titlebar hit-test/subclass path so custom frameless
-  windows can drag from the top title region even when WebView2 child windows
-  receive the mouse event first.
-- Preserve desktop subscription fetch errors from the Tauri backend instead of
-  masking them with browser CORS fallback errors.
-- `Start All` now attempts Xray Core and Tachyon Core independently, so one
-  core failing readiness checks no longer prevents the other from starting.
+  of legacy `vnext` / `servers` arrays where appropriate, while still reading
+  old JSON outbounds.
 - Preserve VMess share-link transport settings correctly, including WebSocket
   links where VMess `type` means header type rather than network.
 - Parse Trojan-Go-compatible links as Xray Trojan outbounds when their
   parameters map to Xray transport settings.
 - Preserve common Clash/Mihomo TLS and Xray-compatible Hysteria fields,
   including ALPN lists, skip-cert-verify, auth, and UDP idle timeout.
-- Upgrade previously saved URI subscription nodes on load so old cached nodes
-  get canonical Xray outbound settings without requiring a manual re-import.
-- Stabilize the custom Windows titlebar drag/no-drag regions; native window
-  smoke remains the follow-up verification step when desktop interaction tests
-  are safe to run.
-- Align Xray transport parsing with current Project X transport behavior:
-  current mKCP fields are preserved, while deprecated QUIC markers no longer
-  emit an invalid `network: "quic"` value.
+- Align Xray transport parsing with current Project X behavior: current mKCP
+  fields are preserved, while deprecated QUIC markers no longer emit invalid
+  `network: "quic"` values.
 - Preserve richer WireGuard settings from URI and Clash/Mihomo subscriptions,
   including interface addresses, reserved bytes, workers, no-kernel-tun, and
-  peer pre-shared-key / keepalive / allowed-ips fields.
+  peer pre-shared-key, keepalive, and allowed-ips fields.
+- Upgrade previously saved URI subscription nodes on load so old cached nodes
+  get canonical Xray outbound settings without requiring manual re-import.
+- Preserve desktop subscription fetch errors from the Tauri backend instead of
+  masking them with browser CORS fallback errors.
 - Respect the configured Tachyon Core IPC listen address and port for overview
   telemetry and native Core health checks instead of probing a hard-coded
   `127.0.0.1:55123` endpoint.
+- Restore the shared i18n dictionary so Chinese and English status strings do
+  not fall back to mojibake text.
+- Stabilize custom Windows titlebar drag/no-drag regions with a native
+  hit-test/subclass path for frameless WebView windows.
 - Keep the overview page within the fixed 800x540 desktop smoke-test viewport
-  after adding the current-node selector entry.
+  after adding current-node, runtime presence, and proxy-probe UI.
 
 ### Verified
-- Real subscription URL smoke test, Prism/Core config contract test, default
-  frontend tests, TypeScript typecheck, Rust check/tests, and Vite production
-  build. Native window smoke should be rerun when desktop interaction testing is
-  convenient again.
-- Parsed VMess WebSocket, Trojan-Go-compatible, and Hysteria subscription nodes
-  round-trip into generated Xray client config drafts.
+- TypeScript typecheck, Vitest, Vite production build, Rust check/tests, and UI
+  smoke pass for the alpha.12 release candidate.
+- Parsed VMess WebSocket, Trojan-Go-compatible, Hysteria, Clash/Mihomo, and
+  WireGuard subscription nodes round-trip into generated Xray client config
+  drafts.
+- Rust tests cover local HTTP and SOCKS proxy probing without changing host
+  system proxy settings.
+
+### Known Limitations
+- Release artifacts are unsigned and not notarized. Windows SmartScreen and
+  macOS Gatekeeper may warn until signing and notarization are added.
+- The System Proxy quick action is intentionally disabled in alpha builds.
+- Tachyon Core TUN auto-route and DNS hijack are alpha-disabled and forced to
+  false in generated Core client drafts.
+- The local proxy probe validates Prism's local Xray HTTP/SOCKS inbounds, but
+  real Xray nodes, real VPS reachability, and game UDP acceleration still need
+  user-side testing in the target network environment.
+- Tachyon server profiles require a correctly deployed Tachyon server with
+  `allowed_targets` and matching `tgp.auth.psk`; Prism cannot validate the
+  remote server policy offline.
 
 ## [v0.1.0-alpha.1]
 
