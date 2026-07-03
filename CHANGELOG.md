@@ -13,6 +13,41 @@ All notable changes to Tachyon Prism will be documented in this file.
 ### Verified
 - Nothing yet.
 
+## [v0.1.0-alpha.13] - 2026-07-04
+
+### Fixed
+- Fixed Prism release asset naming so uploaded bundles and
+  `SHA256SUMS.txt` entries use the same platform/package names, and added a
+  release-workflow self-check that verifies the generated checksum file before
+  upload.
+- Tightened managed Core release selection: the `stable` channel skips GitHub
+  prereleases, while the `preview` channel can select prerelease Core builds
+  during alpha testing.
+- Made SHA-256 lookup prefer exact asset filenames while still allowing the
+  intended Prism filename aliases, preventing unrelated similarly named assets
+  from satisfying checksum verification.
+- Added minimal TUIC subscription parsing for URI and Clash/Mihomo proxy input
+  so TUIC nodes can be imported as selectable Xray-compatible profiles.
+
+### Known Limitations
+- Release artifacts are still unsigned and not notarized.
+- System Proxy and Tachyon TUN one-click takeover remain disabled by default in
+  alpha builds; this release does not promote them to stable behavior.
+- Managed Core release discovery still depends on GitHub release metadata and
+  asset/checksum availability.
+
+### 中文说明
+- 修复 Prism release asset 命名，使上传包名和 `SHA256SUMS.txt` 条目保持一致，
+  并在 release workflow 中加入 checksum 文件上传前自检。
+- 修正托管 Core 的 release 选择：`stable` 会跳过 GitHub prerelease，`preview`
+  可在 alpha 验证期间选择预发布 Core 构建。
+- SHA-256 校验查找现在优先精确匹配资产文件名，同时保留预期的 Prism 文件名
+  alias，避免相近名称的无关资产误通过校验。
+- 增加 TUIC 订阅最小解析，支持从 URI 和 Clash/Mihomo proxy 输入导入为可选择的
+  Xray 兼容节点。
+- 系统代理和 Tachyon TUN 一键接管在 alpha 中仍默认禁用；本发布不表示这些能力
+  已 stable 或完整可用。
+
 ## [v0.1.0-alpha.12] - 2026-07-03
 
 ### Added
