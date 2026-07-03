@@ -647,6 +647,34 @@ def configure_tachyon_server(cdp: CDP, server: str) -> str:
     )
 
 
+def assert_local_proxy_probe_panel(cdp: CDP) -> None:
+    state = cdp.evaluate(
+        """
+        new Promise((resolve) => {
+          location.hash = 'overview';
+          setTimeout(() => {
+            const panel = document.querySelector('.proxy-probe-panel');
+            const button = panel?.querySelector('button');
+            resolve({
+              text: panel?.textContent ?? '',
+              disabled: Boolean(button?.disabled),
+              rows: Array.from(panel?.querySelectorAll('.proxy-probe-row') ?? [])
+                .map((row) => row.textContent)
+            });
+          }, 350);
+        })
+        """,
+        await_promise=True,
+    )
+    if "Local Proxy Probe" not in state["text"] or "Test Node" not in state["text"]:
+        raise AssertionError(f"local proxy probe panel missing: {state}")
+    if not state["disabled"]:
+        raise AssertionError(f"local proxy probe should be disabled while Xray is stopped: {state}")
+    rows = state["rows"]
+    if len(rows) != 2 or not any("HTTP" in row for row in rows) or not any("SOCKS" in row for row in rows):
+        raise AssertionError(f"local proxy probe rows missing: {state}")
+
+
 def assert_key_pages_at_viewports(cdp: CDP, output_dir: Path) -> None:
     viewports = [(800, 540), (1024, 720), (1366, 768)]
     pages = ["overview", "subscriptions", "settings"]
@@ -964,10 +992,12 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         assert_contains(text, "Personalization", "Theme", "Core")
         assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "settings-desktop-en.png")
+        assert_local_proxy_probe_panel(cdp)
         text = configure_tachyon_server(cdp, "game.example.com:443")
         assert_contains(
             text,
             "Tachyon Server Profiles",
+            "allowed_targets",
             "Smoke Game Relay",
             "TGP Local Bind Addresses",
             "TGP Connection Migration",

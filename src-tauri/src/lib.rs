@@ -224,6 +224,16 @@ struct ProxyProbeResult {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct LocalProxyProbeReport {
+    ok: bool,
+    target_url: String,
+    checked_at: Option<u64>,
+    http: ProxyProbeResult,
+    socks: ProxyProbeResult,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ConfigValidationResult {
     ok: bool,
     target: String,
@@ -752,6 +762,21 @@ fn test_xray_proxy(
 }
 
 #[tauri::command]
+fn test_xray_local_proxies(
+    app: tauri::AppHandle,
+    target_url: Option<String>,
+    timeout_ms: Option<u64>,
+) -> Result<LocalProxyProbeReport, String> {
+    let settings = load_runtime_settings(&app)?;
+    let url = target_url
+        .map(|value| clean_url_input(&value))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "http://cp.cloudflare.com/generate_204".to_string());
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(5000).clamp(500, 30000));
+    probe_xray_local_proxies(&settings, &url, timeout)
+}
+
+#[tauri::command]
 fn validate_xray_config(
     app: tauri::AppHandle,
     binary_path: Option<String>,
@@ -1080,6 +1105,240 @@ fn probe_http_via_proxy(
         target_url: target.absolute_url,
         error: Some(last_error),
     })
+}
+
+fn probe_xray_local_proxies(
+    settings: &RuntimeSettings,
+    target_url: &str,
+    timeout: Duration,
+) -> Result<LocalProxyProbeReport, String> {
+    let target = parse_http_probe_url(target_url)?;
+    let http = match probe_http_via_proxy(
+        &settings.xray_http_listen,
+        settings.xray_http_port,
+        &target.absolute_url,
+        timeout,
+    ) {
+        Ok(result) => result,
+        Err(error) => failed_proxy_probe_result(
+            "http",
+            &settings.xray_http_listen,
+            settings.xray_http_port,
+            &target.absolute_url,
+            error,
+        ),
+    };
+    let socks = match probe_http_via_socks5(
+        &settings.xray_socks_listen,
+        settings.xray_socks_port,
+        &target.absolute_url,
+        timeout,
+    ) {
+        Ok(result) => result,
+        Err(error) => failed_proxy_probe_result(
+            "socks5",
+            &settings.xray_socks_listen,
+            settings.xray_socks_port,
+            &target.absolute_url,
+            error,
+        ),
+    };
+
+    Ok(LocalProxyProbeReport {
+        ok: http.ok && socks.ok,
+        target_url: target.absolute_url,
+        checked_at: epoch_seconds(SystemTime::now()),
+        http,
+        socks,
+    })
+}
+
+fn probe_http_via_socks5(
+    proxy_host: &str,
+    proxy_port: u16,
+    target_url: &str,
+    timeout: Duration,
+) -> Result<ProxyProbeResult, String> {
+    let target = parse_http_probe_url(target_url)?;
+    let proxy = format!("socks5://{}:{}", proxy_host.trim(), proxy_port);
+    let addrs: Vec<_> = format!("{}:{}", proxy_host.trim(), proxy_port)
+        .to_socket_addrs()
+        .map_err(|err| format!("resolve local SOCKS proxy {proxy}: {err}"))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(format!("resolve local SOCKS proxy {proxy}: no addresses"));
+    }
+
+    let started = Instant::now();
+    let mut last_error = String::new();
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(mut stream) => {
+                stream
+                    .set_read_timeout(Some(timeout))
+                    .map_err(|err| format!("set SOCKS read timeout: {err}"))?;
+                stream
+                    .set_write_timeout(Some(timeout))
+                    .map_err(|err| format!("set SOCKS write timeout: {err}"))?;
+                if let Err(error) = socks5_connect(&mut stream, &target) {
+                    return Ok(ProxyProbeResult {
+                        ok: false,
+                        status_code: None,
+                        latency_ms: Some(
+                            started.elapsed().as_millis().min(u32::MAX as u128) as u32,
+                        ),
+                        via: proxy,
+                        target_url: target.absolute_url,
+                        error: Some(error),
+                    });
+                }
+
+                let request = format!(
+                    "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Tachyon-Prism/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+                    target.path_and_query, target.host_header
+                );
+                stream
+                    .write_all(request.as_bytes())
+                    .map_err(|err| format!("write SOCKS probe request: {err}"))?;
+                let mut response = Vec::new();
+                stream
+                    .read_to_end(&mut response)
+                    .map_err(|err| format!("read SOCKS probe response: {err}"))?;
+                let text = String::from_utf8_lossy(&response);
+                let status_code = parse_http_status_code(&text);
+                let ok = status_code.is_some_and(|code| (200..400).contains(&code));
+                return Ok(ProxyProbeResult {
+                    ok,
+                    status_code,
+                    latency_ms: Some(started.elapsed().as_millis().min(u32::MAX as u128) as u32),
+                    via: proxy,
+                    target_url: target.absolute_url,
+                    error: if ok {
+                        None
+                    } else {
+                        Some(
+                            first_response_line(&text)
+                                .unwrap_or("empty SOCKS proxy response")
+                                .to_string(),
+                        )
+                    },
+                });
+            }
+            Err(err) => {
+                last_error = err.to_string();
+            }
+        }
+    }
+
+    Ok(ProxyProbeResult {
+        ok: false,
+        status_code: None,
+        latency_ms: None,
+        via: proxy,
+        target_url: target.absolute_url,
+        error: Some(last_error),
+    })
+}
+
+fn failed_proxy_probe_result(
+    scheme: &str,
+    host: &str,
+    port: u16,
+    target_url: &str,
+    error: String,
+) -> ProxyProbeResult {
+    ProxyProbeResult {
+        ok: false,
+        status_code: None,
+        latency_ms: None,
+        via: format!("{scheme}://{}:{}", host.trim(), port),
+        target_url: target_url.to_string(),
+        error: Some(error),
+    }
+}
+
+fn socks5_connect(stream: &mut TcpStream, target: &HttpProbeTarget) -> Result<(), String> {
+    stream
+        .write_all(&[0x05, 0x01, 0x00])
+        .map_err(|err| format!("write SOCKS greeting: {err}"))?;
+    let mut greeting = [0_u8; 2];
+    stream
+        .read_exact(&mut greeting)
+        .map_err(|err| format!("read SOCKS greeting: {err}"))?;
+    if greeting != [0x05, 0x00] {
+        return Err(format!(
+            "SOCKS server rejected no-auth method: {:02x} {:02x}",
+            greeting[0], greeting[1]
+        ));
+    }
+
+    let mut request = vec![0x05, 0x01, 0x00];
+    if let Ok(addr) = target.host.parse::<std::net::IpAddr>() {
+        match addr {
+            std::net::IpAddr::V4(ip) => {
+                request.push(0x01);
+                request.extend_from_slice(&ip.octets());
+            }
+            std::net::IpAddr::V6(ip) => {
+                request.push(0x04);
+                request.extend_from_slice(&ip.octets());
+            }
+        }
+    } else {
+        let host = target.host.as_bytes();
+        if host.len() > u8::MAX as usize {
+            return Err("SOCKS target host is too long".to_string());
+        }
+        request.push(0x03);
+        request.push(host.len() as u8);
+        request.extend_from_slice(host);
+    }
+    request.extend_from_slice(&target.port.to_be_bytes());
+    stream
+        .write_all(&request)
+        .map_err(|err| format!("write SOCKS connect request: {err}"))?;
+
+    let mut header = [0_u8; 4];
+    stream
+        .read_exact(&mut header)
+        .map_err(|err| format!("read SOCKS connect response: {err}"))?;
+    if header[0] != 0x05 {
+        return Err(format!("invalid SOCKS response version: {}", header[0]));
+    }
+    if header[1] != 0x00 {
+        return Err(format!("SOCKS connect failed: {}", socks5_reply_label(header[1])));
+    }
+    let address_len = match header[3] {
+        0x01 => 4,
+        0x03 => {
+            let mut len = [0_u8; 1];
+            stream
+                .read_exact(&mut len)
+                .map_err(|err| format!("read SOCKS bind domain length: {err}"))?;
+            len[0] as usize
+        }
+        0x04 => 16,
+        other => return Err(format!("invalid SOCKS address type: {other}")),
+    };
+    let mut skip = vec![0_u8; address_len + 2];
+    stream
+        .read_exact(&mut skip)
+        .map_err(|err| format!("read SOCKS bind address: {err}"))?;
+    Ok(())
+}
+
+fn socks5_reply_label(code: u8) -> &'static str {
+    match code {
+        0x01 => "general failure",
+        0x02 => "connection not allowed",
+        0x03 => "network unreachable",
+        0x04 => "host unreachable",
+        0x05 => "connection refused",
+        0x06 => "TTL expired",
+        0x07 => "command not supported",
+        0x08 => "address type not supported",
+        _ => "unknown error",
+    }
 }
 
 fn expected_system_proxy_server(settings: &RuntimeSettings) -> String {
@@ -1673,7 +1932,10 @@ fn numeric_field(line: &str, marker: &str) -> Option<u64> {
 
 struct HttpProbeTarget {
     absolute_url: String,
+    host: String,
     host_header: String,
+    path_and_query: String,
+    port: u16,
 }
 
 fn parse_http_probe_url(input: &str) -> Result<HttpProbeTarget, String> {
@@ -1688,10 +1950,58 @@ fn parse_http_probe_url(input: &str) -> Result<HttpProbeTarget, String> {
     if authority.trim().is_empty() {
         return Err("proxy probe target host is required".to_string());
     }
+    let (host, port) = parse_http_authority(authority)?;
     Ok(HttpProbeTarget {
         absolute_url: format!("http://{authority}{path}"),
+        host,
         host_header: authority.to_string(),
+        path_and_query: path,
+        port,
     })
+}
+
+fn parse_http_authority(authority: &str) -> Result<(String, u16), String> {
+    let trimmed = authority.trim();
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        let (host, suffix) = rest
+            .split_once(']')
+            .ok_or_else(|| "IPv6 proxy probe target must use [host]".to_string())?;
+        if host.trim().is_empty() {
+            return Err("proxy probe target host is required".to_string());
+        }
+        let port = if suffix.is_empty() {
+            80
+        } else {
+            parse_probe_port(
+                suffix
+                    .strip_prefix(':')
+                    .ok_or_else(|| "proxy probe target port is invalid".to_string())?,
+            )?
+        };
+        return Ok((host.to_string(), port));
+    }
+
+    if trimmed.matches(':').count() > 1 {
+        return Err("IPv6 proxy probe target must use [host]".to_string());
+    }
+    let (host, port) = match trimmed.rsplit_once(':') {
+        Some((host, port)) => (host, parse_probe_port(port)?),
+        None => (trimmed, 80),
+    };
+    if host.trim().is_empty() {
+        return Err("proxy probe target host is required".to_string());
+    }
+    Ok((host.to_string(), port))
+}
+
+fn parse_probe_port(value: &str) -> Result<u16, String> {
+    let port: u16 = value
+        .parse()
+        .map_err(|_| "proxy probe target port is invalid".to_string())?;
+    if port == 0 {
+        return Err("proxy probe target port is invalid".to_string());
+    }
+    Ok(port)
 }
 
 fn http_url_host(host: &str) -> String {
@@ -4072,7 +4382,17 @@ stat: <
     fn proxy_probe_url_keeps_absolute_form() {
         let target = parse_http_probe_url(" http://example.com:8080/path?q=1 ").unwrap();
         assert_eq!(target.absolute_url, "http://example.com:8080/path?q=1");
+        assert_eq!(target.host, "example.com");
         assert_eq!(target.host_header, "example.com:8080");
+        assert_eq!(target.path_and_query, "/path?q=1");
+        assert_eq!(target.port, 8080);
+    }
+
+    #[test]
+    fn proxy_probe_url_defaults_to_http_port() {
+        let target = parse_http_probe_url("http://example.com/probe").unwrap();
+        assert_eq!(target.host, "example.com");
+        assert_eq!(target.port, 80);
     }
 
     #[test]
@@ -4135,6 +4455,121 @@ stat: <
         assert_eq!(result.status_code, Some(204));
         assert!(request.starts_with("GET http://example.test/probe HTTP/1.1"));
         assert!(request.contains("Host: example.test"));
+    }
+
+    #[test]
+    fn proxy_probe_uses_local_socks5_connect() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut greeting = [0_u8; 3];
+            stream.read_exact(&mut greeting).unwrap();
+            assert_eq!(greeting, [0x05, 0x01, 0x00]);
+            stream.write_all(&[0x05, 0x00]).unwrap();
+
+            let mut header = [0_u8; 4];
+            stream.read_exact(&mut header).unwrap();
+            assert_eq!(&header[..3], &[0x05, 0x01, 0x00]);
+            match header[3] {
+                0x03 => {
+                    let mut len = [0_u8; 1];
+                    stream.read_exact(&mut len).unwrap();
+                    let mut host = vec![0_u8; len[0] as usize];
+                    stream.read_exact(&mut host).unwrap();
+                    assert_eq!(String::from_utf8(host).unwrap(), "example.test");
+                }
+                other => panic!("unexpected SOCKS address type: {other}"),
+            }
+            let mut target_port = [0_u8; 2];
+            stream.read_exact(&mut target_port).unwrap();
+            assert_eq!(u16::from_be_bytes(target_port), 80);
+            stream
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x20, 0x00])
+                .unwrap();
+
+            let mut buffer = [0_u8; 1024];
+            let size = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..size]).to_string();
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            request
+        });
+
+        let result = probe_http_via_socks5(
+            "127.0.0.1",
+            port,
+            "http://example.test/probe",
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let request = handle.join().unwrap();
+
+        assert!(result.ok);
+        assert_eq!(result.status_code, Some(204));
+        assert!(request.starts_with("GET /probe HTTP/1.1"));
+        assert!(request.contains("Host: example.test"));
+    }
+
+    #[test]
+    fn local_proxy_report_checks_http_and_socks_inbounds() {
+        let http_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let http_port = http_listener.local_addr().unwrap().port();
+        let http_handle = std::thread::spawn(move || {
+            let (mut stream, _) = http_listener.accept().unwrap();
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .unwrap();
+        });
+
+        let socks_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socks_port = socks_listener.local_addr().unwrap().port();
+        let socks_handle = std::thread::spawn(move || {
+            let (mut stream, _) = socks_listener.accept().unwrap();
+            let mut greeting = [0_u8; 3];
+            stream.read_exact(&mut greeting).unwrap();
+            stream.write_all(&[0x05, 0x00]).unwrap();
+            let mut header = [0_u8; 4];
+            stream.read_exact(&mut header).unwrap();
+            if header[3] == 0x03 {
+                let mut len = [0_u8; 1];
+                stream.read_exact(&mut len).unwrap();
+                let mut host = vec![0_u8; len[0] as usize];
+                stream.read_exact(&mut host).unwrap();
+            }
+            let mut target_port = [0_u8; 2];
+            stream.read_exact(&mut target_port).unwrap();
+            stream
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x20, 0x00])
+                .unwrap();
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .unwrap();
+        });
+
+        let settings = RuntimeSettings {
+            xray_http_listen: "127.0.0.1".to_string(),
+            xray_http_port: http_port,
+            xray_socks_listen: "127.0.0.1".to_string(),
+            xray_socks_port: socks_port,
+            ..RuntimeSettings::default()
+        };
+        let report =
+            probe_xray_local_proxies(&settings, "http://example.test/probe", Duration::from_secs(2))
+                .unwrap();
+
+        assert!(report.ok);
+        assert!(report.http.ok);
+        assert!(report.socks.ok);
+        assert_eq!(report.target_url, "http://example.test/probe");
+        assert!(report.checked_at.is_some());
+        http_handle.join().unwrap();
+        socks_handle.join().unwrap();
     }
 
     #[test]
@@ -4330,6 +4765,7 @@ pub fn run() {
             xray_traffic_stats,
             test_tcp_latency,
             test_xray_proxy,
+            test_xray_local_proxies,
             validate_xray_config,
             validate_tachyon_core_config,
             system_proxy_status,

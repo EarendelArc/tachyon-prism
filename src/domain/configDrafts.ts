@@ -143,8 +143,8 @@ export function buildCoreClientConfigDraft(
         name: "",
         address: options.tunAddress ?? "198.18.0.1/16",
         mtu: options.tunMtu ?? 9000,
-        auto_route: options.tunAutoRoute ?? false,
-        dns_hijack: options.tunDnsHijack ?? false,
+        auto_route: false,
+        dns_hijack: false,
       },
       routing: {
         default_action: "direct",

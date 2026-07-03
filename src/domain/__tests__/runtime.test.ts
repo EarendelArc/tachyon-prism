@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { tachyonIpcBaseUrl } from "../runtime";
+import { tachyonIpcBaseUrl, testXrayLocalProxies } from "../runtime";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -32,5 +32,17 @@ describe("tachyonIpcBaseUrl", () => {
         tachyonIpcPort: 55123,
       }),
     ).toBe("http://[::1]:55123");
+  });
+});
+
+describe("testXrayLocalProxies", () => {
+  it("returns HTTP and SOCKS preview probe results outside Tauri", async () => {
+    const report = await testXrayLocalProxies("http://example.test/probe");
+
+    expect(report.ok).toBe(true);
+    expect(report.http.ok).toBe(true);
+    expect(report.socks.ok).toBe(true);
+    expect(report.http.via).toContain("10809");
+    expect(report.socks.via).toContain("10808");
   });
 });

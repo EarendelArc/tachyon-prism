@@ -134,6 +134,14 @@ export interface ProxyProbeResult {
   error: string | null;
 }
 
+export interface LocalProxyProbeReport {
+  ok: boolean;
+  targetUrl: string;
+  checkedAt: number | null;
+  http: ProxyProbeResult;
+  socks: ProxyProbeResult;
+}
+
 export interface ConfigValidationResult {
   ok: boolean;
   target: string;
@@ -264,6 +272,19 @@ export async function testXrayProxy(
     return previewProxyProbe(targetUrl);
   }
   return invokeDesktop<ProxyProbeResult>("test_xray_proxy", {
+    targetUrl,
+    timeoutMs,
+  });
+}
+
+export async function testXrayLocalProxies(
+  targetUrl = "http://cp.cloudflare.com/generate_204",
+  timeoutMs = 5000,
+): Promise<LocalProxyProbeReport> {
+  if (!isTauriRuntime()) {
+    return previewLocalProxyProbe(targetUrl);
+  }
+  return invokeDesktop<LocalProxyProbeReport>("test_xray_local_proxies", {
     targetUrl,
     timeoutMs,
   });
@@ -461,6 +482,20 @@ function previewProxyProbe(targetUrl: string): ProxyProbeResult {
     statusCode: 204,
     targetUrl,
     via: "127.0.0.1:10809",
+  };
+}
+
+function previewLocalProxyProbe(targetUrl: string): LocalProxyProbeReport {
+  return {
+    checkedAt: Math.floor(Date.now() / 1000),
+    http: previewProxyProbe(targetUrl),
+    ok: true,
+    socks: {
+      ...previewProxyProbe(targetUrl),
+      latencyMs: 45,
+      via: "socks5://127.0.0.1:10808",
+    },
+    targetUrl,
   };
 }
 

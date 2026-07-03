@@ -43,15 +43,17 @@ import {
   stopTachyonCore,
   stopXray,
   tachyonIpcBaseUrl,
+  testXrayLocalProxies,
   testTcpLatency,
-  testXrayProxy,
   validateTachyonCoreConfig,
   validateXrayConfig,
   type ConfigValidationResult,
   type ManagedBinaryInfo,
   type ManagedBinaryInventory,
   type ManagedBinaryKind,
+  type LocalProxyProbeReport,
   type ProcessStatus,
+  type ProxyProbeResult,
   type ReleaseChannel,
   type RuntimePaths,
   type RuntimePrivilegeStatus,
@@ -121,6 +123,13 @@ type SettingsSection = "general" | "core" | "rules" | "plugins" | "about";
 type ReadinessState = "error" | "ok" | "warning";
 type SubscriptionViewMode = "grid" | "list";
 type ValidationResults = Partial<Record<ManagedBinaryKind, ConfigValidationResult>>;
+type ProbeState = "error" | "idle" | "ok" | "running";
+
+interface XrayProbeStatus {
+  error: string | null;
+  report: LocalProxyProbeReport | null;
+  state: ProbeState;
+}
 
 const prismViews: PrismView[] = ["overview", "configs", "subscriptions", "plugins", "settings"];
 const routingModeStorageKey = "tachyon.prism.routingMode.v1";
@@ -337,10 +346,17 @@ const zh = {
   leakFish: "漏网之鱼",
   light: "浅色",
   liveTelemetry: "实时遥测",
+  localProxyProbe: "本地代理验证",
   more: "更多",
   noNodeSelected: "未选择节点",
   noSubscriptionNodes: "还没有订阅节点",
   noTachyonServerProfiles: "还没有 Tachyon 服务器档案",
+  proxyProbeFailed: "本地代理验证失败",
+  proxyProbeIdle: "启动 Xray 后测试当前节点的 HTTP/SOCKS 入站",
+  proxyProbeNeedNode: "请先选择 Xray 订阅节点",
+  proxyProbeNeedRunning: "请先启动 Xray，再测试当前节点",
+  proxyProbeOk: "本地代理验证通过",
+  proxyProbeRunning: "正在测试本地 HTTP/SOCKS 代理...",
   notConfigured: "未配置",
   pageVisibility: "页面可见性",
   personalized: "个性化",
@@ -386,6 +402,7 @@ const zh = {
   recentRoutes: "最近路由",
   releaseChannel: "发布通道",
   refreshLatency: "刷新延迟",
+  runProxyProbe: "测试当前节点",
   routeByRule: "按规则和进程自动选择出口",
   ruleSets: "规则集",
   run: "运行",
@@ -557,10 +574,17 @@ const en: typeof zh = {
   leakFish: "Final Match",
   light: "Light",
   liveTelemetry: "Live Telemetry",
+  localProxyProbe: "Local Proxy Probe",
   more: "More",
   noNodeSelected: "No node selected",
   noSubscriptionNodes: "No subscription nodes yet",
   noTachyonServerProfiles: "No Tachyon server profiles yet",
+  proxyProbeFailed: "Local proxy probe failed",
+  proxyProbeIdle: "Start Xray to test the current node through HTTP/SOCKS inbounds",
+  proxyProbeNeedNode: "Select an Xray subscription node first",
+  proxyProbeNeedRunning: "Start Xray before testing the current node",
+  proxyProbeOk: "Local proxy probe passed",
+  proxyProbeRunning: "Testing local HTTP/SOCKS proxies...",
   notConfigured: "Not configured",
   pageVisibility: "Page visibility",
   personalized: "Personalization",
@@ -606,6 +630,7 @@ const en: typeof zh = {
   recentRoutes: "Recent routes",
   releaseChannel: "Release channel",
   refreshLatency: "Refresh Latency",
+  runProxyProbe: "Test Node",
   routeByRule: "Route automatically by rules and process",
   ruleSets: "Rule sets",
   run: "Run",
@@ -696,7 +721,32 @@ function processStatusLabel(status: ProcessStatus | undefined): string {
   if (!status) {
     return "unknown";
   }
+  if (status.state === "failed" && status.lastError) {
+    return `failed: ${status.lastError}`;
+  }
   return status.pid ? `${status.state} pid ${status.pid}` : status.state;
+}
+
+function proxyProbeSummary(result: ProxyProbeResult | null | undefined): string {
+  if (!result) {
+    return "--";
+  }
+  if (result.ok) {
+    const latency = result.latencyMs === null ? "n/a" : `${result.latencyMs}ms`;
+    return `HTTP ${result.statusCode ?? "?"} / ${latency}`;
+  }
+  return result.error || "failed";
+}
+
+function proxyProbeMessage(report: LocalProxyProbeReport, ui: typeof zh): string {
+  if (report.ok) {
+    return `${ui.proxyProbeOk}: HTTP ${proxyProbeSummary(report.http)} / SOCKS ${proxyProbeSummary(report.socks)}`;
+  }
+  const failures = [
+    report.http.ok ? "" : `HTTP: ${proxyProbeSummary(report.http)}`,
+    report.socks.ok ? "" : `SOCKS: ${proxyProbeSummary(report.socks)}`,
+  ].filter(Boolean);
+  return `${ui.proxyProbeFailed}: ${failures.join(" / ")}`;
 }
 
 function systemProxyLabel(status: SystemProxyState | null): string {
@@ -1139,6 +1189,11 @@ export function App() {
   );
   const [xrayTrafficStats, setXrayTrafficStats] = useState<XrayTrafficStats>(emptyXrayTrafficStats);
   const [xrayTrafficError, setXrayTrafficError] = useState<string | null>(null);
+  const [xrayProbe, setXrayProbe] = useState<XrayProbeStatus>({
+    error: null,
+    report: null,
+    state: "idle",
+  });
   const [trafficSamples, setTrafficSamples] = useState<TrafficSample[]>([]);
   const previousTrafficRef = useRef<{ at: number; totals: TrafficTotals } | null>(null);
   const subscriptionNameInputRef = useRef<HTMLInputElement | null>(null);
@@ -1540,6 +1595,7 @@ export function App() {
       saveSubscriptionSnapshot(snapshot);
       setSubscription(snapshot);
       setNodePickerOpen(false);
+      setXrayProbe({ error: null, report: null, state: "idle" });
       setMessage(ui.nodeSelected);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Node selection failed");
@@ -1978,24 +2034,36 @@ export function App() {
 
   async function probeXrayProxy() {
     try {
+      if (!activeNode) {
+        setXrayProbe({ error: ui.proxyProbeNeedNode, report: null, state: "error" });
+        setMessage(ui.proxyProbeNeedNode);
+        return;
+      }
       const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
       const status = await getRuntimeStatus();
       setRuntimeStatus(status);
       if (status.xray.state !== "running") {
-        setMessage("Start Xray first, then run proxy probe");
+        const error = status.xray.lastError
+          ? `${ui.proxyProbeNeedRunning}: ${status.xray.lastError}`
+          : ui.proxyProbeNeedRunning;
+        setXrayProbe({ error, report: null, state: "error" });
+        setMessage(error);
         return;
       }
-      setMessage("Testing local Xray HTTP proxy...");
-      const result = await testXrayProxy();
-      const latency = result.latencyMs === null ? "n/a" : `${result.latencyMs}ms`;
-      if (result.ok) {
-        setMessage(`Proxy OK: HTTP ${result.statusCode ?? "?"} / ${latency}`);
-      } else {
-        setMessage(result.error ?? "Proxy probe failed");
-      }
+      setXrayProbe((current) => ({ ...current, error: null, state: "running" }));
+      setMessage(ui.proxyProbeRunning);
+      const report = await testXrayLocalProxies();
+      setXrayProbe({
+        error: report.ok ? null : proxyProbeMessage(report, ui),
+        report,
+        state: report.ok ? "ok" : "error",
+      });
+      setMessage(proxyProbeMessage(report, ui));
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Proxy probe failed");
+      const message = error instanceof Error ? error.message : ui.proxyProbeFailed;
+      setXrayProbe({ error: message, report: null, state: "error" });
+      setMessage(message);
     }
   }
 
@@ -2416,8 +2484,8 @@ export function App() {
           <button type="button" onClick={() => void saveDrafts()}>
             ◫
           </button>
-          <button aria-label="Test Xray proxy" type="button" onClick={() => void probeXrayProxy()}>
-            HTTP
+          <button aria-label={ui.runProxyProbe} type="button" onClick={() => void probeXrayProxy()}>
+            {ui.runProxyProbe}
           </button>
           <button
             type="button"
@@ -2443,6 +2511,7 @@ export function App() {
             latencyMap={nodeLatencies}
             nodeCount={subscriptionNodeCount}
             onOpenNodePicker={() => setNodePickerOpen(true)}
+            onProbeXray={() => void probeXrayProxy()}
             onRoutingModeChange={changeRoutingMode}
             routingMode={routingMode}
             telemetry={telemetry}
@@ -2453,6 +2522,7 @@ export function App() {
             xrayStatsError={xrayTrafficError}
             xrayStatsQueriedAt={xrayTrafficStats.queriedAt}
             xrayRunning={runtimeStatus?.xray.state === "running"}
+            xrayProbe={xrayProbe}
             tachyonRunning={runtimeStatus?.tachyonCore.state === "running"}
             ui={ui}
           />
@@ -2623,6 +2693,7 @@ function OverviewView({
   latencyMap,
   nodeCount,
   onOpenNodePicker,
+  onProbeXray,
   onRoutingModeChange,
   routingMode,
   telemetry,
@@ -2630,6 +2701,7 @@ function OverviewView({
   trafficSamples,
   trafficTotals,
   xrayRunning,
+  xrayProbe,
   xrayStatsEnabled,
   xrayStatsError,
   xrayStatsQueriedAt,
@@ -2641,6 +2713,7 @@ function OverviewView({
   latencyMap: NodeLatencyMap;
   nodeCount: number;
   onOpenNodePicker: () => void;
+  onProbeXray: () => void;
   onRoutingModeChange: (mode: XrayRoutingMode) => void;
   routingMode: XrayRoutingMode;
   telemetry: TelemetryState;
@@ -2648,6 +2721,7 @@ function OverviewView({
   trafficSamples: TrafficSample[];
   trafficTotals: TrafficTotals;
   xrayRunning: boolean;
+  xrayProbe: XrayProbeStatus;
   xrayStatsEnabled: boolean;
   xrayStatsError: string | null;
   xrayStatsQueriedAt: number | null;
@@ -2801,6 +2875,32 @@ function OverviewView({
             <em>⌄</em>
           </button>
 
+          <article className={`proxy-probe-panel ${xrayProbe.state}`}>
+            <header>
+              <div>
+                <strong>{ui.localProxyProbe}</strong>
+                <span>
+                  {xrayProbe.state === "running"
+                    ? ui.proxyProbeRunning
+                    : xrayProbe.state === "ok"
+                      ? ui.proxyProbeOk
+                      : xrayProbe.error || ui.proxyProbeIdle}
+                </span>
+              </div>
+              <button
+                disabled={!activeNode || !xrayRunning || xrayProbe.state === "running"}
+                type="button"
+                onClick={onProbeXray}
+              >
+                {ui.runProxyProbe}
+              </button>
+            </header>
+            <div className="proxy-probe-grid">
+              <ProxyProbeRow label="HTTP" result={xrayProbe.report?.http} />
+              <ProxyProbeRow label="SOCKS" result={xrayProbe.report?.socks} />
+            </div>
+          </article>
+
           <h2>{ui.workMode}</h2>
           <div className="work-mode-list">
             <button
@@ -2855,6 +2955,23 @@ function MetricCard({
       <strong>{primary}</strong>
       <span>{secondary}</span>
     </article>
+  );
+}
+
+function ProxyProbeRow({
+  label,
+  result,
+}: {
+  label: string;
+  result: ProxyProbeResult | undefined;
+}) {
+  const state = result ? (result.ok ? "ok" : "error") : "idle";
+  return (
+    <div className={`proxy-probe-row ${state}`}>
+      <span>{label}</span>
+      <strong>{proxyProbeSummary(result)}</strong>
+      <small>{result?.via ?? "--"}</small>
+    </div>
   );
 }
 
@@ -3598,7 +3715,7 @@ function SettingsView({
                 <header>
                   <div>
                     <h2>{ui.tachyonServerProfiles}</h2>
-                    <p>Save Tachyon game server profiles separately; they never mix with Xray subscription nodes.</p>
+                    <p>Server must configure allowed_targets. Copy PSK from server-side tgp.auth.psk; do not use ordinary Xray subscription nodes here.</p>
                   </div>
                   <button type="button" onClick={onSaveTachyonServer}>{ui.save}</button>
                 </header>

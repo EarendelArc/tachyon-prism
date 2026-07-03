@@ -401,7 +401,7 @@ describe("buildCoreClientConfigDraft", () => {
     expect(ipc.grpc_addr).toBe("127.0.0.1:50051");
   });
 
-  it("respects runtime networking options", () => {
+  it("respects runtime networking options while forcing TUN route and DNS hijack off", () => {
     const config = buildCoreClientConfigDraft({
       ...mockCoreOptions,
       grpcListen: "127.0.0.5",
@@ -426,8 +426,9 @@ describe("buildCoreClientConfigDraft", () => {
     const fec = tgp.fec as Record<string, unknown>;
 
     expect(tun.address).toBe("198.19.0.1/16");
-    expect(tun.auto_route).toBe(true);
-    expect(tun.dns_hijack).toBe(true);
+    // Alpha builds must not enable OS-affecting TUN routing, even if a caller passes true.
+    expect(tun.auto_route).toBe(false);
+    expect(tun.dns_hijack).toBe(false);
     expect(tun.mtu).toBe(8500);
     expect(ipc.websocket_addr).toBe("127.0.0.6:55124");
     expect(ipc.grpc_addr).toBe("127.0.0.5:50052");
