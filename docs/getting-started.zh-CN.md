@@ -4,7 +4,7 @@
 
 ## 前置条件
 
-- Windows 10/11、macOS 13+，或带 TUN 支持的 Linux
+- Windows 10/11、macOS 13+ 或 Linux
 - 一个代理订阅、单独分享链接，或完整 Xray outbound/config JSON
 
 ## 1. 安装 Tachyon Prism
@@ -15,7 +15,7 @@
 
 1. 打开 Prism，进入 **订阅** 页面。
 2. 填写订阅名称和订阅地址后点击 **更新**，也可以粘贴订阅内容后点击 **导入**。
-3. 在节点列表中选择一个节点。选中的节点会决定 Xray outbound 和 Tachyon/TGP relay 端点。
+3. 在节点列表中选择一个节点。选中节点会决定 Xray outbound；Tachyon 游戏加速配置仍由 Tachyon 服务器档案独立管理。
 
 ## 3. 扫描 Steam（可选）
 
@@ -42,16 +42,20 @@
 3. **安装最新版 Tachyon Core** 对 Tachyon Core 执行同样流程。
 4. 点击 **使用托管**，让运行路径指向 Prism 管理的二进制文件。
 
-Windows 上 Prism 还会检查 Tachyon Core 所需的 `wintun.dll` sidecar。Prism 也会显示当前桌面进程是否具备创建 TUN 设备的权限；启动 Tachyon Core TUN 模式前，请以管理员/root 或等效网络权限运行 Prism。
+`stable` 只使用正式 release；如果 Tachyon Core 暂无正式 release，Prism 会显示清晰空状态并提示切换到 `preview`。`preview` 会优先选择 prerelease，例如 alpha 构建。
+
+Windows 上 Prism 还会检查 Tachyon Core 所需的 `wintun.dll` sidecar。Prism 也会显示当前桌面进程是否具备创建 TUN 设备的权限，但当前 alpha 禁用 TUN 接管；仅运行 Xray 或可选 Tachyon 游戏加速不需要管理员/root 权限。
 
 ## 6. 生成、验证并保存配置
 
 进入 **设置 > 核心**，找到 **配置草稿**：
 
-- Prism 会根据当前节点、游戏配置、启动器设置、运行端口、TGP 本地绑定地址、连接迁移和多路径开关生成 `xray-client.json` 与 `client.json`。
+- Prism 会根据当前节点、Tachyon 服务器档案、游戏配置、启动器设置、运行端口、TGP 本地绑定地址、连接迁移和多路径开关生成 `xray-client.json` 与 `client.json`。
 - 点击 **保存** 把配置写入 Prism 配置目录。
 - 点击 **验证配置**，启动前运行 `xray run -test -config` 和 `tachyon-core validate --config`。
 - 也可以把任意一份配置复制到剪贴板。
+
+当前 alpha 始终强制 `client.tun.auto_route=false` 和 `client.tun.dns_hijack=false`，不会启用系统级 TUN 接管。
 
 ## 7. 启动核心
 
@@ -64,12 +68,12 @@ Windows 上 Prism 还会检查 Tachyon Core 所需的 `wintun.dll` sidecar。Pri
 5. Prism 用 `client.json` 启动 Tachyon Core。
 6. 概览页显示两个核心的实时状态。
 
-匹配游戏配置的 UDP 流量会通过 TGP 加速。其他代理流量正常走 Xray。
+匹配游戏配置的 UDP 流量可以通过 TGP 加速。其他代理流量正常走 Xray。
 
 ## 验证运行状态
 
 - **概览** 页面会显示运行状态、已启用游戏规则和双核心流量曲线。
 - **就绪检查** 会提示缺失的节点、二进制、配置或 sidecar。
-- 启动 Tachyon Core 前，**TUN Privilege** 行应显示 `ready`。
-- 本地 HTTP 代理探测会通过生成的 Xray HTTP inbound 验证代理链路，不会修改系统代理，也不会启用 TUN。
-- 系统代理和 TUN 只建议在你准备接管系统流量时再启用。
+- **TUN Privilege** 行在当前 alpha 中只是只读提示，不是启动门槛。
+- 本地 HTTP/SOCKS 代理探针会通过生成的 Xray 本地入站验证代理链路，不会修改系统代理，也不会启用 TUN。
+- 系统代理和 TUN 一键接管在当前 alpha 保持禁用；TUN 一键接管是 stable 门禁，不是本轮强制开启内容。

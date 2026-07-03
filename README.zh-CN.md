@@ -6,6 +6,8 @@ Tachyon Prism 是 Tachyon 的图形化控制面。
 
 Prism 是完整的 Xray GUI 客户端，并额外支持 Tachyon Core。它负责交互、可视化、订阅、节点选择、Xray 生命周期、Xray JSON 生成、路由 UI、规则 UI、游戏进程检测和双核心编排。普通代理流量走 Xray，游戏 UDP 流量可以交给 Tachyon Core 做低延迟加速。
 
+当前 stable 线的最低承诺是“完整 Xray GUI + 可选 Tachyon 游戏加速”。当前 alpha 中系统代理和 TUN 一键接管保持禁用；本地 HTTP/SOCKS 探针允许保留，因为它只验证 Prism 生成的本地 Xray 入站，不修改宿主系统网络状态。
+
 ## 当前功能
 
 - 运行时与游戏配置状态看板。
@@ -22,14 +24,14 @@ Prism 是完整的 Xray GUI 客户端，并额外支持 Tachyon Core。它负责
 - 一键把生成的 `client.json` 和 `xray-client.json` 保存到 Tauri 应用配置目录。
 - 持久化 Xray Core 和 Tachyon Core 的运行二进制路径。
 - 运行时网络设置，包含 Xray SOCKS、Xray HTTP 探测入站、Xray StatsService、Tachyon IPC、Tachyon gRPC、TUN 地址/MTU 和遥测间隔。
-- 通过生成的 Xray HTTP 入站进行本地代理探测，不修改系统代理，也不启用 TUN。
-- 跨平台系统代理控制已接入 Prism 本地 Xray HTTP/SOCKS 入站。停止全部运行时时，会先清理 Prism 持有的系统代理状态，再停止 Xray。
+- 通过生成的 Xray HTTP/SOCKS 入站进行本地代理探测，不修改系统代理，也不启用 TUN。
+- 系统代理和 TUN 一键接管在当前 alpha 中禁用；停止全部运行时时仅会尝试清理历史上由 Prism 持有的系统代理状态。
 - 把本地二进制安装到 Prism 应用配置目录下的托管 `bin` 目录。
 - 从 GitHub release channel 发现、下载、SHA-256 校验并托管安装最新版 Xray Core 和 Tachyon Core。
 - 为 Xray Core 与 Tachyon Core 的托管下载分别选择 `stable` / `preview` 发布通道。
 - 作为独立子进程启动和停止 Xray Core 与 Tachyon Core。
 - 启动前配置验证：每次启动前都会用 `xray run -test -config` 校验 Xray 配置，并用 `tachyon-core validate --config` 校验 Tachyon Core 配置。
-- Tachyon Core TUN 模式运行权限检测。Prism 会显示当前桌面进程是否具备创建 TUN/Wintun 设备的权限，并在权限不足时阻止 Core 启动且给出明确提示。
+- Tachyon Core TUN 权限检测是只读状态提示；当前 alpha 不因 TUN 权限不足阻止 Core 启动，因为生成配置会强制关闭 OS 级 TUN 接管。
 - Windows 运行时会检查 Tachyon Core 配置二进制同目录下必需的 `wintun.dll` sidecar。
 
 ## 订阅边界
@@ -45,6 +47,7 @@ Prism 在本地解析订阅内容，并把选中节点保存在桌面控制面�
 - `socks://...` / `socks5://...`
 - `http://...` / `https://...`
 - `hysteria://...` / `hysteria2://...` / `hy2://...`
+- `tuic://...`
 - 包含密钥材料的基础 `wireguard://...` 链接。
 - 完整 Xray outbound JSON 对象。
 - 带 `outbounds` 数组的完整 Xray config JSON。
@@ -53,11 +56,11 @@ Prism 在本地解析订阅内容，并把选中节点保存在桌面控制面�
 
 完整 Xray JSON 路径会尽量无损：Prism 原样保存 outbound 对象，只抽取界面展示所需的节点摘要。这条路径用于覆盖完整 Xray 能力，包括 transport settings、TLS、REALITY、mux、proxy settings 和未来新增字段。
 
-每个节点都会保留完整 Xray outbound 草稿。Core 只接收 UDP 游戏加速所需的 TGP relay 端点。
+每个节点都会保留完整 Xray outbound 草稿。Tachyon 服务器档案与 Xray 订阅节点相互独立，并为可选 UDP 游戏加速提供所需的 TGP relay 端点。
 
 ## 配置草稿
 
-Config 面板会根据当前选中节点生成两份 JSON 草稿：
+Config 面板会根据当前选中的 Xray 节点和 Tachyon 服务器档案生成两份 JSON 草稿：
 
 - `xray-client.json`：本地 SOCKS/HTTP inbound 加选中节点对应的 Xray outbound。HTTP inbound 用于 Prism 的本地代理探测，也可供支持显式 HTTP 代理的应用使用。启用 Xray 统计时，Prism 还会按 Xray 官方 API 方式加入 `StatsService` inbound，让概览图可以显示 Xray 流量而不需要 Tachyon Core 参与。
 - `client.json`：Tachyon Core 客户端配置，描述 TGP UDP 游戏路径，并把 Prism 管理的游戏配置写入 `client.routing.game_profiles`，把启动器策略写入 `client.routing.launchers`。
@@ -68,13 +71,13 @@ Save 操作会把生成文件写入 Tauri 应用配置目录，并在 Config 面
 
 Binaries 面板可以把本地 `xray` 或 `tachyon-core` 可执行文件复制到 Prism 应用配置目录下的托管 `bin` 目录，并让 `runtime-settings.json` 指向这个托管副本。它也可以查询最新版 Xray Core 和 Tachyon Core GitHub release，选择当前平台压缩包，下载匹配的 `.dgst` / `SHA256SUMS.txt` 校验资产，校验压缩包 SHA-256，解出 `xray`/`xray.exe` 或 `tachyon-core`/`tachyon-core.exe`，并原子安装到托管 `bin` 目录。
 
-每个托管核心都有独立的发布通道选择器。`stable` 会忽略 GitHub prerelease，`preview` 会允许 prerelease 构建。Xray Core 默认使用 `stable`；Tachyon Core 在 alpha 阶段默认使用 `preview`。
+每个托管核心都有独立的发布通道选择器。`stable` 会忽略 GitHub prerelease，`preview` 会优先选择 prerelease 构建。Xray Core 默认使用 `stable`；Tachyon Core 在 alpha 阶段默认使用 `preview`。如果 Tachyon Core 暂无正式 release，`stable` 会显示清晰空状态并提示切换到 `preview`，不会静默安装 prerelease。
 
-Runtime 面板会把二进制路径保存到 `runtime-settings.json`。`Start All` 会先写入最新生成的配置文件，再用 `xray-client.json` 启动 Xray，并用 `client.json` 启动 Tachyon Core。每次启动前都会先验证刚写入的配置：Xray 使用原生 `run -test -config` 模式，Tachyon Core 使用 `validate --config`。Config Drafts 区域也提供手动验证按钮，并会保留最近一次验证结果。同一个 Runtime 面板也会保存本地监听端口与核心传输设置：Xray SOCKS、Xray HTTP 探测入站、Xray StatsService、Tachyon HTTP IPC、Tachyon gRPC、TUN 地址/MTU 和遥测间隔。在 Windows 上，Tachyon Core 还要求 `wintun.dll` 与配置的 `tachyon-core.exe` 位于同一目录；Prism 会在 Runtime readiness 中提示，并在缺少必需 sidecar 时阻止启动 Core。Prism 也会检查当前进程是否具备管理 TUN 设备的权限：Windows 需要管理员，macOS/Linux 通常需要 root 或等效网络能力。这个检查只读，不会自行启用 TUN。
+Runtime 面板会把二进制路径保存到 `runtime-settings.json`。`Start All` 会先写入最新生成的配置文件，再用 `xray-client.json` 启动 Xray，并用 `client.json` 启动 Tachyon Core。每次启动前都会先验证刚写入的配置：Xray 使用原生 `run -test -config` 模式，Tachyon Core 使用 `validate --config`。Config Drafts 区域也提供手动验证按钮，并会保留最近一次验证结果。同一个 Runtime 面板也会保存本地监听端口与核心传输设置：Xray SOCKS、Xray HTTP 探测入站、Xray StatsService、Tachyon HTTP IPC、Tachyon gRPC、TUN 地址/MTU 和遥测间隔。Alpha 配置生成始终写入 `client.tun.auto_route=false` 和 `client.tun.dns_hijack=false`，即使调用方传入 true。在 Windows 上，Tachyon Core 还要求 `wintun.dll` 与配置的 `tachyon-core.exe` 位于同一目录；Prism 会在 Runtime readiness 中提示，并在缺少必需 sidecar 时阻止启动 Core。Prism 也会检查当前进程是否具备管理 TUN 设备的权限，但这个检查只读，不是当前 alpha 的启动门槛，也不会自行启用 TUN。
 
-概览页快捷操作里提供本地 HTTP 代理探测。它会向配置的本地 Xray HTTP inbound 发送 absolute-form HTTP 请求，并显示返回状态码与耗时。这个测试只验证当前选中 Xray outbound 的代理链路，不会修改系统代理，也不会触发 Tachyon TUN 模式。
+概览页快捷操作里提供本地 HTTP/SOCKS 代理探测。它会检查配置的本地 Xray HTTP inbound 和 SOCKS inbound，并分别显示状态码、耗时和错误。这个测试只验证当前选中 Xray outbound 的代理链路，不会修改系统代理，也不会触发 Tachyon TUN 模式。
 
-系统代理快捷操作是真正的 OS 级代理开关。它会先确保 Xray 已使用生成配置运行，然后把系统 HTTP/HTTPS 流量指向本地 Xray HTTP inbound，把 SOCKS 流量指向本地 Xray SOCKS inbound。绕过列表可以在 设置 > 核心 中修改。自动化测试只覆盖命令构造与本地代理探测，刻意不会在测试中切换宿主系统代理。
+系统代理快捷操作在当前 alpha UI 中有意禁用。绕过列表仍可在 设置 > 核心 中编辑，供后续版本使用；自动化测试只覆盖本地代理探测，不会切换宿主系统代理。
 
 概览页流量图刻意使用两个遥测来源：Tachyon 曲线来自 Tachyon Core 的 SSE 遥测流；Xray 曲线由 Prism 通过生成配置暴露的 Xray `StatsService` 轮询获得。Core 不读取订阅、不管理 Xray，也不采集 Xray 统计。
 

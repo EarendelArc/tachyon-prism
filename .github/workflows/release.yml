@@ -200,9 +200,15 @@ jobs:
           find artifacts -type f | sort | while read -r file; do
             artifact="$(echo "${file}" | cut -d/ -f2)"
             base="$(basename "${file}")"
-            cp "${file}" "release/${artifact}_${base}"
+            release_base="$(printf '%s' "${base}" | tr ' \t' '..')"
+            cp "${file}" "release/${artifact}_${release_base}"
           done
-          (cd release && sha256sum * > SHA256SUMS.txt)
+          if find release -maxdepth 1 -type f -name '*[[:space:]]*' | grep -q .; then
+            echo "release assets must not contain whitespace; use Tachyon.Prism-style names" >&2
+            find release -maxdepth 1 -type f -name '*[[:space:]]*' -print >&2
+            exit 1
+          fi
+          (cd release && sha256sum * > SHA256SUMS.txt && sha256sum --check SHA256SUMS.txt)
 
           {
             echo "Tachyon Prism ${version}"

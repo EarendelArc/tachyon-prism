@@ -18,8 +18,9 @@ src/                        src-tauri/src/
 ```
 
 The frontend owns subscription parsing, node selection, config draft generation,
-and all UI state. The Rust backend owns filesystem access, binary management,
-process spawning, and HTTP bridge calls to Core.
+and all UI state. Tachyon Core stays pure: it receives generated config and does
+not parse subscriptions or manage Xray nodes. The Rust backend owns filesystem
+access, binary management, process spawning, and HTTP bridge calls to Core.
 
 Tauri `invoke()` connects the two: the frontend calls named Rust commands, and
 the Rust side returns JSON-serializable results.
@@ -75,6 +76,11 @@ Start All:
 
 The Runtime panel shows live process state for both cores and supports
 individual start/stop controls.
+
+Current alpha builds keep OS system proxy and TUN takeover disabled by default.
+Generated Core configs force `client.tun.auto_route=false` and
+`client.tun.dns_hijack=false`; the local HTTP/SOCKS probe only validates Prism's
+generated Xray inbounds and does not change host network state.
 
 ## Test Coverage
 

@@ -766,7 +766,7 @@ function privilegeLabel(status: RuntimePrivilegeStatus | null): string {
   if (!status) {
     return "unknown";
   }
-  return status.canManageTun ? "ready" : "needs admin";
+  return status.canManageTun ? "ready" : "not required in alpha";
 }
 
 function formatBytes(value: number | null): string {
@@ -1296,9 +1296,9 @@ export function App() {
         : {
             detail:
               runtimePrivilege?.message ||
-              "Privilege status is unknown. Refresh runtime status before starting TUN mode.",
+              "TUN takeover is disabled in alpha; Tachyon game acceleration can run without enabling OS TUN routing.",
             label: "TUN privilege",
-            state: runtimePrivilege ? "error" : "warning",
+            state: "warning",
           },
     );
     items.push(
@@ -2069,12 +2069,6 @@ export function App() {
 
   async function startRuntime(kind: ManagedBinaryKind): Promise<boolean> {
     try {
-      if (kind === "tachyonCore") {
-        const privilege = runtimePrivilege ?? (await refreshRuntimePrivilege());
-        if (privilege && !privilege.canManageTun) {
-          throw new Error(privilege.message);
-        }
-      }
       const paths = await writeDrafts(kind);
       const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
@@ -2454,8 +2448,8 @@ export function App() {
       <section className="quick-strip">
         <div className="mode-pills">
           <button
-            aria-pressed={Boolean(systemProxy?.matchesPrism)}
-            className={systemProxy?.matchesPrism ? "pill active" : "pill"}
+            aria-pressed={false}
+            className="pill"
             type="button"
             onClick={() => void toggleSystemProxy()}
           >

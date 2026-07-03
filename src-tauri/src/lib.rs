@@ -2952,7 +2952,7 @@ fn latest_xray_release_info(
     releases: Vec<GithubRelease>,
     channel: &str,
 ) -> Result<RuntimeReleaseInfo, String> {
-    for release in releases {
+    for release in release_candidates_for_channel(releases, channel) {
         if !release_channel_allows(&release, channel) {
             continue;
         }
@@ -2967,7 +2967,7 @@ fn latest_tachyon_core_release_info(
     releases: Vec<GithubRelease>,
     channel: &str,
 ) -> Result<RuntimeReleaseInfo, String> {
-    for release in releases {
+    for release in release_candidates_for_channel(releases, channel) {
         if !release_channel_allows(&release, channel) {
             continue;
         }
@@ -2976,6 +2976,21 @@ fn latest_tachyon_core_release_info(
         }
     }
     Err(release_channel_empty_message("Tachyon Core", channel))
+}
+
+fn release_candidates_for_channel(
+    releases: Vec<GithubRelease>,
+    channel: &str,
+) -> Vec<GithubRelease> {
+    match channel.trim().to_ascii_lowercase().as_str() {
+        "preview" | "pre" | "prerelease" => {
+            let (mut prereleases, stable): (Vec<_>, Vec<_>) =
+                releases.into_iter().partition(|release| release.prerelease);
+            prereleases.extend(stable);
+            prereleases
+        }
+        _ => releases,
+    }
 }
 
 fn release_channel_allows(release: &GithubRelease, channel: &str) -> bool {
@@ -3103,8 +3118,12 @@ fn http_agent() -> ureq::Agent {
 }
 
 fn find_checksum_for_asset(checksum_text: &str, asset_name: &str) -> Result<String, String> {
+    let aliases = checksum_asset_name_aliases(asset_name);
     for line in checksum_text.lines() {
-        if !line.contains(asset_name) {
+        let Some(filename) = checksum_line_filename(line) else {
+            continue;
+        };
+        if !aliases.iter().any(|alias| alias == &filename) {
             continue;
         }
         for token in line
@@ -3117,6 +3136,54 @@ fn find_checksum_for_asset(checksum_text: &str, asset_name: &str) -> Result<Stri
         }
     }
     Err(format!("checksum for {asset_name} not found"))
+}
+
+fn checksum_line_filename(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("SHA256 (") {
+        let (filename, _) = rest.split_once(") = ")?;
+        return Some(filename.to_string());
+    }
+
+    let hash = trimmed.get(..64)?;
+    if hash.len() != 64 || !hash.chars().all(|character| character.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    let rest = trimmed.get(64..)?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+
+    let filename = rest.trim_start().trim_start_matches('*');
+    if filename.is_empty() {
+        return None;
+    }
+
+    Some(filename.to_string())
+}
+
+fn checksum_asset_name_aliases(asset_name: &str) -> Vec<String> {
+    let mut aliases = vec![asset_name.to_string()];
+    push_unique_string(
+        &mut aliases,
+        asset_name.replace("Tachyon.Prism", "Tachyon Prism"),
+    );
+    push_unique_string(
+        &mut aliases,
+        asset_name.replace("Tachyon Prism", "Tachyon.Prism"),
+    );
+    aliases
+}
+
+fn push_unique_string(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|current| current == &value) {
+        values.push(value);
+    }
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -3911,6 +3978,31 @@ mod tests {
     }
 
     #[test]
+    fn checksum_find_accepts_prism_space_dot_filename_alias() {
+        let hash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let checksum = find_checksum_for_asset(
+            &format!("{hash}  tachyon-prism-windows-x64_Tachyon Prism_0.1.0_x64-setup.exe"),
+            "tachyon-prism-windows-x64_Tachyon.Prism_0.1.0_x64-setup.exe",
+        )
+        .expect("checksum with Prism filename alias");
+
+        assert_eq!(checksum, hash);
+    }
+
+    #[test]
+    fn checksum_find_requires_exact_filename_or_alias() {
+        let wrong_hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let right_hash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let checksum = find_checksum_for_asset(
+            &format!("{wrong_hash}  binary.zip.sig\n{right_hash}  binary.zip"),
+            "binary.zip",
+        )
+        .expect("checksum");
+
+        assert_eq!(checksum, right_hash);
+    }
+
+    #[test]
     fn sha256_computes_deterministic_hash() {
         let dir = std::env::temp_dir().join("tachyon-test-sha256");
         let _ = std::fs::create_dir_all(&dir);
@@ -4063,6 +4155,35 @@ mod tests {
             .expect("preview release");
 
         assert_eq!(info.tag_name, "v0.1.0-alpha.8");
+        assert!(info.asset_name.contains(marker));
+    }
+
+    #[test]
+    fn preview_release_channel_prefers_prereleases_before_stable() {
+        let marker = tachyon_core_platform_asset_marker().expect("supported test platform");
+        let stable = GithubRelease {
+            tag_name: "v0.1.0".to_string(),
+            published_at: Some("2026-06-01T00:00:00Z".to_string()),
+            prerelease: false,
+            assets: vec![
+                asset(&format!("tachyon-core_v0.1.0_{marker}.zip"), 123),
+                asset("SHA256SUMS.txt", 512),
+            ],
+        };
+        let preview = GithubRelease {
+            tag_name: "v0.1.0-alpha.12".to_string(),
+            published_at: Some("2026-07-03T00:00:00Z".to_string()),
+            prerelease: true,
+            assets: vec![
+                asset(&format!("tachyon-core_v0.1.0-alpha.12_{marker}.zip"), 123),
+                asset("SHA256SUMS.txt", 512),
+            ],
+        };
+
+        let info = latest_tachyon_core_release_info(vec![stable, preview], "pre")
+            .expect("preview release");
+
+        assert_eq!(info.tag_name, "v0.1.0-alpha.12");
         assert!(info.asset_name.contains(marker));
     }
 

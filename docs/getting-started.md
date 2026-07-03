@@ -4,7 +4,7 @@
 
 ## Prerequisites
 
-- Windows 10/11, macOS 13+, or Linux with kernel TUN support
+- Windows 10/11, macOS 13+, or Linux
 - A proxy subscription, individual share links, or full Xray outbound/config JSON
 
 ## 1. Install Tachyon Prism
@@ -15,7 +15,7 @@ Download the latest Prism release for your platform from the GitHub releases pag
 
 1. Open Prism and go to the **Subscriptions** view.
 2. Enter a subscription name and URL, then click **Update**, or paste a subscription payload and click **Import**.
-3. Select a node from the list. The selected node determines the Xray outbound and TGP relay endpoint.
+3. Select a node from the list. The selected node determines the Xray outbound; Tachyon game acceleration uses the separate Tachyon server profile.
 
 ## 3. Scan Steam (optional)
 
@@ -44,14 +44,15 @@ Go to **Settings > Core** and scroll to **Binaries**:
 
 On Windows, Prism also checks the required `wintun.dll` sidecar for Tachyon Core.
 Prism also shows whether the current desktop process has enough privilege to
-create TUN devices. Run Prism as Administrator/root before starting Tachyon Core
-TUN mode.
+create TUN devices, but TUN takeover remains disabled in the current alpha.
+You do not need Administrator/root just to run Xray or optional Tachyon game
+acceleration with the generated alpha configs.
 
 ## 6. Generate, validate, and save configs
 
 Go to **Settings > Core** and find **Config Drafts**:
 
-- Prism generates `xray-client.json` and `client.json` from your selected node, game profiles, launcher settings, runtime ports, TGP local bind addresses, connection migration, and the multipath switch.
+- Prism generates `xray-client.json` and `client.json` from your selected Xray node, Tachyon server profile, game profiles, launcher settings, runtime ports, TGP local bind addresses, connection migration, and the multipath switch.
 - Click **Save** to write them to the Prism config directory.
 - Click **Validate Configs** to run `xray run -test -config` and `tachyon-core validate --config` before launching.
 - You can also **Copy** either config to the clipboard.
@@ -73,6 +74,6 @@ Game UDP traffic matching your profiles will be accelerated through TGP. Other p
 
 - The **Overview** view shows runtime status, enabled game profiles, and dual-core traffic curves.
 - The **Readiness** panel flags missing nodes, binaries, configs, and sidecars.
-- The **TUN Privilege** row should show `ready` before you start Tachyon Core.
-- The local HTTP proxy probe validates Xray through the generated HTTP inbound without changing system proxy or enabling TUN.
-- System proxy and TUN should only be enabled when you are ready for OS-level traffic takeover.
+- The **TUN Privilege** row is read-only in alpha and is not a startup gate.
+- The local HTTP/SOCKS proxy probe validates Xray through the generated local inbounds without changing system proxy or enabling TUN.
+- System proxy and TUN takeover stay disabled in alpha. TUN one-click takeover is a stable gate, not part of this release loop.

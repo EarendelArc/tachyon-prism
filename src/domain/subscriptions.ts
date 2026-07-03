@@ -9,6 +9,7 @@ export type XrayOutboundProtocol =
   | "shadowsocks"
   | "socks"
   | "trojan"
+  | "tuic"
   | "vless"
   | "vmess"
   | "hysteria"
@@ -81,6 +82,7 @@ const xrayOutboundProtocols = new Set<XrayOutboundProtocol>([
   "shadowsocks",
   "socks",
   "trojan",
+  "tuic",
   "vless",
   "vmess",
   "hysteria",
@@ -623,6 +625,22 @@ function clashOutboundSettings(
         port,
         password: clashValue(record, ["password"]),
       });
+    case "tuic":
+      return compactRecord({
+        address,
+        port,
+        uuid: clashValue(record, ["uuid"]),
+        password: clashValue(record, ["password", "token"]),
+        congestion: clashValue(record, ["congestion-controller", "congestion"]),
+        udpRelayMode: clashValue(record, ["udp-relay-mode", "udpRelayMode"]),
+        reduceRtt: clashBooleanOrUndefined(record, ["reduce-rtt", "reduceRtt"]),
+        zeroRttHandshake: clashBooleanOrUndefined(record, [
+          "zero-rtt-handshake",
+          "zeroRttHandshake",
+        ]),
+        heartbeat: clashValue(record, ["heartbeat-interval", "heartbeat"]),
+        disableSNI: clashBooleanOrUndefined(record, ["disable-sni", "disableSNI"]),
+      });
     case "shadowsocks":
       return compactRecord({
         address,
@@ -689,7 +707,11 @@ function clashStreamSettings(
     clashValue(record, ["reality-opts.public-key", "reality-opts.publicKey", "pbk"]) !== "";
   if (hasReality) {
     params.set("security", "reality");
-  } else if (clashBoolean(record, ["tls"]) || clashValue(record, ["security"]) === "tls") {
+  } else if (
+    protocol === "tuic" ||
+    clashBoolean(record, ["tls"]) ||
+    clashValue(record, ["security"]) === "tls"
+  ) {
     params.set("security", "tls");
   }
 
@@ -976,6 +998,8 @@ function parseProxyUri(rawUri: string): ProxyNode | null {
       return parseSocksOrHTTPUri(rawUri, parsed, "http");
     case "hysteria":
       return parseHysteriaUri(rawUri, parsed);
+    case "tuic":
+      return parseTuicUri(rawUri, parsed);
     case "wireguard":
       return parseWireGuardUri(rawUri, parsed);
     default:
@@ -1196,6 +1220,58 @@ function parseHysteriaUri(rawUri: string, parsed: URL): ProxyNode | null {
   return nodeFromUri(rawUri, parsed, "hysteria", outbound, {
     credential: auth,
     parameters: params,
+  });
+}
+
+function parseTuicUri(rawUri: string, parsed: URL): ProxyNode | null {
+  const port = parsePort(parsed.port);
+  if (!parsed.hostname || port === 0) {
+    return null;
+  }
+
+  const [uuidFromUser, inlinePassword = ""] = decodeURIComponent(parsed.username).split(":", 2);
+  const passwordFromUser = decodeURIComponent(parsed.password) || inlinePassword;
+  const uuid = stringOrUndefined(parsed.searchParams.get("uuid") ?? uuidFromUser);
+  const password = stringOrUndefined(
+    parsed.searchParams.get("password") ?? parsed.searchParams.get("token") ?? passwordFromUser,
+  );
+  if (!uuid && !password) {
+    return null;
+  }
+
+  const settings: Record<string, unknown> = {
+    address: parsed.hostname,
+    port,
+    uuid,
+    password,
+    congestion: stringOrUndefined(
+      parsed.searchParams.get("congestion") ?? parsed.searchParams.get("congestion_control"),
+    ),
+    udpRelayMode: stringOrUndefined(
+      parsed.searchParams.get("udpRelayMode") ?? parsed.searchParams.get("udp_relay_mode"),
+    ),
+    reduceRtt: booleanParam(parsed.searchParams.get("reduceRtt") ?? parsed.searchParams.get("reduce_rtt")),
+    zeroRttHandshake: booleanParam(
+      parsed.searchParams.get("zeroRttHandshake") ?? parsed.searchParams.get("zero_rtt_handshake"),
+    ),
+    heartbeat: stringOrUndefined(
+      parsed.searchParams.get("heartbeat") ?? parsed.searchParams.get("heartbeat_interval"),
+    ),
+    disableSNI: booleanParam(parsed.searchParams.get("disableSNI") ?? parsed.searchParams.get("disable_sni")),
+  };
+  const streamSettings = compactRecord({
+    security: "tls",
+    tlsSettings: tlsSettingsFromParams(parsed.searchParams),
+  });
+  const outbound = compactOutbound({
+    protocol: "tuic",
+    settings: compactRecord(settings),
+    streamSettings,
+  });
+
+  return nodeFromUri(rawUri, parsed, "tuic", outbound, {
+    credential: uuid ? `${uuid}${password ? ":***" : ""}` : password,
+    parameters: paramsToObject(parsed.searchParams),
   });
 }
 
@@ -1582,9 +1658,12 @@ function credentialFromSettings(
         stringValue(settings.id) || stringValue(firstLegacyUser(settings)?.id),
       );
     case "trojan":
+    case "tuic":
     case "hysteria":
       return stringOrUndefined(
         stringValue(settings.password) ||
+          stringValue(settings.token) ||
+          stringValue(settings.uuid) ||
           stringValue(settings.auth) ||
           stringValue(settings.authString) ||
           stringValue(firstLegacyServer(settings)?.password),

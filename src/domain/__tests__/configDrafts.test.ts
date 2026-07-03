@@ -214,10 +214,11 @@ describe("buildXrayClientConfigDraft", () => {
         "vmess://eyJ2IjoiMiIsInBzIjoiV01lc3MgV1MiLCJhZGQiOiJ2bWVzcy5leGFtcGxlLmNvbSIsInBvcnQiOiI0NDMiLCJpZCI6InZtZXNzLXV1aWQiLCJhaWQiOiIwIiwibmV0Ijoid3MiLCJ0eXBlIjoibm9uZSIsImhvc3QiOiJjZG4uZXhhbXBsZS5jb20iLCJwYXRoIjoiL3dzIiwidGxzIjoidGxzIn0=",
         "trojan-go://secret@trojan.example.com:443?type=ws&path=/trojan&sni=edge.example.com#TrojanGo",
         "hy2://auth@example.com:443?up=25&down=100#Hy2",
+        "tuic://uuid:secret@tuic.example.com:443?sni=edge.example.com&congestion=bbr#Tuic",
       ].join("\n"),
     );
 
-    const [vmessConfig, trojanConfig, hysteriaConfig] = nodes.map((node) =>
+    const [vmessConfig, trojanConfig, hysteriaConfig, tuicConfig] = nodes.map((node) =>
       buildXrayClientConfigDraft(node),
     );
     const vmessProxy = ((vmessConfig.outbounds as Array<Record<string, unknown>>).find(
@@ -227,6 +228,9 @@ describe("buildXrayClientConfigDraft", () => {
       (outbound) => outbound.tag === "tachyon-proxy",
     ) ?? {}) as Record<string, unknown>;
     const hysteriaProxy = ((hysteriaConfig.outbounds as Array<Record<string, unknown>>).find(
+      (outbound) => outbound.tag === "tachyon-proxy",
+    ) ?? {}) as Record<string, unknown>;
+    const tuicProxy = ((tuicConfig.outbounds as Array<Record<string, unknown>>).find(
       (outbound) => outbound.tag === "tachyon-proxy",
     ) ?? {}) as Record<string, unknown>;
 
@@ -254,6 +258,22 @@ describe("buildXrayClientConfigDraft", () => {
         network: "hysteria",
         hysteriaSettings: {
           auth: "auth",
+        },
+      },
+    });
+    expect(tuicProxy).toMatchObject({
+      protocol: "tuic",
+      settings: {
+        address: "tuic.example.com",
+        port: 443,
+        uuid: "uuid",
+        password: "secret",
+        congestion: "bbr",
+      },
+      streamSettings: {
+        security: "tls",
+        tlsSettings: {
+          serverName: "edge.example.com",
         },
       },
     });

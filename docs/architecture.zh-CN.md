@@ -17,7 +17,7 @@ src/                        src-tauri/src/
     subscriptions.ts
 ```
 
-前端负责订阅解析、节点选择、配置生成和所有 UI 状态。Rust 后端负责文件系统访问、二进制管理、进程启动以及与 Core 的 HTTP 桥接。
+前端负责订阅解析、节点选择、配置生成和所有 UI 状态。Tachyon Core 保持纯粹：它只接收生成的配置，不解析订阅，也不管理 Xray 节点。Rust 后端负责文件系统访问、二进制管理、进程启动以及与 Core 的 HTTP 桥接。
 
 Tauri `invoke()` 连接两端：前端调用 Rust 命令，Rust 返回 JSON 可序列化结果。
 
@@ -64,6 +64,8 @@ Binaries 面板管理 Xray Core 和 Tachyon Core 可执行文件：
 ```
 
 Runtime 面板实时显示两个核心的进程状态，并支持单独启动/停止控制。
+
+当前 alpha 默认禁用 OS 系统代理和 TUN 一键接管。生成的 Core 配置会强制 `client.tun.auto_route=false` 与 `client.tun.dns_hijack=false`；本地 HTTP/SOCKS 探针只验证 Prism 生成的 Xray 入站，不修改宿主网络状态。
 
 ## 测试覆盖
 

@@ -4,6 +4,11 @@
 
 Tachyon Prism is the graphical control plane for Tachyon.
 
+The current stable-line goal is a complete Xray GUI with optional Tachyon game
+acceleration. System proxy and TUN one-click takeover remain disabled in the
+current alpha; the local HTTP/SOCKS probe is allowed because it only checks
+Prism's generated local Xray inbounds and does not modify host network state.
+
 Prism is a full Xray GUI client with Tachyon Core support. It owns interaction,
 visualization, subscriptions, node selection, Xray lifecycle, Xray JSON
 generation, routing UI, rules UI, game-process detection, and dual-core
@@ -67,6 +72,7 @@ Supported input formats in the current parser:
 - `socks://...` / `socks5://...`
 - `http://...` / `https://...`
 - `hysteria://...` / `hysteria2://...` / `hy2://...`
+- `tuic://...`
 - Basic `wireguard://...` links when key material is present.
 - Full Xray outbound JSON objects.
 - Full Xray config JSON with an `outbounds` array.
@@ -78,12 +84,14 @@ object as-is and extracts only the node summary needed for display. This is the
 path used for complete Xray feature coverage, including transport settings,
 TLS, REALITY, mux, proxy settings, and future fields.
 
-Complete Xray outbound drafts are preserved per node. Core receives only the
-TGP relay endpoint needed for UDP game acceleration.
+Complete Xray outbound drafts are preserved per node. Tachyon server profiles
+remain separate from Xray subscription nodes and provide the TGP relay endpoint
+needed for optional UDP game acceleration.
 
 ## Config Drafts
 
-The Config panel generates two JSON drafts from the selected node:
+The Config panel generates two JSON drafts from the selected Xray node and the
+selected Tachyon server profile:
 
 - `xray-client.json`: local SOCKS and HTTP inbounds plus the selected Xray
   outbound. The HTTP inbound is used by Prism's local proxy probe and can also
@@ -119,7 +127,8 @@ the executable into the managed `bin` directory.
 Each managed core has an independent release channel selector. `stable` ignores
 GitHub prereleases, while `preview` accepts prerelease builds. Xray Core defaults
 to `stable`; Tachyon Core defaults to `preview` while Tachyon releases are still
-alpha-stage.
+alpha-stage. If no full Tachyon Core release exists, `stable` reports an empty
+state and points users to `preview` instead of silently installing a prerelease.
 
 The Runtime panel stores binary paths in `runtime-settings.json`. `Start All`
 first writes the latest generated config files, then launches Xray with

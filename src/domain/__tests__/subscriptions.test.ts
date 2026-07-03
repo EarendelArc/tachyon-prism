@@ -277,6 +277,40 @@ describe("parseSubscription", () => {
     });
   });
 
+  it("parses TUIC URIs into selectable nodes", () => {
+    const uri = "tuic://uuid:secret@tuic.example.com:443?sni=edge.example.com&alpn=h3&congestion=bbr&udpRelayMode=native&zeroRttHandshake=true#TUIC Node";
+    const nodes = parseSubscription(uri);
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]).toMatchObject({
+      name: "TUIC Node",
+      protocol: "tuic",
+      address: "tuic.example.com",
+      port: 443,
+      credential: "uuid:***",
+      security: "tls",
+      sni: "edge.example.com",
+    });
+    expect(buildXrayOutboundDraft(nodes[0])).toMatchObject({
+      protocol: "tuic",
+      settings: {
+        address: "tuic.example.com",
+        port: 443,
+        uuid: "uuid",
+        password: "secret",
+        congestion: "bbr",
+        udpRelayMode: "native",
+        zeroRttHandshake: true,
+      },
+      streamSettings: {
+        security: "tls",
+        tlsSettings: {
+          serverName: "edge.example.com",
+          alpn: ["h3"],
+        },
+      },
+    });
+  });
+
   it("parses SOCKS URIs", () => {
     const uri = "socks5://user:pass@10.0.0.1:1080#SOCKS Proxy";
     const nodes = parseSubscription(uri);
@@ -677,7 +711,6 @@ proxy-groups:
     const payload = [
       "vless://uuid@example.com:443?encryption=none#Node",
       "vless://uuid@example.com:443?encryption=none#Node",
-      "tuic://token@example.com:443#Unsupported",
       "ssr://legacy",
       "not-a-node",
     ].join("\n");
@@ -685,29 +718,44 @@ proxy-groups:
     const report = parseSubscriptionWithReport(payload);
 
     expect(report.nodes).toHaveLength(1);
-    expect(report.totalEntries).toBe(5);
-    expect(report.skippedEntries).toBe(3);
+    expect(report.totalEntries).toBe(4);
+    expect(report.skippedEntries).toBe(2);
     expect(report.invalidEntries).toBe(1);
     expect(report.duplicateNodes).toBe(1);
     expect(report.unsupportedProtocols).toEqual({
       ssr: 1,
-      tuic: 1,
     });
   });
 
-  it("reports unsupported Clash/Mihomo proxy protocols", () => {
+  it("parses Clash/Mihomo TUIC proxies and reports other unsupported protocols", () => {
     const payload = `
 proxies:
   - { name: OK, type: vless, server: ok.example.com, port: 443, uuid: uuid }
-  - { name: TUIC, type: tuic, server: tuic.example.com, port: 443, password: secret }
+  - { name: TUIC, type: tuic, server: tuic.example.com, port: 443, uuid: tuic-uuid, password: secret, sni: edge.example.com, alpn: [h3], congestion-controller: bbr, udp-relay-mode: native }
+  - { name: SSR, type: ssr, server: ssr.example.com, port: 443 }
 `;
 
     const report = parseSubscriptionWithReport(payload);
 
-    expect(report.nodes).toHaveLength(1);
-    expect(report.totalEntries).toBe(2);
+    expect(report.nodes).toHaveLength(2);
+    expect(report.nodes[1]).toMatchObject({
+      name: "TUIC",
+      protocol: "tuic",
+      address: "tuic.example.com",
+      port: 443,
+      credential: "secret",
+      security: "tls",
+      sni: "edge.example.com",
+    });
+    expect(report.nodes[1].outbound?.settings).toMatchObject({
+      uuid: "tuic-uuid",
+      password: "secret",
+      congestion: "bbr",
+      udpRelayMode: "native",
+    });
+    expect(report.totalEntries).toBe(3);
     expect(report.skippedEntries).toBe(1);
-    expect(report.unsupportedProtocols).toEqual({ tuic: 1 });
+    expect(report.unsupportedProtocols).toEqual({ ssr: 1 });
   });
 });
 
