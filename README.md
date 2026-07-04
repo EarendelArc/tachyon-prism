@@ -43,6 +43,8 @@ sent through Tachyon Core for low-latency acceleration.
 - Managed local binary installation into Prism's app config `bin` directory.
 - Online Xray Core and Tachyon Core latest-release discovery, download,
   SHA-256 verification, and managed install from GitHub release channels.
+- Read-only Core release diagnostics for channel/tag/asset/checksum/path/version
+  status/error investigation.
 - Independent `stable` / `preview` release-channel selection for Xray Core and
   Tachyon Core managed downloads.
 - Runtime controls for launching and stopping Xray Core and Tachyon Core as
@@ -51,8 +53,8 @@ sent through Tachyon Core for low-latency acceleration.
   `xray run -test -config`, and Tachyon Core is checked with
   `tachyon-core validate --config` before each launch.
 - Runtime privilege detection for Tachyon Core TUN mode. Prism reports whether
-  the current desktop process can create TUN/Wintun devices and blocks
-  Tachyon Core launch with a clear message when privileges are insufficient.
+  the current desktop process can create TUN/Wintun devices, but this is
+  read-only in alpha because generated configs keep OS-level TUN takeover off.
 - Windows runtime readiness detects Tachyon Core's required `wintun.dll`
   sidecar next to the configured Core binary.
 
@@ -65,19 +67,20 @@ not manage GUI-side game rules.
 
 Supported input formats in the current parser:
 
-- `vless://...`
-- `vmess://...`
-- `trojan://...`
-- `ss://...`
-- `socks://...` / `socks5://...`
-- `http://...` / `https://...`
-- `hysteria://...` / `hysteria2://...` / `hy2://...`
-- `tuic://...`
-- Basic `wireguard://...` links when key material is present.
-- Full Xray outbound JSON objects.
-- Full Xray config JSON with an `outbounds` array.
-- Plain newline-separated payloads.
-- Base64-encoded newline-separated payloads.
+| Input | Current behavior |
+| --- | --- |
+| `vless://...` | Imported as an Xray-compatible outbound draft with common transport/TLS fields preserved. |
+| `vmess://...` | Imported with transport settings preserved, including WebSocket share links. |
+| `trojan://...` | Imported as an Xray Trojan outbound; Trojan-Go-compatible parameters are mapped where Xray supports them. |
+| `ss://...` | Imported as an Xray Shadowsocks outbound. |
+| `socks://...` / `socks5://...` | Imported as an Xray SOCKS outbound. |
+| `http://...` / `https://...` | Imported as an Xray HTTP outbound. |
+| `hysteria://...` / `hysteria2://...` / `hy2://...` | Imported with common Clash/Mihomo TLS, auth, ALPN, and UDP idle fields preserved. |
+| `tuic://...` | Imported from URI and Clash/Mihomo proxy input as a selectable Xray-compatible node. |
+| Basic `wireguard://...` | Imported when key material is present, preserving common peer and interface fields. |
+| Full Xray outbound JSON object | Stored losslessly and used directly for generated Xray config drafts. |
+| Full Xray config JSON with `outbounds` | Extracts and preserves available outbound objects. |
+| Plain or base64 newline payloads | Decoded into supported share links; skipped/invalid entries are reported in import diagnostics. |
 
 The full Xray JSON path is intentionally lossless: Prism stores the outbound
 object as-is and extracts only the node summary needed for display. This is the
@@ -129,6 +132,11 @@ GitHub prereleases, while `preview` accepts prerelease builds. Xray Core default
 to `stable`; Tachyon Core defaults to `preview` while Tachyon releases are still
 alpha-stage. If no full Tachyon Core release exists, `stable` reports an empty
 state and points users to `preview` instead of silently installing a prerelease.
+The Diagnose action for each core is read-only and uses saved runtime settings
+only. It reports the selected channel, resolved tag, asset, checksum status,
+installed path, installed version status, and last error. It does not write
+settings or generated configs, start either core, execute the installed binary,
+or enable system proxy or Tachyon TUN.
 
 The Runtime panel stores binary paths in `runtime-settings.json`. `Start All`
 first writes the latest generated config files, then launches Xray with
@@ -194,6 +202,8 @@ Silicon, Linux x64, and Linux ARM64 bundles, then publishes them with
 
 Current release artifacts are unsigned. Windows SmartScreen and macOS Gatekeeper
 may warn until Authenticode signing and Apple notarization are added.
+Real VPS, real client, and real game UDP acceleration paths still need field
+testing before any stable or complete claim.
 
 ## Documentation
 

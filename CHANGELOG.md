@@ -13,6 +13,43 @@ All notable changes to Tachyon Prism will be documented in this file.
 ### Verified
 - Nothing yet.
 
+## [v0.1.0-alpha.14] - 2026-07-04
+
+### Added
+- Expanded the subscription compatibility matrix and documentation for the
+  current parser surface, including URI, Clash/Mihomo proxy input, full Xray
+  outbound/config JSON, and protocol-specific preservation notes.
+- Added Core release diagnostics for managed Xray Core and Tachyon Core
+  downloads. The diagnostics display the selected release channel, resolved tag,
+  asset name/size, checksum asset and match status, installed path, installed
+  version status, and last error.
+- Documented the Diagnose action as read-only/no-spawn: it uses saved runtime
+  settings, does not write settings or generated configs, does not launch cores,
+  does not execute the installed binary, and does not enable system proxy or
+  Tachyon TUN.
+
+### Known Limitations
+- Release artifacts are still unsigned and not notarized.
+- System Proxy and Tachyon TUN one-click takeover remain disabled by default in
+  alpha builds; this release does not promote them to stable or complete
+  behavior.
+- Real VPS, real client, and real game UDP acceleration paths still need field
+  testing before any stable claim.
+- Managed Core release discovery still depends on GitHub release metadata and
+  asset/checksum availability.
+
+### 中文说明
+- 扩展订阅兼容矩阵和文档口径，覆盖当前解析器支持的 URI、Clash/Mihomo proxy
+  输入、完整 Xray outbound/config JSON，以及各协议保留能力说明。
+- 新增 Core release diagnostics，用于托管 Xray Core 和 Tachyon Core 下载排查。
+  诊断会展示发布通道、解析到的 tag、资产名称/大小、checksum 资产与匹配状态、
+  已安装路径、版本状态和最近错误。
+- Diagnose 是只读、no-spawn 操作：只使用已保存 runtime settings，不写设置或生成
+  配置，不启动核心，不执行已安装二进制，也不会启用系统代理或 Tachyon TUN。
+- 当前 Prism 产物仍未签名/未公证；系统代理和 Tachyon TUN 一键接管在 alpha 中继续
+  默认禁用。真实 VPS、真实客户端和真实游戏 UDP 加速链路仍需实测，不能宣称 stable
+  或完整。
+
 ## [v0.1.0-alpha.13] - 2026-07-04
 
 ### Fixed

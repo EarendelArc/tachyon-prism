@@ -41,6 +41,10 @@ Go to **Settings > Core** and scroll to **Binaries**:
 2. **Install Latest Xray** downloads, SHA-256 verifies, and extracts the latest Xray Core release.
 3. **Install Latest Tachyon Core** does the same for Tachyon Core.
 4. Click **Use Managed** to point the runtime path at the installed binary.
+5. Use **Diagnose** to inspect the saved release channel, resolved tag, asset,
+   checksum, installed path, version status, and last error without writing
+   settings, launching cores, executing installed binaries, or enabling system
+   proxy/TUN.
 
 On Windows, Prism also checks the required `wintun.dll` sidecar for Tachyon Core.
 Prism also shows whether the current desktop process has enough privilege to
@@ -77,3 +81,4 @@ Game UDP traffic matching your profiles will be accelerated through TGP. Other p
 - The **TUN Privilege** row is read-only in alpha and is not a startup gate.
 - The local HTTP/SOCKS proxy probe validates Xray through the generated local inbounds without changing system proxy or enabling TUN.
 - System proxy and TUN takeover stay disabled in alpha. TUN one-click takeover is a stable gate, not part of this release loop.
+- Real VPS, real client, and real game UDP acceleration paths still need field testing.

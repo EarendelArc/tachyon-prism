@@ -28,6 +28,8 @@ Prism 是完整的 Xray GUI 客户端，并额外支持 Tachyon Core。它负责
 - 系统代理和 TUN 一键接管在当前 alpha 中禁用；停止全部运行时时仅会尝试清理历史上由 Prism 持有的系统代理状态。
 - 把本地二进制安装到 Prism 应用配置目录下的托管 `bin` 目录。
 - 从 GitHub release channel 发现、下载、SHA-256 校验并托管安装最新版 Xray Core 和 Tachyon Core。
+- 只读 Core release diagnostics，用于排查发布通道、tag、资产、checksum、安装路径、
+  版本状态和错误。
 - 为 Xray Core 与 Tachyon Core 的托管下载分别选择 `stable` / `preview` 发布通道。
 - 作为独立子进程启动和停止 Xray Core 与 Tachyon Core。
 - 启动前配置验证：每次启动前都会用 `xray run -test -config` 校验 Xray 配置，并用 `tachyon-core validate --config` 校验 Tachyon Core 配置。
@@ -40,19 +42,20 @@ Prism 在本地解析订阅内容，并把选中节点保存在桌面控制面�
 
 当前解析器支持的输入格式：
 
-- `vless://...`
-- `vmess://...`
-- `trojan://...`
-- `ss://...`
-- `socks://...` / `socks5://...`
-- `http://...` / `https://...`
-- `hysteria://...` / `hysteria2://...` / `hy2://...`
-- `tuic://...`
-- 包含密钥材料的基础 `wireguard://...` 链接。
-- 完整 Xray outbound JSON 对象。
-- 带 `outbounds` 数组的完整 Xray config JSON。
-- 普通多行节点文本。
-- Base64 编码的多行节点文本。
+| 输入 | 当前行为 |
+| --- | --- |
+| `vless://...` | 导入为 Xray 兼容 outbound 草稿，并保留常见 transport/TLS 字段。 |
+| `vmess://...` | 导入并保留 transport 设置，包括 WebSocket 分享链接。 |
+| `trojan://...` | 导入为 Xray Trojan outbound；Trojan-Go 兼容参数会在 Xray 支持范围内映射。 |
+| `ss://...` | 导入为 Xray Shadowsocks outbound。 |
+| `socks://...` / `socks5://...` | 导入为 Xray SOCKS outbound。 |
+| `http://...` / `https://...` | 导入为 Xray HTTP outbound。 |
+| `hysteria://...` / `hysteria2://...` / `hy2://...` | 导入并保留常见 Clash/Mihomo TLS、auth、ALPN 和 UDP idle 字段。 |
+| `tuic://...` | 支持从 URI 和 Clash/Mihomo proxy 输入导入为可选择的 Xray 兼容节点。 |
+| 基础 `wireguard://...` | 存在密钥材料时导入，并保留常见 peer 和 interface 字段。 |
+| 完整 Xray outbound JSON 对象 | 尽量无损保存，并直接用于生成 Xray 配置草稿。 |
+| 带 `outbounds` 的完整 Xray config JSON | 抽取并保留可用 outbound 对象。 |
+| 普通或 Base64 多行 payload | 解码为支持的分享链接；跳过/无效条目会显示在导入诊断中。 |
 
 完整 Xray JSON 路径会尽量无损：Prism 原样保存 outbound 对象，只抽取界面展示所需的节点摘要。这条路径用于覆盖完整 Xray 能力，包括 transport settings、TLS、REALITY、mux、proxy settings 和未来新增字段。
 
@@ -72,6 +75,10 @@ Save 操作会把生成文件写入 Tauri 应用配置目录，并在 Config 面
 Binaries 面板可以把本地 `xray` 或 `tachyon-core` 可执行文件复制到 Prism 应用配置目录下的托管 `bin` 目录，并让 `runtime-settings.json` 指向这个托管副本。它也可以查询最新版 Xray Core 和 Tachyon Core GitHub release，选择当前平台压缩包，下载匹配的 `.dgst` / `SHA256SUMS.txt` 校验资产，校验压缩包 SHA-256，解出 `xray`/`xray.exe` 或 `tachyon-core`/`tachyon-core.exe`，并原子安装到托管 `bin` 目录。
 
 每个托管核心都有独立的发布通道选择器。`stable` 会忽略 GitHub prerelease，`preview` 会优先选择 prerelease 构建。Xray Core 默认使用 `stable`；Tachyon Core 在 alpha 阶段默认使用 `preview`。如果 Tachyon Core 暂无正式 release，`stable` 会显示清晰空状态并提示切换到 `preview`，不会静默安装 prerelease。
+每个核心的 Diagnose 操作都是只读的，只使用已保存的 runtime settings。它会报告选中的
+发布通道、解析到的 tag、资产、checksum 状态、已安装路径、版本状态和最近错误。它不会
+写设置或生成配置，不会启动任一核心，不会执行已安装二进制，也不会启用系统代理或
+Tachyon TUN。
 
 Runtime 面板会把二进制路径保存到 `runtime-settings.json`。`Start All` 会先写入最新生成的配置文件，再用 `xray-client.json` 启动 Xray，并用 `client.json` 启动 Tachyon Core。每次启动前都会先验证刚写入的配置：Xray 使用原生 `run -test -config` 模式，Tachyon Core 使用 `validate --config`。Config Drafts 区域也提供手动验证按钮，并会保留最近一次验证结果。同一个 Runtime 面板也会保存本地监听端口与核心传输设置：Xray SOCKS、Xray HTTP 探测入站、Xray StatsService、Tachyon HTTP IPC、Tachyon gRPC、TUN 地址/MTU 和遥测间隔。Alpha 配置生成始终写入 `client.tun.auto_route=false` 和 `client.tun.dns_hijack=false`，即使调用方传入 true。在 Windows 上，Tachyon Core 还要求 `wintun.dll` 与配置的 `tachyon-core.exe` 位于同一目录；Prism 会在 Runtime readiness 中提示，并在缺少必需 sidecar 时阻止启动 Core。Prism 也会检查当前进程是否具备管理 TUN 设备的权限，但这个检查只读，不是当前 alpha 的启动门槛，也不会自行启用 TUN。
 
@@ -104,3 +111,4 @@ CI 会在每次推送时运行 typecheck、前端测试、Rust check 和 Rust te
 GitHub Actions 会在 release tag 或手动 workflow dispatch 时构建 Prism。Release 工作流会产出 Windows x64、Windows ARM64、macOS Intel、macOS Apple Silicon、Linux x64 和 Linux ARM64 包，并随包发布 `SHA256SUMS.txt`。
 
 当前产物还没有代码签名。加入 Authenticode 签名和 Apple notarization 之前，Windows SmartScreen 与 macOS Gatekeeper 可能会提示风险。
+真实 VPS、真实客户端和真实游戏 UDP 加速链路仍需实测；当前 alpha 不能宣称 stable 或完整。

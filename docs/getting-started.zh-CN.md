@@ -41,6 +41,9 @@
 2. **安装最新版 Xray** 会下载、SHA-256 校验并解压最新版 Xray Core。
 3. **安装最新版 Tachyon Core** 对 Tachyon Core 执行同样流程。
 4. 点击 **使用托管**，让运行路径指向 Prism 管理的二进制文件。
+5. 使用 **Diagnose** 查看已保存发布通道、解析到的 tag、资产、checksum、安装路径、
+   版本状态和最近错误；它不会写设置、启动核心、执行已安装二进制，也不会启用系统代理
+   或 TUN。
 
 `stable` 只使用正式 release；如果 Tachyon Core 暂无正式 release，Prism 会显示清晰空状态并提示切换到 `preview`。`preview` 会优先选择 prerelease，例如 alpha 构建。
 
@@ -77,3 +80,4 @@ Windows 上 Prism 还会检查 Tachyon Core 所需的 `wintun.dll` sidecar。Pri
 - **TUN Privilege** 行在当前 alpha 中只是只读提示，不是启动门槛。
 - 本地 HTTP/SOCKS 代理探针会通过生成的 Xray 本地入站验证代理链路，不会修改系统代理，也不会启用 TUN。
 - 系统代理和 TUN 一键接管在当前 alpha 保持禁用；TUN 一键接管是 stable 门禁，不是本轮强制开启内容。
+- 真实 VPS、真实客户端和真实游戏 UDP 加速链路仍需实测。
