@@ -1523,6 +1523,18 @@ p,
   padding: 8px 10px;
 }
 
+.diagnostics-review-reminder {
+  background: rgba(255, 194, 102, 0.1);
+  border: 1px solid rgba(255, 194, 102, 0.26);
+  border-radius: 6px;
+  color: #ffd89a;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.45;
+  margin: 0;
+  padding: 9px 10px;
+}
+
 .switch-line {
   align-items: center;
   background: rgba(255, 255, 255, 0.055);
@@ -1613,6 +1625,11 @@ p,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.release-diagnostics .wide strong {
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .release-diagnostics strong.good {

@@ -109,14 +109,51 @@ interface DiagnosticsNodeSummary {
 }
 
 const redacted = "[redacted]";
-const sensitiveKeyPattern =
-  /(^|[_-])(auth|credential|id|password|pass|private|privatekey|psk|secret|secretkey|shortid|token|uuid)([_-]|$)/i;
+const sensitiveKeyFragments = [
+  "auth",
+  "credential",
+  "id",
+  "pass",
+  "password",
+  "passwd",
+  "preSharedKey",
+  "private",
+  "privateKey",
+  "psk",
+  "pwd",
+  "secret",
+  "secretKey",
+  "shortId",
+  "token",
+  "uuid",
+];
+const sensitiveKeySuffixes = [
+  "auth",
+  "credential",
+  "id",
+  "key",
+  "pass",
+  "password",
+  "passwd",
+  "psk",
+  "pwd",
+  "secret",
+  "token",
+  "uuid",
+];
 const uuidPattern =
   /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi;
 const privateKeyPattern =
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g;
-const inlineSecretPattern =
-  /\b(auth|credential|password|passwd|privateKey|private key|psk|secret|token|uuid)\s*[:= ]\s*[^,\s;]+/gi;
+const assignmentPattern =
+  /(["']?)((?:--?)?(?:[A-Za-z][A-Za-z0-9_.-]*[-_.])?(?:auth|credential|id|pass|passwd|password|pre[-_.]?shared[-_.]?key|presharedkey|private[-_.]?key|privatekey|psk|pwd|secret[-_.]?key|secretkey|secret|short[-_.]?id|shortid|token|uuid))(\1)\s*(?::|=)\s*(["']?)([^"',;\s}\]]+)(\4)/gi;
+const cliSecretPattern =
+  /\B(--?(?:[A-Za-z][A-Za-z0-9_.-]*[-_.])?(?:auth|credential|id|pass|passwd|password|pre[-_.]?shared[-_.]?key|presharedkey|private[-_.]?key|privatekey|psk|pwd|secret[-_.]?key|secretkey|secret|short[-_.]?id|shortid|token|uuid))\s+(["']?)([^"',;\s}\]]+)(\2)/gi;
+const spacedSecretAssignmentPattern =
+  /\b(private\s+key|pre\s+shared\s+key|short\s+id)\s*(?::|=|\s)\s*(["']?)([^"',;\s}\]]+)(\2)/gi;
+const bareSecretAssignmentPattern =
+  /\b(password|passwd|privatekey|psk|pwd|secret|shortid|token|uuid)\s+(["']?)([^"',;\s}\]]+)(\2)/gi;
+const embeddedUrlPattern = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
 const opaqueTokenPattern = /\b[A-Za-z0-9_-]{24,}\b/g;
 
 export function buildClientDiagnosticsExport(
@@ -196,8 +233,7 @@ export function redactDiagnosticsValue(value: unknown, key = ""): unknown {
   const out: Record<string, unknown> = {};
   for (const [itemKey, itemValue] of Object.entries(value)) {
     if (isSensitiveKey(itemKey)) {
-      out[itemKey] =
-        typeof itemValue === "string" && itemValue.trim() ? redacted : itemValue;
+      out[itemKey] = redactSensitiveValue(itemValue);
       continue;
     }
     out[itemKey] = redactDiagnosticsValue(itemValue, itemKey);
@@ -338,17 +374,53 @@ function redactString(value: string, key = ""): string {
   if (isSensitiveKey(key)) {
     return redacted;
   }
-  const withoutPrivateKeys = value.replace(privateKeyPattern, redacted);
-  if (looksLikeUrl(withoutPrivateKeys)) {
-    return redactSubscriptionUrl(withoutPrivateKeys);
-  }
-  const withoutInlineSecrets = withoutPrivateKeys.replace(
-    inlineSecretPattern,
-    (match, label: string) => `${label} ${redacted}`,
-  );
+  const withoutPrivateKeys = value
+    .replace(privateKeyPattern, redacted)
+    .replace(embeddedUrlPattern, (match) => redactSubscriptionUrl(match));
+  const withoutInlineSecrets = withoutPrivateKeys
+    .replace(assignmentPattern, redactAssignment)
+    .replace(cliSecretPattern, redactCliAssignment)
+    .replace(spacedSecretAssignmentPattern, redactSpacedAssignment)
+    .replace(bareSecretAssignmentPattern, redactSpacedAssignment);
   const withoutUuid = withoutInlineSecrets.replace(uuidPattern, redacted);
   const withoutOpaqueTokens = withoutUuid.replace(opaqueTokenPattern, redacted);
   return withoutOpaqueTokens;
+}
+
+function redactSensitiveValue(value: unknown): unknown {
+  if (value === null || value === undefined || value === "") {
+    return value;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return redacted;
+}
+
+function redactAssignment(match: string, _keyQuote: string, key: string, _closingKeyQuote: string, _valueQuote: string, secretValue: string): string {
+  if (!isSensitiveKey(key.replace(/^--?/, ""))) {
+    return match;
+  }
+  return replaceSecretValue(match, secretValue);
+}
+
+function redactSpacedAssignment(match: string, _key: string, _valueQuote: string, secretValue: string): string {
+  return replaceSecretValue(match, secretValue);
+}
+
+function redactCliAssignment(match: string, key: string, _valueQuote: string, secretValue: string): string {
+  if (!isSensitiveKey(key.replace(/^--?/, ""))) {
+    return match;
+  }
+  return replaceSecretValue(match, secretValue);
+}
+
+function replaceSecretValue(match: string, secretValue: string): string {
+  const valueStart = match.lastIndexOf(secretValue);
+  if (valueStart < 0) {
+    return redacted;
+  }
+  return `${match.slice(0, valueStart)}${redacted}${match.slice(valueStart + secretValue.length)}`;
 }
 
 function redactPathSegment(value: string): string {
@@ -397,11 +469,27 @@ function containsUuid(value: string): boolean {
 }
 
 function isSensitiveKey(key: string): boolean {
-  return sensitiveKeyPattern.test(key.replace(/([a-z])([A-Z])/g, "$1_$2"));
+  const normalized = normalizeKey(key);
+  const tokens = keyTokens(key);
+  if (tokens.some((token) => sensitiveKeySuffixes.includes(token))) {
+    return true;
+  }
+  return sensitiveKeyFragments.some((fragment) => {
+    const sensitive = normalizeKey(fragment);
+    return sensitive.length > 2 && normalized.includes(sensitive);
+  });
 }
 
-function looksLikeUrl(value: string): boolean {
-  return /^[a-z][a-z0-9+.-]*:\/\//i.test(value);
+function normalizeKey(key: string): string {
+  return key.replace(/([a-z])([A-Z])/g, "$1_$2").replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function keyTokens(key: string): string[] {
+  return key
+    .replace(/([a-z])([A-Z])/g, "$1_$2")
+    .split(/[^a-z0-9]+/i)
+    .map((token) => token.toLowerCase())
+    .filter(Boolean);
 }
 
 function safeDecodeURIComponent(value: string): string {

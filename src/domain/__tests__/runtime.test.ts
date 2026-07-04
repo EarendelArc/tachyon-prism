@@ -85,6 +85,8 @@ describe("buildReleaseDiagnosticsDisplay", () => {
     expect(rows.get("Installed path")).toBe(
       "C:\\Users\\tester\\AppData\\Roaming\\tachyon-prism\\bin\\tachyon-core.exe",
     );
+    expect(display.rows.find((row) => row.label === "Installed version")?.wide).toBe(true);
+    expect(display.rows.find((row) => row.label === "Installed path")?.wide).toBe(true);
     expect(display.lastError).toBe("cached checksum missing");
   });
 

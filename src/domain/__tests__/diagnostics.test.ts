@@ -153,6 +153,52 @@ describe("redactDiagnosticsValue", () => {
       token: "[redacted]",
     });
   });
+
+  it("redacts short Reality and private key variants in free-text errors", () => {
+    const shortId = "0123456789abcdef";
+    const privateKey = "priv_abcdef1234567890";
+    const preSharedKey = "psk-abcdef1234567890";
+    const output = redactDiagnosticsValue([
+      `xray failed: shortId=${shortId}`,
+      `yaml short_id: ${shortId}`,
+      `env PRIVATE_KEY=${privateKey}`,
+      `cli --short-id ${shortId} --private-key ${privateKey}`,
+      `config pre-shared-key=${preSharedKey}`,
+      `url vless://example.test:443?shortId=${shortId}&private_key=${privateKey}`,
+      `json {"shortId":"${shortId}","private_key":"${privateKey}"}`,
+      "public note without secrets",
+    ]);
+
+    const serialized = JSON.stringify(output);
+    expect(serialized).not.toContain(shortId);
+    expect(serialized).not.toContain(privateKey);
+    expect(serialized).not.toContain(preSharedKey);
+    expect(output).toContain("public note without secrets");
+  });
+
+  it("redacts structured sensitive objects while preserving ordinary fields", () => {
+    const redacted = redactDiagnosticsValue({
+      invalidEntries: 2,
+      realitySettings: {
+        publicKey: "server-public-key",
+        short_id: "0123456789abcdef",
+      },
+      private_key: {
+        bytes: ["secret-a", "secret-b"],
+      },
+      valid: true,
+    });
+
+    expect(redacted).toEqual({
+      invalidEntries: 2,
+      realitySettings: {
+        publicKey: "[redacted]",
+        short_id: "[redacted]",
+      },
+      private_key: "[redacted]",
+      valid: true,
+    });
+  });
 });
 
 describe("buildClientDiagnosticsExport", () => {

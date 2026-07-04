@@ -341,6 +341,7 @@ const zh = {
   diagnosticsNoSpawn: "不启动或执行 Core/Xray",
   diagnosticsNoTun: "不启用 Tachyon TUN",
   diagnosticsReadOnly: "不写 runtime settings",
+  diagnosticsReviewReminder: "分享前请手动检查导出的 JSON，确认脱敏结果符合预期。",
   diagnosticsExported: "诊断支持包已导出",
   exportDiagnostics: "导出诊断",
   validateConfigs: "验证配置",
@@ -577,6 +578,7 @@ const en: typeof zh = {
   diagnosticsNoSpawn: "Does not start or execute Core/Xray",
   diagnosticsNoTun: "Does not enable Tachyon TUN",
   diagnosticsReadOnly: "Does not write runtime settings",
+  diagnosticsReviewReminder: "Before sharing, manually review the exported JSON and confirm redaction looks right.",
   diagnosticsExported: "Diagnostics support package exported",
   exportDiagnostics: "Export diagnostics",
   validateConfigs: "Validate Configs",
@@ -3896,6 +3898,7 @@ function SettingsView({
                 <span>{ui.diagnosticsNoProxy}</span>
                 <span>{ui.diagnosticsNoTun}</span>
               </div>
+              <p className="diagnostics-review-reminder">{ui.diagnosticsReviewReminder}</p>
             </article>
 
             <article className="settings-card">

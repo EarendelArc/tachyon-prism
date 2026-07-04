@@ -261,7 +261,7 @@ export function buildReleaseDiagnosticsDisplay(
         value: diagnostics.installedExists
           ? diagnostics.installedVersion ?? "Not probed - diagnostics does not execute installed binaries"
           : "Not installed",
-        wide: diagnostics.installedExists && !diagnostics.installedVersion,
+        wide: true,
       },
       {
         label: "Installed path",
