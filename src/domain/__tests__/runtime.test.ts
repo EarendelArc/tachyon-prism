@@ -87,4 +87,33 @@ describe("buildReleaseDiagnosticsDisplay", () => {
     );
     expect(display.lastError).toBe("cached checksum missing");
   });
+
+  it("shows installed binaries as not probed when diagnostics skips version execution", () => {
+    const diagnostics: CoreReleaseDiagnostics = {
+      assetName: null,
+      assetSizeBytes: null,
+      assetUrl: null,
+      checksumActualSha256: null,
+      checksumAssetName: null,
+      checksumExpectedSha256: null,
+      checksumMatch: null,
+      checksumUrl: null,
+      displayName: "Xray",
+      installedExists: true,
+      installedPath: "C:\\Users\\tester\\AppData\\Roaming\\tachyon-prism\\bin\\xray.exe",
+      installedVersion: null,
+      kind: "xray",
+      lastError: null,
+      resolvedTag: null,
+      selectedChannel: "stable",
+    };
+
+    const display = buildReleaseDiagnosticsDisplay(diagnostics, (value) => `${value ?? 0} bytes`);
+    const versionRow = display.rows.find((row) => row.label === "Installed version");
+    const pathRow = display.rows.find((row) => row.label === "Installed path");
+
+    expect(versionRow?.value).toBe("Not probed - diagnostics does not execute installed binaries");
+    expect(versionRow?.wide).toBe(true);
+    expect(pathRow?.value).toBe("C:\\Users\\tester\\AppData\\Roaming\\tachyon-prism\\bin\\xray.exe");
+  });
 });

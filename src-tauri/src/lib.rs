@@ -2893,11 +2893,6 @@ where
     F: FnOnce(&RuntimeReleaseInfo) -> Result<String, String>,
 {
     let installed_exists = installed_path.is_file();
-    let installed_version = if installed_exists {
-        installed_binary_version(kind, installed_path).ok()
-    } else {
-        None
-    };
     let mut diagnostics = CoreReleaseDiagnostics {
         kind: kind.key().to_string(),
         display_name: kind.display_name().to_string(),
@@ -2913,19 +2908,9 @@ where
         checksum_match: None,
         installed_path: path_string(installed_path),
         installed_exists,
-        installed_version,
+        installed_version: None,
         last_error: None,
     };
-
-    if installed_exists && diagnostics.installed_version.is_none() {
-        append_diagnostic_error(
-            &mut diagnostics.last_error,
-            format!(
-                "read {} version: version command failed or timed out",
-                kind.display_name()
-            ),
-        );
-    }
 
     let release = match release_result {
         Ok(release) => release,
@@ -3021,46 +3006,6 @@ fn cached_release_archive_path(
         .join(kind.key())
         .join(sanitize_file_component(&release.tag_name))
         .join(&release.asset_name))
-}
-
-fn installed_binary_version(kind: ManagedBinaryKind, path: &Path) -> Result<String, String> {
-    let arg_sets: &[&[&str]] = match kind {
-        ManagedBinaryKind::TachyonCore => &[&["--version"], &["version"]],
-        ManagedBinaryKind::Xray => &[&["version"], &["--version"]],
-    };
-    let mut last_error = String::new();
-    for args in arg_sets {
-        let mut command = Command::new(path);
-        command.args(*args);
-        match command_output_with_timeout(command, Duration::from_secs(2)) {
-            Ok(output) if output.status.success() => {
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                let details = validation_details(&stdout, &stderr);
-                return Ok(first_non_empty_line(&details));
-            }
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                last_error = validation_details(&stdout, &stderr);
-            }
-            Err(error) => last_error = error,
-        }
-    }
-    Err(format!(
-        "read {} version from {}: {}",
-        kind.display_name(),
-        path.display(),
-        last_error
-    ))
-}
-
-fn first_non_empty_line(input: &str) -> String {
-    input
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .map(|line| line.trim().to_string())
-        .unwrap_or_else(|| input.trim().to_string())
 }
 
 fn append_diagnostic_error(last_error: &mut Option<String>, error: String) {
@@ -4580,6 +4525,52 @@ mod tests {
         );
         assert_eq!(diagnostics.checksum_match, Some(true));
         assert!(diagnostics.last_error.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn release_diagnostics_does_not_spawn_installed_binary_for_version() {
+        let dir = unique_temp_dir("tachyon-test-diagnostic-no-spawn");
+        std::fs::create_dir_all(&dir).unwrap();
+        let spawn_marker = dir.join("spawned.txt");
+        let installed = dir.join(if cfg!(windows) {
+            "diagnostic-version-sentinel.cmd"
+        } else {
+            "diagnostic-version-sentinel"
+        });
+
+        #[cfg(windows)]
+        std::fs::write(
+            &installed,
+            "@echo off\r\n> \"%~dp0spawned.txt\" echo spawned\r\necho sentinel version\r\n",
+        )
+        .unwrap();
+
+        #[cfg(not(windows))]
+        {
+            std::fs::write(
+                &installed,
+                "#!/bin/sh\necho spawned > \"$(dirname \"$0\")/spawned.txt\"\necho sentinel version\n",
+            )
+            .unwrap();
+            make_executable(&installed).unwrap();
+        }
+
+        let release = test_release_info("binary.zip");
+        let diagnostics = core_release_diagnostics_from_parts(
+            ManagedBinaryKind::Xray,
+            "stable",
+            &installed,
+            Ok(release),
+            None,
+            |_| Ok(format!("{}  binary.zip", "c".repeat(64))),
+        );
+
+        assert!(diagnostics.installed_exists);
+        assert_eq!(diagnostics.installed_path, path_string(&installed));
+        assert!(diagnostics.installed_version.is_none());
+        assert!(diagnostics.last_error.is_none());
+        assert!(!spawn_marker.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
