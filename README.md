@@ -46,6 +46,8 @@ traffic can be sent through Tachyon Core for low-latency acceleration.
   SHA-256 verification, and managed install from GitHub release channels.
 - Read-only Core release diagnostics for channel/tag/asset/checksum/path/version
   status/error investigation.
+- Redacted client diagnostics export for alpha support packages without spawning
+  cores, changing proxy state, enabling TUN, or writing runtime settings.
 - Independent `stable` / `preview` release-channel selection for Xray Core and
   Tachyon Core managed downloads.
 - Runtime controls for launching and stopping Xray Core and Tachyon Core as
@@ -162,6 +164,16 @@ The Overview quick actions include a local Xray proxy probe. It checks both the
 configured local HTTP inbound and local SOCKS inbound, then reports each status
 code, latency, and error independently. This validates the selected Xray outbound
 path without touching OS system proxy settings or Tachyon TUN mode.
+
+Settings > Core includes a client diagnostics export for alpha support. It
+generates a redacted JSON package with Prism version/platform, selected release
+channels, Core/Xray paths, release diagnostics summaries, subscription group and
+node counts, protocol counts, selected-node summary, recent errors, and the most
+recent local proxy probe result. The export is read-only/no-spawn/no-proxy/no-TUN:
+it does not write runtime settings, generate configs, launch or execute cores,
+enable system proxy, or enable Tachyon TUN. Review the file before sending it
+back, and do not add full subscription URLs, share links, passwords, PSKs, or
+private keys to support reports.
 
 The System Proxy quick action is intentionally disabled in the alpha UI. The
 bypass list is still editable in Settings > Core for future use, but automated

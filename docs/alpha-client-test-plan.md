@@ -1,6 +1,6 @@
 # Tachyon Prism Alpha Client Test Plan
 
-This plan covers the real client alpha loop for Tachyon Prism `alpha.14`.
+This plan covers the real client alpha loop for Tachyon Prism `alpha.15`.
 Prism and Tachyon Core are still alpha-stage for real VPS and real game UDP
 acceleration. Do not treat this as a stable or complete release claim.
 
@@ -13,9 +13,9 @@ profile, and collect redacted logs/screenshots/diagnostics.
 The current alpha intentionally does not test system proxy takeover or TUN
 one-click takeover.
 
-## Download and Verify `alpha.14`
+## Download and Verify `alpha.15`
 
-1. Download the Prism `alpha.14` artifact for your platform from the project
+1. Download the Prism `alpha.15` artifact for your platform from the project
    release page.
 2. Download `SHA256SUMS.txt` from the same release.
 3. Verify the artifact before installing.
@@ -85,6 +85,27 @@ channel, resolved tag, asset, checksum status, installed path, version status,
 and last error. They do not write settings, generate configs, start either
 core, execute installed binaries, enable system proxy, or enable Tachyon TUN.
 
+## Client Diagnostics Export
+
+Use **Settings > Core > Client Diagnostics > Export diagnostics** when you need
+to send a support package back to the project.
+
+The export is read-only/no-spawn/no-proxy/no-TUN. It uses the current Prism UI
+state and already collected diagnostics only. It does not write runtime
+settings, generate configs, start Xray or Tachyon Core, execute installed
+binaries, enable the OS system proxy, or enable Tachyon TUN.
+
+The JSON support package includes Prism version/platform, selected release
+channels, configured/managed Core and Xray paths, Core release diagnostics
+summaries, subscription group and node counts, protocol counts, a redacted
+selected-node summary, recent errors, and the most recent local proxy probe
+result if one exists.
+
+Review the file before sending it. The exporter redacts subscription URL query
+values, UUIDs, passwords, tokens, private keys, PSKs, and similar fields, but do
+not add full subscription payloads, complete share links, server PSKs, or private
+keys to your report.
+
 ## Tachyon Server Profile
 
 Create a Tachyon server profile that matches a deployed Core VPS:
@@ -138,6 +159,8 @@ Send:
 - Selected Xray node summary: scheme, transport, redacted host/region if useful.
 - Local HTTP and SOCKS probe result: status, latency, and error text.
 - Core release diagnostics text for Xray and Tachyon Core.
+- The exported Prism diagnostics JSON support package, after reviewing that it
+  does not contain full subscriptions or secrets.
 - Config validation result for `xray-client.json` and `client.json`.
 - Tachyon server profile summary: redacted address, UDP port, PSK present yes/no,
   and whether the VPS `allowed_targets` were configured.

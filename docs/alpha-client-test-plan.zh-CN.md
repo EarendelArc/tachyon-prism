@@ -1,6 +1,6 @@
 # Tachyon Prism Alpha 客户端测试计划
 
-本文覆盖 Tachyon Prism `alpha.14` 的真实客户端测试闭环。Prism 与 Tachyon Core
+本文覆盖 Tachyon Prism `alpha.15` 的真实客户端测试闭环。Prism 与 Tachyon Core
 在真实 VPS 和真实游戏 UDP 加速方面仍处于 alpha 阶段；不要把本文理解为 stable
 或完整可用声明。
 
@@ -11,9 +11,9 @@
 
 当前 alpha 有意不测试系统代理接管，也不测试 TUN 一键接管。
 
-## 下载并校验 `alpha.14`
+## 下载并校验 `alpha.15`
 
-1. 从项目 release 页面下载适合当前平台的 Prism `alpha.14` 产物。
+1. 从项目 release 页面下载适合当前平台的 Prism `alpha.15` 产物。
 2. 从同一个 release 下载 `SHA256SUMS.txt`。
 3. 安装前校验产物。
 
@@ -78,6 +78,16 @@ Diagnostics 是只读、no-spawn 操作。它只使用已保存的 runtime setti
 解析到的 tag、asset、checksum 状态、安装路径、版本状态和 last error。它不会写设置、
 生成配置、启动任何 core、执行已安装二进制、启用系统代理或启用 Tachyon TUN。
 
+## 客户端诊断导出
+
+需要向项目回传支持包时，使用 **Settings > Core > Client Diagnostics > Export diagnostics**。
+
+该导出是只读、no-spawn、no-proxy、no-TUN 操作。它只使用当前 Prism UI 状态和已经收集到的诊断结果；不会写入 runtime settings，不会生成配置，不会启动 Xray 或 Tachyon Core，不会执行已安装二进制，不会启用 OS 系统代理，也不会启用 Tachyon TUN。
+
+JSON 支持包包含 Prism 版本/平台、当前 release channel 设置、Core/Xray 配置或托管路径、Core release diagnostics 摘要、订阅组数量、节点数量、协议统计、当前选中节点的脱敏摘要、最近错误，以及最近一次本地代理探针结果（如已有）。
+
+发送前请先检查文件。导出器会脱敏订阅 URL 查询值、UUID、密码、token、private key、PSK 等字段，但不要把完整订阅 payload、完整分享链接、服务器 PSK 或私钥追加到报告里。
+
 ## Tachyon Server Profile
 
 创建一个与已部署 Core VPS 匹配的 Tachyon server profile：
@@ -127,6 +137,7 @@ Diagnostics 是只读、no-spawn 操作。它只使用已保存的 runtime setti
 - 选中 Xray 节点摘要：协议、传输方式、脱敏主机/区域（如有帮助）。
 - 本地 HTTP 和 SOCKS 探针结果：状态、延迟和错误文本。
 - Xray 与 Tachyon Core 的 Core release diagnostics 文本。
+- Prism 导出的诊断 JSON 支持包；发送前确认其中没有完整订阅或密钥。
 - `xray-client.json` 和 `client.json` 的配置验证结果。
 - Tachyon server profile 摘要：脱敏地址、UDP 端口、PSK 是否已填写，以及 VPS
   `allowed_targets` 是否已配置。

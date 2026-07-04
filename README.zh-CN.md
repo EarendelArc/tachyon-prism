@@ -30,6 +30,7 @@ stable 线目标是逐步成为较完整的 Xray GUI，并提供可选 Tachyon �
 - 从 GitHub release channel 发现、下载、SHA-256 校验并托管安装最新版 Xray Core 和 Tachyon Core。
 - 只读 Core release diagnostics，用于排查发布通道、tag、资产、checksum、安装路径、
   版本状态和错误。
+- 脱敏客户端诊断导出，用于 alpha 支持包回传；不会启动核心、切换代理、启用 TUN 或写入 runtime settings。
 - 为 Xray Core 与 Tachyon Core 的托管下载分别选择 `stable` / `preview` 发布通道。
 - 作为独立子进程启动和停止 Xray Core 与 Tachyon Core。
 - 启动前配置验证：每次启动前都会用 `xray run -test -config` 校验 Xray 配置，并用 `tachyon-core validate --config` 校验 Tachyon Core 配置。
@@ -83,6 +84,8 @@ Tachyon TUN。
 Runtime 面板会把二进制路径保存到 `runtime-settings.json`。`Start All` 会先写入最新生成的配置文件，再用 `xray-client.json` 启动 Xray，并用 `client.json` 启动 Tachyon Core。每次启动前都会先验证刚写入的配置：Xray 使用原生 `run -test -config` 模式，Tachyon Core 使用 `validate --config`。Config Drafts 区域也提供手动验证按钮，并会保留最近一次验证结果。同一个 Runtime 面板也会保存本地监听端口与核心传输设置：Xray SOCKS、Xray HTTP 探测入站、Xray StatsService、Tachyon HTTP IPC、Tachyon gRPC、TUN 地址/MTU 和遥测间隔。Alpha 配置生成始终写入 `client.tun.auto_route=false` 和 `client.tun.dns_hijack=false`，即使调用方传入 true。在 Windows 上，Tachyon Core 还要求 `wintun.dll` 与配置的 `tachyon-core.exe` 位于同一目录；Prism 会在 Runtime readiness 中提示，并在缺少必需 sidecar 时阻止启动 Core。Prism 也会检查当前进程是否具备管理 TUN 设备的权限，但这个检查只读，不是当前 alpha 的启动门槛，也不会自行启用 TUN。
 
 概览页快捷操作里提供本地 HTTP/SOCKS 代理探测。它会检查配置的本地 Xray HTTP inbound 和 SOCKS inbound，并分别显示状态码、耗时和错误。这个测试只验证当前选中 Xray outbound 的代理链路，不会修改系统代理，也不会触发 Tachyon TUN 模式。
+
+设置 > 核心 中提供客户端诊断导出，用于 alpha 支持包回传。它会生成脱敏 JSON，包含 Prism 版本/平台、当前 release channel、Core/Xray 路径、release diagnostics 摘要、订阅组和节点数量、协议统计、当前选中节点摘要、最近错误，以及最近一次本地代理探针结果。导出是只读、no-spawn、no-proxy、no-TUN 操作：不会写 runtime settings，不会生成配置，不会启动或执行核心，不会启用系统代理，也不会启用 Tachyon TUN。发送前请检查文件，不要额外附上完整订阅 URL、分享链接、密码、PSK 或私钥。
 
 系统代理快捷操作在当前 alpha UI 中有意禁用。绕过列表仍可在 设置 > 核心 中编辑，供后续版本使用；自动化测试只覆盖本地代理探测，不会切换宿主系统代理。
 

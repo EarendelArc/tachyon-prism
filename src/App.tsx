@@ -7,6 +7,11 @@ import {
   type XrayRoutingMode,
 } from "./domain/configDrafts";
 import {
+  buildClientDiagnosticsExport,
+  prismVersion,
+  stringifyDiagnosticsExport,
+} from "./domain/diagnostics";
+import {
   getConfigPaths,
   saveConfigDraft,
   saveConfigDrafts,
@@ -330,6 +335,14 @@ const zh = {
   color: "颜色",
   copyCore: "复制 Core",
   copyXray: "复制 Xray",
+  clientDiagnostics: "客户端诊断",
+  clientDiagnosticsDesc: "导出脱敏支持包：只读、no-spawn、no-proxy、no-TUN。",
+  diagnosticsNoProxy: "不启用系统代理",
+  diagnosticsNoSpawn: "不启动或执行 Core/Xray",
+  diagnosticsNoTun: "不启用 Tachyon TUN",
+  diagnosticsReadOnly: "不写 runtime settings",
+  diagnosticsExported: "诊断支持包已导出",
+  exportDiagnostics: "导出诊断",
   validateConfigs: "验证配置",
   custom: "自定义",
   dark: "深色",
@@ -558,6 +571,14 @@ const en: typeof zh = {
   color: "Color",
   copyCore: "Copy Core",
   copyXray: "Copy Xray",
+  clientDiagnostics: "Client Diagnostics",
+  clientDiagnosticsDesc: "Export a redacted support package: read-only, no-spawn, no-proxy, no-TUN.",
+  diagnosticsNoProxy: "Does not enable system proxy",
+  diagnosticsNoSpawn: "Does not start or execute Core/Xray",
+  diagnosticsNoTun: "Does not enable Tachyon TUN",
+  diagnosticsReadOnly: "Does not write runtime settings",
+  diagnosticsExported: "Diagnostics support package exported",
+  exportDiagnostics: "Export diagnostics",
   validateConfigs: "Validate Configs",
   custom: "Custom",
   dark: "Dark",
@@ -822,6 +843,23 @@ function loadRoutingMode(): XrayRoutingMode {
 
 function saveRoutingMode(mode: XrayRoutingMode): void {
   globalThis.localStorage?.setItem(routingModeStorageKey, mode);
+}
+
+function downloadTextFile(fileName: string, text: string, mimeType: string): void {
+  const blob = new Blob([text], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.rel = "noopener";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  globalThis.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function fileSafeTimestamp(value: string): string {
+  return value.replace(/[:.]/g, "-");
 }
 
 function routingModeLabel(mode: XrayRoutingMode, ui: typeof zh): string {
@@ -1826,6 +1864,44 @@ export function App() {
     }
   }
 
+  async function exportDiagnostics() {
+    try {
+      const generatedAt = new Date().toISOString();
+      const supportPackage = buildClientDiagnosticsExport({
+        generatedAt,
+        managedBinaries,
+        platform: globalThis.navigator?.platform ?? "unknown",
+        recentErrors: [
+          xrayProbe.error,
+          xrayTrafficError,
+          runtimeStatus?.xray.lastError,
+          runtimeStatus?.tachyonCore.lastError,
+          releaseDiagnostics.xray?.lastError,
+          releaseDiagnostics.tachyonCore?.lastError,
+          ...telemetry.recentErrors.map((error) =>
+            error.source ? `${error.source}: ${error.message}` : error.message,
+          ),
+        ].filter((value): value is string => Boolean(value)),
+        releaseDiagnostics,
+        runtimeSettings: runtimeInputs,
+        runtimeStatus,
+        selectedNode: activeNode,
+        subscription,
+        userAgent: globalThis.navigator?.userAgent ?? "",
+        version: prismVersion,
+        xrayLocalProxyProbe: xrayProbe.report,
+      });
+      downloadTextFile(
+        `tachyon-prism-diagnostics-${fileSafeTimestamp(generatedAt)}.json`,
+        stringifyDiagnosticsExport(supportPackage),
+        "application/json;charset=utf-8",
+      );
+      setMessage(ui.diagnosticsExported);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Diagnostics export failed");
+    }
+  }
+
   async function writeDrafts(kind: ManagedBinaryKind | "all" = "all"): Promise<ConfigDraftPaths> {
     if (kind === "xray") {
       if (!drafts.xray) {
@@ -2727,6 +2803,7 @@ export function App() {
             onSelectTachyonServer={chooseTachyonServerProfile}
             onEditTachyonServer={editTachyonServerProfile}
             onDeleteTachyonServer={deleteTachyonServerProfile}
+            onExportDiagnostics={() => void exportDiagnostics()}
             onUseManaged={(kind) => void useManagedBinary(kind)}
             onValidateConfigs={() => void validateAllConfigs()}
             profiles={profiles}
@@ -3637,6 +3714,7 @@ function SettingsView({
   onSelectTachyonServer,
   onEditTachyonServer,
   onDeleteTachyonServer,
+  onExportDiagnostics,
   onUseManaged,
   onValidateConfigs,
   profiles,
@@ -3694,6 +3772,7 @@ function SettingsView({
   onSelectTachyonServer: (id: string) => void;
   onEditTachyonServer: (profile: TachyonServerProfile) => void;
   onDeleteTachyonServer: (id: string) => void;
+  onExportDiagnostics: () => void;
   onUseManaged: (kind: ManagedBinaryKind) => void;
   onValidateConfigs: () => void;
   profiles: GameProfile[];
@@ -3803,6 +3882,22 @@ function SettingsView({
 
         {section === "core" ? (
           <div className="settings-stack">
+            <article className="settings-card diagnostics-export-card">
+              <header>
+                <div>
+                  <h1>{ui.clientDiagnostics}</h1>
+                  <p>{ui.clientDiagnosticsDesc}</p>
+                </div>
+                <button type="button" onClick={onExportDiagnostics}>{ui.exportDiagnostics}</button>
+              </header>
+              <div className="diagnostics-export-grid">
+                <span>{ui.diagnosticsReadOnly}</span>
+                <span>{ui.diagnosticsNoSpawn}</span>
+                <span>{ui.diagnosticsNoProxy}</span>
+                <span>{ui.diagnosticsNoTun}</span>
+              </div>
+            </article>
+
             <article className="settings-card">
               <header>
                 <h1>{ui.runtime}</h1>
