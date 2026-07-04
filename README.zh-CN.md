@@ -4,9 +4,9 @@
 
 Tachyon Prism 是 Tachyon 的图形化控制面。
 
-Prism 是完整的 Xray GUI 客户端，并额外支持 Tachyon Core。它负责交互、可视化、订阅、节点选择、Xray 生命周期、Xray JSON 生成、路由 UI、规则 UI、游戏进程检测和双核心编排。普通代理流量走 Xray，游戏 UDP 流量可以交给 Tachyon Core 做低延迟加速。
+Prism 设计目标是成为支持 Tachyon Core 的 Xray GUI 客户端，但当前仍处于 alpha 阶段。它负责交互、可视化、订阅、节点选择、Xray 生命周期、Xray JSON 生成、路由 UI、规则 UI、游戏进程检测和双核心编排。普通代理流量走 Xray，游戏 UDP 流量可以交给 Tachyon Core 做低延迟加速。
 
-当前 stable 线的最低承诺是“完整 Xray GUI + 可选 Tachyon 游戏加速”。当前 alpha 中系统代理和 TUN 一键接管保持禁用；本地 HTTP/SOCKS 探针允许保留，因为它只验证 Prism 生成的本地 Xray 入站，不修改宿主系统网络状态。
+stable 线目标是逐步成为较完整的 Xray GUI，并提供可选 Tachyon 游戏加速，但当前 alpha 还不能宣称完整或稳定。当前 alpha 中系统代理和 TUN 一键接管保持禁用；本地 HTTP/SOCKS 探针允许保留，因为它只验证 Prism 生成的本地 Xray 入站，不修改宿主系统网络状态。
 
 ## 当前功能
 

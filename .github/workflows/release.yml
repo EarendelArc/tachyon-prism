@@ -212,6 +212,7 @@ jobs:
             echo "Tachyon Prism ${version}"
             echo
             echo "This is an alpha Tachyon Prism desktop release."
+            echo "It is not stable or complete yet."
             echo "Prism manages Xray Core and Tachyon Core as external binaries and can select stable or preview release channels for each core."
             echo
             echo "Alpha limitations:"

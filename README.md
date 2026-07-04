@@ -4,16 +4,17 @@
 
 Tachyon Prism is the graphical control plane for Tachyon.
 
-The current stable-line goal is a complete Xray GUI with optional Tachyon game
-acceleration. System proxy and TUN one-click takeover remain disabled in the
-current alpha; the local HTTP/SOCKS probe is allowed because it only checks
-Prism's generated local Xray inbounds and does not modify host network state.
+The stable-line goal is for Prism to become a broad Xray GUI with optional
+Tachyon game acceleration, but the current build is still alpha-stage. System
+proxy and TUN one-click takeover remain disabled in the current alpha; the
+local HTTP/SOCKS probe is allowed because it only checks Prism's generated
+local Xray inbounds and does not modify host network state.
 
-Prism is a full Xray GUI client with Tachyon Core support. It owns interaction,
-visualization, subscriptions, node selection, Xray lifecycle, Xray JSON
-generation, routing UI, rules UI, game-process detection, and dual-core
-orchestration. Normal proxy traffic runs through Xray. Game UDP traffic can be
-sent through Tachyon Core for low-latency acceleration.
+Prism is designed as an alpha-stage Xray GUI client with Tachyon Core support.
+It owns interaction, visualization, subscriptions, node selection, Xray
+lifecycle, Xray JSON generation, routing UI, rules UI, game-process detection,
+and dual-core orchestration. Normal proxy traffic runs through Xray. Game UDP
+traffic can be sent through Tachyon Core for low-latency acceleration.
 
 ## Current Features
 

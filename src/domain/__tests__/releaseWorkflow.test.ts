@@ -76,10 +76,22 @@ describe("release workflow checksum assets", () => {
     expect(workflow).toContain("gh release upload \"${VERSION}\" release/* --clobber");
   });
 
+  it("uses generated release notes when creating or editing GitHub releases", () => {
+    const workflow = readReleaseWorkflow();
+
+    expect(workflow).toMatch(
+      /gh release edit "\$\{VERSION\}"[\s\S]*--notes-file release\/RELEASE_NOTES\.md/,
+    );
+    expect(workflow).toMatch(
+      /gh release create "\$\{VERSION\}"[\s\S]*--notes-file release\/RELEASE_NOTES\.md/,
+    );
+  });
+
   it("publishes alpha release limitations in GitHub release notes", () => {
     const workflow = readReleaseWorkflow();
 
     expect(workflow).toContain("This is an alpha Tachyon Prism desktop release.");
+    expect(workflow).toContain("It is not stable or complete yet.");
     expect(workflow).toContain("System proxy one-click takeover is disabled by default.");
     expect(workflow).toContain("Tachyon TUN one-click takeover is disabled by default.");
     expect(workflow).toContain(
