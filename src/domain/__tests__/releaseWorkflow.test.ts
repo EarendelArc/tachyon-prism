@@ -64,4 +64,27 @@ describe("release workflow checksum assets", () => {
       "sha256sum --check SHA256SUMS.txt",
     ]);
   });
+
+  it("includes release notes in generated checksums", () => {
+    const workflow = readReleaseWorkflow();
+    const notesIndex = workflow.indexOf("} > release/RELEASE_NOTES.md");
+    const checksumsIndex = workflow.indexOf("(cd release && sha256sum * > SHA256SUMS.txt");
+
+    expect(notesIndex).toBeGreaterThan(-1);
+    expect(checksumsIndex).toBeGreaterThan(-1);
+    expect(notesIndex).toBeLessThan(checksumsIndex);
+    expect(workflow).toContain("gh release upload \"${VERSION}\" release/* --clobber");
+  });
+
+  it("publishes alpha release limitations in GitHub release notes", () => {
+    const workflow = readReleaseWorkflow();
+
+    expect(workflow).toContain("This is an alpha Tachyon Prism desktop release.");
+    expect(workflow).toContain("System proxy one-click takeover is disabled by default.");
+    expect(workflow).toContain("Tachyon TUN one-click takeover is disabled by default.");
+    expect(workflow).toContain(
+      "Real VPS, real client, and real game UDP acceleration paths still need field testing.",
+    );
+    expect(workflow).toContain("Bundles are unsigned and not notarized");
+  });
 });

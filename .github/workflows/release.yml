@@ -208,22 +208,30 @@ jobs:
             find release -maxdepth 1 -type f -name '*[[:space:]]*' -print >&2
             exit 1
           fi
-          (cd release && sha256sum * > SHA256SUMS.txt && sha256sum --check SHA256SUMS.txt)
-
           {
             echo "Tachyon Prism ${version}"
             echo
-            echo "This automated release contains unsigned Tachyon Prism desktop bundles."
+            echo "This is an alpha Tachyon Prism desktop release."
             echo "Prism manages Xray Core and Tachyon Core as external binaries and can select stable or preview release channels for each core."
+            echo
+            echo "Alpha limitations:"
+            echo "- System proxy one-click takeover is disabled by default."
+            echo "- Tachyon TUN one-click takeover is disabled by default."
+            echo "- Real VPS, real client, and real game UDP acceleration paths still need field testing."
+            echo "- Bundles are unsigned and not notarized: Windows builds are not Authenticode-signed and macOS builds are not Apple-notarized."
             echo
             echo "Artifacts:"
             for file in release/*; do
-              echo "- $(basename "${file}")"
+              name="$(basename "${file}")"
+              if [[ "${name}" == "RELEASE_NOTES.md" || "${name}" == "SHA256SUMS.txt" ]]; then
+                continue
+              fi
+              echo "- ${name}"
             done
             echo
             echo "Verify downloads with SHA256SUMS.txt."
-            echo "macOS builds are not notarized yet and Windows builds are not Authenticode-signed yet."
           } > release/RELEASE_NOTES.md
+          (cd release && sha256sum * > SHA256SUMS.txt && sha256sum --check SHA256SUMS.txt)
 
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
