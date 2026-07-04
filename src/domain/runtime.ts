@@ -111,6 +111,19 @@ export interface CoreReleaseDiagnostics {
   lastError: string | null;
 }
 
+export interface ReleaseDiagnosticsDisplayRow {
+  label: string;
+  tone: "bad" | "good" | "";
+  title?: string;
+  value: string;
+  wide: boolean;
+}
+
+export interface ReleaseDiagnosticsDisplay {
+  lastError: string | null;
+  rows: ReleaseDiagnosticsDisplayRow[];
+}
+
 export interface ProcessStatus {
   state: ProcessState;
   pid: number | null;
@@ -185,6 +198,90 @@ export function tachyonIpcBaseUrl(
   const listen = settings.tachyonIpcListen.trim() || "127.0.0.1";
   const port = settings.tachyonIpcPort > 0 ? settings.tachyonIpcPort : 55123;
   return `http://${httpHost(listen)}:${port}`;
+}
+
+export function buildReleaseDiagnosticsDisplay(
+  diagnostics: CoreReleaseDiagnostics,
+  formatBytes: (value: number | null) => string,
+): ReleaseDiagnosticsDisplay {
+  const checksumLabel =
+    diagnostics.checksumMatch === true
+      ? "Match"
+      : diagnostics.checksumMatch === false
+        ? "Mismatch"
+        : diagnostics.checksumExpectedSha256
+          ? "Not checked"
+          : "Unknown";
+  const hasResolvedRelease = Boolean(diagnostics.resolvedTag);
+  const installedPath = diagnostics.installedPath.trim();
+
+  return {
+    lastError: diagnostics.lastError,
+    rows: [
+      {
+        label: "Channel",
+        tone: "",
+        value: diagnostics.selectedChannel === "preview" ? "Pre" : "Stable",
+        wide: false,
+      },
+      {
+        label: "Resolved tag",
+        tone: "",
+        value: diagnostics.resolvedTag ?? (diagnostics.lastError ? "Empty" : "--"),
+        wide: false,
+      },
+      {
+        label: "Asset",
+        title: diagnostics.assetName ?? undefined,
+        tone: "",
+        value: diagnostics.assetName
+          ? `${diagnostics.assetName} / ${formatBytes(diagnostics.assetSizeBytes)}`
+          : hasResolvedRelease
+            ? "No compatible asset"
+            : "--",
+        wide: true,
+      },
+      {
+        label: "Checksum",
+        tone: diagnostics.checksumMatch === false ? "bad" : diagnostics.checksumMatch ? "good" : "",
+        value: checksumLabel,
+        wide: false,
+      },
+      {
+        label: "SHA-256",
+        title: diagnostics.checksumExpectedSha256 ?? undefined,
+        tone: "",
+        value: shortDiagnosticHash(diagnostics.checksumExpectedSha256),
+        wide: false,
+      },
+      {
+        label: "Installed version",
+        title: diagnostics.installedPath || undefined,
+        tone: "",
+        value: diagnostics.installedExists
+          ? diagnostics.installedVersion ?? "Present, version unknown"
+          : "Not installed",
+        wide: false,
+      },
+      {
+        label: "Installed path",
+        title: installedPath || undefined,
+        tone: "",
+        value: installedPath || "--",
+        wide: true,
+      },
+    ],
+  };
+}
+
+function shortDiagnosticHash(hash: string | null): string {
+  if (!hash) {
+    return "--";
+  }
+  if (hash.length <= 16) {
+    return hash;
+  }
+  return `${hash.slice(0, 8)}...${hash.slice(-8)}`;
 }
 
 export async function getRuntimePaths(): Promise<RuntimePaths> {

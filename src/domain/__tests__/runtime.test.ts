@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { tachyonIpcBaseUrl, testXrayLocalProxies } from "../runtime";
+import {
+  buildReleaseDiagnosticsDisplay,
+  tachyonIpcBaseUrl,
+  testXrayLocalProxies,
+  type CoreReleaseDiagnostics,
+} from "../runtime";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -44,5 +49,42 @@ describe("testXrayLocalProxies", () => {
     expect(report.socks.ok).toBe(true);
     expect(report.http.via).toContain("10809");
     expect(report.socks.via).toContain("10808");
+  });
+});
+
+describe("buildReleaseDiagnosticsDisplay", () => {
+  it("shows release, checksum, installed path, version, and last error details", () => {
+    const diagnostics: CoreReleaseDiagnostics = {
+      assetName: "tachyon-core_v0.1.0-alpha.12_windows_amd64.zip",
+      assetSizeBytes: 12_320_768,
+      assetUrl: "https://example.invalid/tachyon-core.zip",
+      checksumActualSha256: "b".repeat(64),
+      checksumAssetName: "SHA256SUMS.txt",
+      checksumExpectedSha256: "a".repeat(64),
+      checksumMatch: true,
+      checksumUrl: "https://example.invalid/SHA256SUMS.txt",
+      displayName: "Tachyon Core",
+      installedExists: true,
+      installedPath: "C:\\Users\\tester\\AppData\\Roaming\\tachyon-prism\\bin\\tachyon-core.exe",
+      installedVersion: "tachyon-core 0.1.0-alpha.12",
+      kind: "tachyonCore",
+      lastError: "cached checksum missing",
+      resolvedTag: "v0.1.0-alpha.12",
+      selectedChannel: "preview",
+    };
+
+    const display = buildReleaseDiagnosticsDisplay(diagnostics, (value) => `${value ?? 0} bytes`);
+    const rows = new Map(display.rows.map((row) => [row.label, row.value]));
+
+    expect(rows.get("Channel")).toBe("Pre");
+    expect(rows.get("Resolved tag")).toBe("v0.1.0-alpha.12");
+    expect(rows.get("Asset")).toBe("tachyon-core_v0.1.0-alpha.12_windows_amd64.zip / 12320768 bytes");
+    expect(rows.get("Checksum")).toBe("Match");
+    expect(rows.get("SHA-256")).toBe("aaaaaaaa...aaaaaaaa");
+    expect(rows.get("Installed version")).toBe("tachyon-core 0.1.0-alpha.12");
+    expect(rows.get("Installed path")).toBe(
+      "C:\\Users\\tester\\AppData\\Roaming\\tachyon-prism\\bin\\tachyon-core.exe",
+    );
+    expect(display.lastError).toBe("cached checksum missing");
   });
 });

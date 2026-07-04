@@ -26,6 +26,7 @@ import {
   getLatestTachyonCoreRelease,
   getLatestXrayRelease,
   getCoreReleaseDiagnostics,
+  buildReleaseDiagnosticsDisplay,
   getManagedBinaries,
   getRuntimePrivilegeStatus,
   getRuntimePaths,
@@ -2020,8 +2021,6 @@ export function App() {
   async function diagnoseCoreRelease(kind: ManagedBinaryKind) {
     try {
       setBinaryBusy(true);
-      const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
-      setRuntimeInputs(settings);
       const diagnostics = await getCoreReleaseDiagnostics(kind);
       setReleaseDiagnostics((current) => ({ ...current, [kind]: diagnostics }));
       if (diagnostics.resolvedTag && diagnostics.assetName) {
@@ -2041,7 +2040,7 @@ export function App() {
       setMessage(
         diagnostics.lastError
           ? `${managedBinaryDisplayName(kind)} diagnostics: ${diagnostics.lastError}`
-          : `${managedBinaryDisplayName(kind)} diagnostics ready`,
+          : `${managedBinaryDisplayName(kind)} diagnostics ready for saved settings`,
       );
     } catch (error) {
       const message =
@@ -4310,6 +4309,9 @@ function SettingsView({
                           <button disabled={binaryBusy} type="button" onClick={onInstallWintun}>{ui.installWintun}</button>
                         ) : null}
                       </div>
+                      <p className="diagnose-note">
+                        Diagnose uses saved runtime settings only; it does not write files or start cores.
+                      </p>
                     </div>
                   );
                 })}
@@ -4479,66 +4481,18 @@ function ReleaseDiagnosticsPanel({
   selectedChannel: ReleaseChannel;
 }) {
   const snapshot = diagnostics ?? emptyReleaseDiagnostics(kind, selectedChannel);
-  const checksumLabel =
-    snapshot.checksumMatch === true
-      ? "Match"
-      : snapshot.checksumMatch === false
-        ? "Mismatch"
-        : snapshot.checksumExpectedSha256
-          ? "Not checked"
-          : "Unknown";
-  const hasResolvedRelease = Boolean(snapshot.resolvedTag);
+  const display = buildReleaseDiagnosticsDisplay(snapshot, formatBytesFn);
   return (
     <div className="release-diagnostics">
-      <div>
-        <span>Channel</span>
-        <strong>{snapshot.selectedChannel === "preview" ? "Pre" : "Stable"}</strong>
-      </div>
-      <div>
-        <span>Resolved tag</span>
-        <strong>{snapshot.resolvedTag ?? (snapshot.lastError ? "Empty" : "--")}</strong>
-      </div>
-      <div className="wide">
-        <span>Asset</span>
-        <strong title={snapshot.assetName ?? undefined}>
-          {snapshot.assetName
-            ? `${snapshot.assetName} / ${formatBytesFn(snapshot.assetSizeBytes)}`
-            : hasResolvedRelease
-              ? "No compatible asset"
-              : "--"}
-        </strong>
-      </div>
-      <div>
-        <span>Checksum</span>
-        <strong className={snapshot.checksumMatch === false ? "bad" : snapshot.checksumMatch ? "good" : ""}>
-          {checksumLabel}
-        </strong>
-      </div>
-      <div>
-        <span>SHA-256</span>
-        <strong title={snapshot.checksumExpectedSha256 ?? undefined}>
-          {shortHash(snapshot.checksumExpectedSha256)}
-        </strong>
-      </div>
-      <div className="wide">
-        <span>Installed</span>
-        <strong title={snapshot.installedPath || undefined}>
-          {snapshot.installedExists ? snapshot.installedVersion ?? "Present, version unknown" : "Not installed"}
-        </strong>
-      </div>
-      {snapshot.lastError ? <p className="diagnostic-error">{snapshot.lastError}</p> : null}
+      {display.rows.map((row) => (
+        <div className={row.wide ? "wide" : undefined} key={row.label}>
+          <span>{row.label}</span>
+          <strong className={row.tone} title={row.title}>{row.value}</strong>
+        </div>
+      ))}
+      {display.lastError ? <p className="diagnostic-error">{display.lastError}</p> : null}
     </div>
   );
-}
-
-function shortHash(hash: string | null): string {
-  if (!hash) {
-    return "--";
-  }
-  if (hash.length <= 16) {
-    return hash;
-  }
-  return `${hash.slice(0, 8)}...${hash.slice(-8)}`;
 }
 
 function SettingRow({

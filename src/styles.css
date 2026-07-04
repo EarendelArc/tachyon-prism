@@ -1551,6 +1551,14 @@ p,
   grid-column: 1 / -1;
 }
 
+.diagnose-note {
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 12px;
+  grid-column: 1 / -1;
+  line-height: 1.4;
+  margin: -2px 0 0;
+}
+
 .release-diagnostics {
   background: rgba(255, 255, 255, 0.045);
   border: 1px solid rgba(255, 255, 255, 0.07);
