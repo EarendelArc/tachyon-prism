@@ -112,3 +112,11 @@ GitHub Actions 会在 release tag 或手动 workflow dispatch 时构建 Prism。
 
 当前产物还没有代码签名。加入 Authenticode 签名和 Apple notarization 之前，Windows SmartScreen 与 macOS Gatekeeper 可能会提示风险。
 真实 VPS、真实客户端和真实游戏 UDP 加速链路仍需实测；当前 alpha 不能宣称 stable 或完整。
+
+## 文档
+
+- [快速上手](docs/getting-started.zh-CN.md) / [Getting Started](docs/getting-started.md)
+- [Alpha 客户端测试计划](docs/alpha-client-test-plan.zh-CN.md) / [Alpha Client Test Plan](docs/alpha-client-test-plan.md)
+- [架构](docs/architecture.zh-CN.md) / [Architecture](docs/architecture.md)
+- [IPC 设计](docs/ipc.zh-CN.md) / [IPC Design](docs/ipc.md)
+- [开发](docs/development.zh-CN.md) / [Development](docs/development.md)

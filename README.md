@@ -208,6 +208,7 @@ testing before any stable or complete claim.
 ## Documentation
 
 - [Getting Started](docs/getting-started.md) / [快速上手](docs/getting-started.zh-CN.md)
+- [Alpha Client Test Plan](docs/alpha-client-test-plan.md) / [Alpha 客户端测试计划](docs/alpha-client-test-plan.zh-CN.md)
 - [Architecture](docs/architecture.md) / [架构](docs/architecture.zh-CN.md)
 - [IPC Design](docs/ipc.md) / [IPC 设计](docs/ipc.zh-CN.md)
 - [Development](docs/development.md) / [开发](docs/development.zh-CN.md)
