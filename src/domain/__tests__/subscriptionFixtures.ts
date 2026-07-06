@@ -1,4 +1,5 @@
 import type { ProxyProtocol } from "../subscriptions";
+import type { XrayOutboundCompatibilityStatus } from "../subscriptions";
 
 export interface SubscriptionCompatibilityFixture {
   id: string;
@@ -12,6 +13,7 @@ export interface SubscriptionCompatibilityFixture {
     transport?: string;
     sni?: string;
   };
+  xrayCompatibilityStatus?: XrayOutboundCompatibilityStatus;
   outboundMatch: Record<string, unknown>;
 }
 
@@ -32,6 +34,27 @@ const vmessWsTls = Buffer.from(
     scy: "auto",
   }),
 ).toString("base64");
+
+export const singBoxTuicJsonFixture = JSON.stringify({
+  outbounds: [
+    {
+      type: "tuic",
+      tag: "sing-box TUIC",
+      server: "sing-tuic.example.com",
+      server_port: 443,
+      uuid: "sing-tuic-uuid",
+      password: "sing-tuic-secret",
+      congestion_control: "bbr",
+      udp_relay_mode: "native",
+      zero_rtt_handshake: true,
+      tls: {
+        enabled: true,
+        server_name: "edge.example.com",
+        alpn: ["h3"],
+      },
+    },
+  ],
+});
 
 export const subscriptionCompatibilityFixtures: SubscriptionCompatibilityFixture[] = [
   {
@@ -249,6 +272,7 @@ export const subscriptionCompatibilityFixtures: SubscriptionCompatibilityFixture
   },
   {
     id: "tuic",
+    xrayCompatibilityStatus: "unsupported-by-xray",
     payload:
       "tuic://tuic-uuid:tuic-secret@tuic.example.com:443?sni=edge.example.com&alpn=h3&congestion=bbr&udpRelayMode=native&zeroRttHandshake=true#TUIC Node",
     expected: {
@@ -269,6 +293,38 @@ export const subscriptionCompatibilityFixtures: SubscriptionCompatibilityFixture
         congestion: "bbr",
         udpRelayMode: "native",
         zeroRttHandshake: true,
+      },
+    },
+  },
+  {
+    id: "sing-box-tuic-json",
+    xrayCompatibilityStatus: "unsupported-by-xray",
+    payload: singBoxTuicJsonFixture,
+    expected: {
+      name: "sing-box TUIC",
+      protocol: "tuic",
+      address: "sing-tuic.example.com",
+      port: 443,
+      security: "tls",
+      sni: "edge.example.com",
+    },
+    outboundMatch: {
+      protocol: "tuic",
+      settings: {
+        address: "sing-tuic.example.com",
+        port: 443,
+        uuid: "sing-tuic-uuid",
+        password: "sing-tuic-secret",
+        congestion: "bbr",
+        udpRelayMode: "native",
+        zeroRttHandshake: true,
+      },
+      streamSettings: {
+        security: "tls",
+        tlsSettings: {
+          serverName: "edge.example.com",
+          alpn: ["h3"],
+        },
       },
     },
   },

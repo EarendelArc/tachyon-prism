@@ -11,6 +11,7 @@ import {
   selectSubscription,
   selectSubscriptionNode,
   totalSubscriptionNodes,
+  xrayOutboundCompatibilityForNode,
 } from "../subscriptions";
 import type { ProxyNode } from "../subscriptions";
 import {
@@ -295,7 +296,7 @@ describe("parseSubscription", () => {
       security: "tls",
       sni: "edge.example.com",
     });
-    expect(buildXrayOutboundDraft(nodes[0])).toMatchObject({
+    expect(nodes[0].outbound).toMatchObject({
       protocol: "tuic",
       settings: {
         address: "tuic.example.com",
@@ -314,6 +315,11 @@ describe("parseSubscription", () => {
         },
       },
     });
+    expect(xrayOutboundCompatibilityForNode(nodes[0])).toMatchObject({
+      status: "unsupported-by-xray",
+      reason: expect.stringContaining("TUIC"),
+    });
+    expect(() => buildXrayOutboundDraft(nodes[0])).toThrow(/unsupported-by-xray/);
   });
 
   it("parses SOCKS URIs", () => {
@@ -697,7 +703,7 @@ proxy-groups:
 
   it.each(subscriptionCompatibilityFixtures)(
     "parses compatibility fixture: $id",
-    ({ payload, expected, outboundMatch }) => {
+    ({ payload, expected, outboundMatch, xrayCompatibilityStatus = "supported" }) => {
       const nodes = parseSubscription(payload);
 
       expect(nodes).toHaveLength(1);
@@ -706,7 +712,13 @@ proxy-groups:
       expect(nodes[0].protocol).toBe(expected.protocol);
       expect(nodes[0].address).toBe(expected.address);
       expect(nodes[0].port).toBe(expected.port);
-      expect(buildXrayOutboundDraft(nodes[0])).toMatchObject(outboundMatch);
+      expect(xrayOutboundCompatibilityForNode(nodes[0]).status).toBe(xrayCompatibilityStatus);
+      if (xrayCompatibilityStatus === "supported") {
+        expect(buildXrayOutboundDraft(nodes[0])).toMatchObject(outboundMatch);
+      } else {
+        expect(nodes[0].outbound).toMatchObject(outboundMatch);
+        expect(() => buildXrayOutboundDraft(nodes[0])).toThrow(/unsupported-by-xray/);
+      }
     },
   );
 
@@ -789,6 +801,9 @@ proxies:
       password: "secret",
       congestion: "bbr",
       udpRelayMode: "native",
+    });
+    expect(xrayOutboundCompatibilityForNode(report.nodes[1])).toMatchObject({
+      status: "unsupported-by-xray",
     });
     expect(report.totalEntries).toBe(3);
     expect(report.skippedEntries).toBe(1);
@@ -997,5 +1012,16 @@ describe("buildXrayOutboundDraft", () => {
       rawUri: "vmess://test",
     };
     expect(() => buildXrayOutboundDraft(node)).toThrow();
+  });
+
+  it("throws when a retained node is not supported by Xray outbound protocols", () => {
+    const [node] = parseSubscription(
+      "tuic://uuid:secret@tuic.example.com:443?sni=edge.example.com#TUIC",
+    );
+
+    expect(node.outbound).toMatchObject({ protocol: "tuic" });
+    expect(() => buildXrayOutboundDraft(node)).toThrow(
+      /Official Xray outbound protocols do not include TUIC/,
+    );
   });
 });

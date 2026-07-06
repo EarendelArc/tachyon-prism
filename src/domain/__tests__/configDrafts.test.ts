@@ -11,7 +11,10 @@ import {
 import type { GameProfile, LauncherSettings } from "../gameProfiles";
 import { parseSubscription } from "../subscriptions";
 import type { ProxyNode } from "../subscriptions";
-import { subscriptionCompatibilityFixtures } from "./subscriptionFixtures";
+import {
+  singBoxTuicJsonFixture,
+  subscriptionCompatibilityFixtures,
+} from "./subscriptionFixtures";
 
 const mockVMessNode: ProxyNode = {
   id: "node-00000001",
@@ -219,7 +222,7 @@ describe("buildXrayClientConfigDraft", () => {
       ].join("\n"),
     );
 
-    const [vmessConfig, trojanConfig, hysteriaConfig, tuicConfig] = nodes.map((node) =>
+    const [vmessConfig, trojanConfig, hysteriaConfig] = nodes.slice(0, 3).map((node) =>
       buildXrayClientConfigDraft(node),
     );
     const vmessProxy = ((vmessConfig.outbounds as Array<Record<string, unknown>>).find(
@@ -231,9 +234,7 @@ describe("buildXrayClientConfigDraft", () => {
     const hysteriaProxy = ((hysteriaConfig.outbounds as Array<Record<string, unknown>>).find(
       (outbound) => outbound.tag === "tachyon-proxy",
     ) ?? {}) as Record<string, unknown>;
-    const tuicProxy = ((tuicConfig.outbounds as Array<Record<string, unknown>>).find(
-      (outbound) => outbound.tag === "tachyon-proxy",
-    ) ?? {}) as Record<string, unknown>;
+    const tuicNode = nodes[3];
 
     expect(vmessProxy).toMatchObject({
       protocol: "vmess",
@@ -262,7 +263,7 @@ describe("buildXrayClientConfigDraft", () => {
         },
       },
     });
-    expect(tuicProxy).toMatchObject({
+    expect(tuicNode.outbound).toMatchObject({
       protocol: "tuic",
       settings: {
         address: "tuic.example.com",
@@ -278,12 +279,18 @@ describe("buildXrayClientConfigDraft", () => {
         },
       },
     });
+    expect(() => buildXrayClientConfigDraft(tuicNode)).toThrow(/unsupported-by-xray/);
   });
 
   it.each(subscriptionCompatibilityFixtures)(
     "generates an Xray client draft for compatibility fixture: $id",
-    ({ payload, outboundMatch }) => {
+    ({ payload, outboundMatch, xrayCompatibilityStatus = "supported" }) => {
       const [node] = parseSubscription(payload);
+      if (xrayCompatibilityStatus !== "supported") {
+        expect(() => buildXrayClientConfigDraft(node)).toThrow(/unsupported-by-xray/);
+        return;
+      }
+
       const config = buildXrayClientConfigDraft(node);
       const outbounds = config.outbounds as Array<Record<string, unknown>>;
       const proxy = outbounds.find(
@@ -302,6 +309,38 @@ describe("buildXrayClientConfigDraft", () => {
       );
     },
   );
+
+  it("does not generate an active Xray outbound for unsupported retained nodes", () => {
+    const [node] = parseSubscription(
+      "tuic://uuid:secret@tuic.example.com:443?sni=edge.example.com#TUIC",
+    );
+
+    expect(node.outbound?.protocol).toBe("tuic");
+    expect(() => buildXrayClientConfigDraft(node)).toThrow(
+      /Official Xray outbound protocols do not include TUIC/,
+    );
+  });
+
+  it("blocks sing-box TUIC nodes before generating an active Xray outbound", () => {
+    const [node] = parseSubscription(singBoxTuicJsonFixture);
+    let generatedOutbounds: Array<Record<string, unknown>> | undefined;
+
+    expect(node).toMatchObject({
+      name: "sing-box TUIC",
+      protocol: "tuic",
+      address: "sing-tuic.example.com",
+      port: 443,
+      xrayCompatibility: {
+        status: "unsupported-by-xray",
+      },
+    });
+    expect(node.outbound).toMatchObject({ protocol: "tuic" });
+    expect(() => {
+      const draft = buildXrayClientConfigDraft(node);
+      generatedOutbounds = draft.outbounds as Array<Record<string, unknown>>;
+    }).toThrow(/unsupported-by-xray/);
+    expect(generatedOutbounds).toBeUndefined();
+  });
 });
 
 describe("buildCoreClientConfigDraft", () => {

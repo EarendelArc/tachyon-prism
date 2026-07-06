@@ -9,14 +9,19 @@ export type XrayOutboundProtocol =
   | "shadowsocks"
   | "socks"
   | "trojan"
-  | "tuic"
   | "vless"
   | "vmess"
   | "hysteria"
   | "wireguard"
   | "unknown";
 
-export type ProxyProtocol = XrayOutboundProtocol;
+export type ProxyProtocol = XrayOutboundProtocol | "tuic";
+export type XrayOutboundCompatibilityStatus = "supported" | "unsupported-by-xray";
+
+export interface XrayOutboundCompatibility {
+  status: XrayOutboundCompatibilityStatus;
+  reason: string | null;
+}
 
 export interface XrayOutboundObject {
   protocol: XrayOutboundProtocol | string;
@@ -42,6 +47,7 @@ export interface ProxyNode {
   sni?: string;
   parameters?: Record<string, string>;
   outbound?: XrayOutboundObject;
+  xrayCompatibility?: XrayOutboundCompatibility;
   rawUri: string;
 }
 
@@ -73,7 +79,7 @@ export interface SubscriptionSnapshot {
 
 const storageKey = "tachyon.prism.subscription.v1";
 
-const xrayOutboundProtocols = new Set<XrayOutboundProtocol>([
+const xraySupportedOutboundProtocols = new Set<XrayOutboundProtocol>([
   "blackhole",
   "dns",
   "freedom",
@@ -82,12 +88,20 @@ const xrayOutboundProtocols = new Set<XrayOutboundProtocol>([
   "shadowsocks",
   "socks",
   "trojan",
-  "tuic",
   "vless",
   "vmess",
   "hysteria",
   "wireguard",
 ]);
+
+const retainedProxyProtocols = new Set<ProxyProtocol>([
+  ...xraySupportedOutboundProtocols,
+  "tuic",
+]);
+
+const xrayUnsupportedReasons: Partial<Record<ProxyProtocol, string>> = {
+  tuic: "Official Xray outbound protocols do not include TUIC; Prism retains this node but cannot start it with Xray Core.",
+};
 
 export const emptySubscriptionSnapshot: SubscriptionSnapshot = {
   sourceUrl: "",
@@ -259,7 +273,38 @@ export function selectSubscriptionNode(
   return snapshotFromProfiles(snapshot.subscriptions, subscription.id, nodeId);
 }
 
+export function xrayOutboundCompatibilityForProtocol(
+  protocol: string,
+): XrayOutboundCompatibility {
+  const normalized = normalizeProtocol(protocol);
+  if (xraySupportedOutboundProtocols.has(normalized as XrayOutboundProtocol)) {
+    return { status: "supported", reason: null };
+  }
+  return {
+    status: "unsupported-by-xray",
+    reason:
+      xrayUnsupportedReasons[normalized] ??
+      `Xray Core does not list ${normalized || "unknown"} as a supported outbound protocol.`,
+  };
+}
+
+export function xrayOutboundCompatibilityForNode(
+  node: ProxyNode,
+): XrayOutboundCompatibility {
+  return xrayOutboundCompatibilityForProtocol(node.protocol);
+}
+
+export function assertXrayOutboundSupported(node: ProxyNode): void {
+  const compatibility = xrayOutboundCompatibilityForNode(node);
+  if (compatibility.status !== "supported") {
+    throw new Error(
+      `${node.name} is ${compatibility.status}: ${compatibility.reason ?? "cannot be used as an active Xray outbound"}`,
+    );
+  }
+}
+
 export function buildXrayOutboundDraft(node: ProxyNode): XrayOutboundObject {
+  assertXrayOutboundSupported(node);
   if (node.outbound) {
     return cloneRecord(node.outbound) as XrayOutboundObject;
   }
@@ -1151,6 +1196,7 @@ function nodeFromOutbound(value: Record<string, unknown>, raw: string): ProxyNod
     transport: stringValue(stream.network),
     sni: sniFromStream(stream),
     outbound,
+    xrayCompatibility: xrayOutboundCompatibilityForProtocol(protocol),
     rawUri: raw,
   };
 }
@@ -1298,6 +1344,7 @@ function nodeFromVMessShare(value: Record<string, unknown>, rawUri: string): Pro
     sni: stringValue(value.sni) || stringValue(value.host),
     parameters: params,
     outbound,
+    xrayCompatibility: xrayOutboundCompatibilityForProtocol("vmess"),
     rawUri,
   };
 }
@@ -1536,6 +1583,7 @@ function nodeFromUri(
     sni: overrides.sni ?? sniFromStream(asRecord(outbound.streamSettings)),
     parameters: overrides.parameters,
     outbound,
+    xrayCompatibility: xrayOutboundCompatibilityForProtocol(protocol),
     rawUri,
   };
 }
@@ -1978,6 +2026,7 @@ function normalizeStoredNode(value: unknown): ProxyNode | null {
     sni: stringOrUndefined(stringValue(value.sni)),
     parameters: asStringRecord(value.parameters),
     outbound,
+    xrayCompatibility: xrayOutboundCompatibilityForProtocol(protocol),
     rawUri,
   };
 }
@@ -2095,7 +2144,7 @@ function normalizeProtocol(protocol: string): ProxyProtocol {
     wg: "wireguard",
   };
   const normalized = aliases[value] ?? value;
-  return xrayOutboundProtocols.has(normalized as XrayOutboundProtocol)
+  return retainedProxyProtocols.has(normalized as ProxyProtocol)
     ? (normalized as ProxyProtocol)
     : "unknown";
 }

@@ -83,6 +83,7 @@ import {
   selectSubscription,
   selectSubscriptionNode,
   totalSubscriptionNodes,
+  xrayOutboundCompatibilityForNode,
 } from "./domain/subscriptions";
 import {
   activeTachyonServer,
@@ -441,6 +442,9 @@ const zh = {
   subscriptionSkipped: "跳过 {count} 条",
   subscriptionUnsupported: "不支持协议：{protocols}",
   subscriptionUrl: "订阅地址",
+  xrayRetainedOnly: "仅保留，Xray 不支持",
+  xraySupported: "Xray 支持",
+  xrayUnsupported: "Xray 不支持",
   configFilesSaved: "配置文件已保存",
   configsValidated: "可用配置已验证",
   configsValidationErrors: "配置验证完成，但存在错误",
@@ -678,6 +682,9 @@ const en: typeof zh = {
   subscriptionSkipped: "{count} skipped",
   subscriptionUnsupported: "unsupported: {protocols}",
   subscriptionUrl: "Subscription URL",
+  xrayRetainedOnly: "Retained only, unsupported by Xray",
+  xraySupported: "Xray supported",
+  xrayUnsupported: "Unsupported by Xray",
   configFilesSaved: "Config files saved",
   configsValidated: "Available configs validated",
   configsValidationErrors: "Config validation finished with errors",
@@ -730,17 +737,33 @@ function nodeLatencySortValue(node: ProxyNode, latencyMap: NodeLatencyMap): numb
 }
 
 function nodeAvailable(node: ProxyNode, latencyMap: NodeLatencyMap): boolean {
+  if (xrayOutboundCompatibilityForNode(node).status !== "supported") {
+    return false;
+  }
   const measured = latencyMap[node.id];
   return !measured || Boolean(measured.ok && measured.latencyMs !== null);
 }
 
 function nodeLatencyLabel(node: ProxyNode, ui: typeof zh, latencyMap: NodeLatencyMap): string {
+  if (xrayOutboundCompatibilityForNode(node).status !== "supported") {
+    return ui.xrayUnsupported;
+  }
   const measured = latencyMap[node.id];
   if (measured && !measured.ok) {
     return ui.unavailable;
   }
   const latency = nodeLatency(node, latencyMap);
   return latency === null ? "--" : `${latency}ms`;
+}
+
+function nodeXrayCompatibilityLabel(node: ProxyNode, ui: typeof zh): string {
+  const compatibility = xrayOutboundCompatibilityForNode(node);
+  return compatibility.status === "supported" ? ui.xraySupported : ui.xrayRetainedOnly;
+}
+
+function nodeXrayCompatibilityTitle(node: ProxyNode, ui: typeof zh): string {
+  const compatibility = xrayOutboundCompatibilityForNode(node);
+  return compatibility.reason ?? nodeXrayCompatibilityLabel(node, ui);
 }
 
 function processStatusLabel(status: ProcessStatus | undefined): string {
@@ -1295,12 +1318,18 @@ export function App() {
   const trafficRates = trafficSamples[trafficSamples.length - 1] ?? emptyTrafficSample();
   const readinessItems = useMemo<ReadinessItem[]>(() => {
     const items: ReadinessItem[] = [];
+    const activeNodeCompatibility = activeNode
+      ? xrayOutboundCompatibilityForNode(activeNode)
+      : null;
     items.push(
       activeNode
         ? {
-            detail: `${activeNode.name} (${activeNode.protocol.toUpperCase()})`,
+            detail:
+              activeNodeCompatibility?.status === "supported"
+                ? `${activeNode.name} (${activeNode.protocol.toUpperCase()})`
+                : `${activeNode.name} is ${activeNodeCompatibility?.status}: ${activeNodeCompatibility?.reason}`,
             label: "Xray node",
-            state: "ok",
+            state: activeNodeCompatibility?.status === "supported" ? "ok" : "error",
           }
         : {
             detail: "Import a subscription or select a node before starting Xray.",
@@ -2964,6 +2993,7 @@ function OverviewView({
   const activeNodeLatency = activeNode ? nodeLatencyLabel(activeNode, ui, latencyMap) : "--";
   const activeNodeProtocol = activeNode ? activeNode.protocol.toUpperCase() : "--";
   const activeNodeTransport = activeNode?.transport || "udp";
+  const activeNodeCompatibility = activeNode ? nodeXrayCompatibilityLabel(activeNode, ui) : "--";
   const activeNodeAvailable = activeNode ? nodeAvailable(activeNode, latencyMap) : false;
 
   return (
@@ -3047,6 +3077,7 @@ function OverviewView({
         <aside className="overview-side">
           <button
             className={activeNode ? "current-node-card active" : "current-node-card"}
+            title={activeNode ? `${activeNodeCompatibility}: ${nodeXrayCompatibilityTitle(activeNode, ui)}` : ui.noNodeSelected}
             type="button"
             onClick={onOpenNodePicker}
           >
@@ -3339,7 +3370,7 @@ function ConfigsView({
                             {nodeLatencyLabel(node, ui, latencyMap)}
                           </span>
                           <small>
-                            {node.protocol.toUpperCase()} :: {node.transport || "udp"}
+                            {node.protocol.toUpperCase()} :: {node.transport || "udp"} / {nodeXrayCompatibilityLabel(node, ui)}
                           </small>
                           {node.id === subscription.selectedNodeId ? <em>✓</em> : null}
                         </button>
@@ -3525,7 +3556,7 @@ function SubscriptionsView({
                   {nodeLatencyLabel(node, ui, latencyMap)}
                 </span>
                 <small>
-                  {node.protocol.toUpperCase()} :: {node.transport || "udp"}
+                  {node.protocol.toUpperCase()} :: {node.transport || "udp"} / {nodeXrayCompatibilityLabel(node, ui)}
                 </small>
                 {node.id === subscription.selectedNodeId ? <em>✓</em> : null}
               </button>
@@ -4733,7 +4764,7 @@ function NodeDrawer({
               <span className={nodeAvailable(node, latencyMap) ? "" : "unavailable"}>
                 {nodeLatencyLabel(node, ui, latencyMap)}
               </span>
-              <small>{node.protocol.toUpperCase()} :: {node.transport || "udp"}</small>
+              <small>{node.protocol.toUpperCase()} :: {node.transport || "udp"} / {nodeXrayCompatibilityLabel(node, ui)}</small>
               {node.id === subscription.selectedNodeId ? <em>✓</em> : null}
             </button>
           ))}

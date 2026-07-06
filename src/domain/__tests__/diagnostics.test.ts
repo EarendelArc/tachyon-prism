@@ -77,6 +77,28 @@ const node: ProxyNode = {
   transport: "raw",
 };
 
+const tuicNode: ProxyNode = {
+  address: "tuic.secret.example.com",
+  credential: "tuic-uuid:***",
+  id: "node-tuic",
+  name: "TUIC Retained",
+  outbound: {
+    protocol: "tuic",
+    settings: {
+      address: "tuic.secret.example.com",
+      port: 443,
+      uuid: "tuic-uuid",
+      password: "tuic-password-secret",
+    },
+  },
+  port: 443,
+  protocol: "tuic",
+  rawUri: "tuic://tuic-uuid:tuic-password-secret@tuic.secret.example.com:443#TUIC",
+  security: "tls",
+  sni: "tuic.secret.example.com",
+  transport: "udp",
+};
+
 const subscription: SubscriptionSnapshot = {
   nodes: [node],
   selectedNodeId: node.id,
@@ -94,6 +116,7 @@ const subscription: SubscriptionSnapshot = {
           protocol: "trojan",
           rawUri: `trojan://${trojanPassword}@trojan.example.com:443`,
         },
+        tuicNode,
       ],
       sourceUrl: `https://sub.example.com/client/${subscriptionToken}?token=${subscriptionToken}`,
       updatedAt: "2026-07-04T00:00:00.000Z",
@@ -268,9 +291,19 @@ describe("buildClientDiagnosticsExport", () => {
     });
     expect(diagnostics.subscriptions).toMatchObject({
       activeGroup: "Main",
-      protocolCounts: { trojan: 1, vless: 1 },
+      protocolCounts: { trojan: 1, tuic: 1, vless: 1 },
       totalGroups: 1,
-      totalNodes: 2,
+      totalNodes: 3,
+      xrayCompatibilityCounts: {
+        supported: 2,
+        "unsupported-by-xray": 1,
+      },
+    });
+    expect(diagnostics.subscriptions.groups[0]).toMatchObject({
+      xrayCompatibilityCounts: {
+        supported: 2,
+        "unsupported-by-xray": 1,
+      },
     });
     expect(diagnostics.selectedNode).toEqual({
       address: "ed***.example.com",
@@ -282,6 +315,10 @@ describe("buildClientDiagnosticsExport", () => {
       security: "reality",
       sni: "ww***.example.com",
       transport: "raw",
+      xrayCompatibility: {
+        reason: null,
+        status: "supported",
+      },
     });
     expect(output).not.toContain(secretUuid);
     expect(output).not.toContain(trojanPassword);

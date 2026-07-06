@@ -8,6 +8,7 @@ import type {
   RuntimeStatus,
 } from "./runtime";
 import type { ProxyNode, SubscriptionSnapshot } from "./subscriptions";
+import { xrayOutboundCompatibilityForNode } from "./subscriptions";
 
 export const prismVersion = "0.1.0";
 
@@ -50,6 +51,7 @@ export interface ClientDiagnosticsExport {
   subscriptions: {
     activeGroup: string | null;
     groups: DiagnosticsSubscriptionGroup[];
+    xrayCompatibilityCounts: Record<string, number>;
     protocolCounts: Record<string, number>;
     totalGroups: number;
     totalNodes: number;
@@ -94,6 +96,7 @@ interface DiagnosticsSubscriptionGroup {
   protocolCounts: Record<string, number>;
   sourceUrl: string;
   updatedAt: string;
+  xrayCompatibilityCounts: Record<string, number>;
 }
 
 interface DiagnosticsNodeSummary {
@@ -106,6 +109,10 @@ interface DiagnosticsNodeSummary {
   security: string | null;
   sni: string | null;
   transport: string | null;
+  xrayCompatibility: {
+    reason: string | null;
+    status: string;
+  };
 }
 
 const redacted = "[redacted]";
@@ -327,19 +334,23 @@ function subscriptionSummary(snapshot: SubscriptionSnapshot) {
     protocolCounts: protocolCounts(subscription.nodes),
     sourceUrl: redactSubscriptionUrl(subscription.sourceUrl),
     updatedAt: subscription.updatedAt,
+    xrayCompatibilityCounts: xrayCompatibilityCounts(subscription.nodes),
   }));
+  const allNodes = snapshot.subscriptions.flatMap((item) => item.nodes);
   return {
     activeGroup:
       snapshot.subscriptions.find((item) => item.id === snapshot.selectedSubscriptionId)?.name ??
       null,
     groups,
-    protocolCounts: protocolCounts(snapshot.subscriptions.flatMap((item) => item.nodes)),
+    protocolCounts: protocolCounts(allNodes),
     totalGroups: snapshot.subscriptions.length,
     totalNodes: snapshot.subscriptions.reduce((total, item) => total + item.nodes.length, 0),
+    xrayCompatibilityCounts: xrayCompatibilityCounts(allNodes),
   };
 }
 
 function nodeSummary(node: ProxyNode): DiagnosticsNodeSummary {
+  const compatibility = xrayOutboundCompatibilityForNode(node);
   return {
     address: redactHost(node.address),
     credentialPresent: Boolean(node.credential),
@@ -350,6 +361,7 @@ function nodeSummary(node: ProxyNode): DiagnosticsNodeSummary {
     security: node.security ?? null,
     sni: node.sni ? redactHost(node.sni) : null,
     transport: node.transport ?? null,
+    xrayCompatibility: compatibility,
   };
 }
 
@@ -357,6 +369,15 @@ function protocolCounts(nodes: ProxyNode[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const node of nodes) {
     counts[node.protocol] = (counts[node.protocol] ?? 0) + 1;
+  }
+  return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function xrayCompatibilityCounts(nodes: ProxyNode[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const node of nodes) {
+    const status = xrayOutboundCompatibilityForNode(node).status;
+    counts[status] = (counts[status] ?? 0) + 1;
   }
   return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)));
 }
