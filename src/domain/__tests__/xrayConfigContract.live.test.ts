@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buildXrayClientConfigDraft, stringifyDraft } from "../configDrafts";
 import { parseSubscription } from "../subscriptions";
+import type { ProxyProtocol } from "../subscriptions";
 import {
   singBoxTuicJsonFixture,
   subscriptionCompatibilityFixtures,
@@ -13,39 +14,58 @@ import {
 const xrayBinaryPath = process.env.TACHYON_XRAY_BINARY_PATH?.trim();
 const itWithXray = xrayBinaryPath ? it : it.skip;
 const xrayExecHelper = vi.fn(runXrayConfigTest);
+const baseLiveContractCases: Array<Omit<LiveContractCase, "portOffset">> = [
+  { fixtureId: "vless-ws-tls", protocol: "vless", secrets: ["vless-ws-uuid"] },
+  { fixtureId: "vmess-ws-tls", protocol: "vmess", secrets: ["vmess-uuid"] },
+  { fixtureId: "trojan-tls", protocol: "trojan", secrets: ["trojan-secret"] },
+  { fixtureId: "shadowsocks-aead", protocol: "shadowsocks", secrets: ["ss-secret"] },
+  { fixtureId: "socks", protocol: "socks", secrets: ["socks-user", "socks-pass"] },
+  { fixtureId: "http", protocol: "http", secrets: ["http-user", "http-pass"] },
+  { fixtureId: "hysteria2", protocol: "hysteria", secrets: ["hy-secret"] },
+  {
+    fixtureId: "wireguard",
+    protocol: "wireguard",
+    secrets: [
+      "kC+rcYLfu5eDay+B38l+3BsaCj3SaHEsLVVDnDcifUY=",
+      "bmksqJz2tpgoNqoSqIxgcSxosP2NfQ2fK10zzju93yI=",
+    ],
+  },
+];
+const liveContractCases: LiveContractCase[] = baseLiveContractCases.map((item, portOffset) => ({
+  ...item,
+  portOffset,
+}));
 
 beforeEach(() => {
   xrayExecHelper.mockClear();
 });
 
 describe("live Xray config contract", () => {
-  itWithXray("generates an xray-client.json accepted by xray run -test -config", () => {
-    const [node] = parseSubscription(fixturePayload("xray-full-outbound-json"));
-    expect(node).toMatchObject({
-      name: "Xray Full Trojan TLS",
-      protocol: "trojan",
-      address: "xray-trojan.example.com",
-      port: 443,
-    });
+  itWithXray.each(liveContractCases)(
+    "generates an xray-client.json for $protocol accepted by xray run -test -config",
+    ({ fixtureId, protocol, secrets, portOffset }) => {
+      const [node] = parseSubscription(fixturePayload(fixtureId));
+      expect(node).toMatchObject({ protocol });
 
-    const config = buildXrayClientConfigDraft(node, {
-      enableStats: false,
-      httpListen: "127.0.0.1",
-      httpPort: 19081,
-      routingMode: "global",
-      socksListen: "127.0.0.1",
-      socksPort: 19080,
-    });
-    const tempDir = mkdtempSync(join(tmpdir(), "tachyon-prism-xray-contract-"));
-    const configPath = join(tempDir, "xray-client.json");
+      const config = buildXrayClientConfigDraft(node, {
+        enableStats: false,
+        httpListen: "127.0.0.1",
+        httpPort: 19081 + portOffset * 2,
+        routingMode: "global",
+        socksListen: "127.0.0.1",
+        socksPort: 19080 + portOffset * 2,
+      });
+      const tempDir = mkdtempSync(join(tmpdir(), "tachyon-prism-xray-contract-"));
+      const configPath = join(tempDir, "xray-client.json");
 
-    try {
-      writeFileSync(configPath, stringifyDraft(config), "utf8");
-      xrayExecHelper(xrayBinaryPath!, configPath, ["xray-trojan-secret"]);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+      try {
+        writeFileSync(configPath, stringifyDraft(config), "utf8");
+        xrayExecHelper(xrayBinaryPath!, configPath, secrets);
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("blocks TUIC before any xray exec helper is called", () => {
     const [node] = parseSubscription(singBoxTuicJsonFixture);
@@ -73,6 +93,13 @@ function fixturePayload(id: string): string {
     throw new Error(`Missing subscription fixture: ${id}`);
   }
   return fixture.payload;
+}
+
+interface LiveContractCase {
+  fixtureId: string;
+  portOffset: number;
+  protocol: ProxyProtocol;
+  secrets: string[];
 }
 
 function runXrayConfigTest(binaryPath: string, configPath: string, secrets: string[]): void {

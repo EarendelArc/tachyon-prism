@@ -34,6 +34,9 @@ const vmessWsTls = Buffer.from(
     scy: "auto",
   }),
 ).toString("base64");
+const wireGuardPrivateKey = "kC+rcYLfu5eDay+B38l+3BsaCj3SaHEsLVVDnDcifUY=";
+const wireGuardPublicKey = "xvLr+tvUJKCD3amfTkG8jbN/rj3q2j/Wi1BTt2LjNn0=";
+const wireGuardPreSharedKey = "bmksqJz2tpgoNqoSqIxgcSxosP2NfQ2fK10zzju93yI=";
 
 export const singBoxTuicJsonFixture = JSON.stringify({
   outbounds: [
@@ -330,8 +333,7 @@ export const subscriptionCompatibilityFixtures: SubscriptionCompatibilityFixture
   },
   {
     id: "wireguard",
-    payload:
-      "wireguard://wg-public-key@wg.example.com:51820?secretKey=wg-private-key&address=10.8.0.2/32,fd00::2/128&reserved=1,2,3&mtu=1420&preSharedKey=wg-psk&keepAlive=25&allowedIPs=0.0.0.0/0,::/0#WireGuard Node",
+    payload: `wireguard://${encodeURIComponent(wireGuardPublicKey)}@wg.example.com:51820?secretKey=${encodeURIComponent(wireGuardPrivateKey)}&address=10.8.0.2/32,fd00::2/128&reserved=1,2,3&mtu=1420&preSharedKey=${encodeURIComponent(wireGuardPreSharedKey)}&keepAlive=25&allowedIPs=0.0.0.0/0,::/0#WireGuard Node`,
     expected: {
       name: "WireGuard Node",
       protocol: "wireguard",
@@ -341,15 +343,15 @@ export const subscriptionCompatibilityFixtures: SubscriptionCompatibilityFixture
     outboundMatch: {
       protocol: "wireguard",
       settings: {
-        secretKey: "wg-private-key",
+        secretKey: wireGuardPrivateKey,
         address: ["10.8.0.2/32", "fd00::2/128"],
         reserved: [1, 2, 3],
         mtu: 1420,
         peers: [
           {
             endpoint: "wg.example.com:51820",
-            publicKey: "wg-public-key",
-            preSharedKey: "wg-psk",
+            publicKey: wireGuardPublicKey,
+            preSharedKey: wireGuardPreSharedKey,
             keepAlive: 25,
             allowedIPs: ["0.0.0.0/0", "::/0"],
           },
