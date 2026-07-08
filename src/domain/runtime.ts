@@ -195,10 +195,12 @@ export interface TachyonCorePreflightResult {
   ok: boolean;
   overall: string;
   checks: TachyonCorePreflightCheck[];
-  rawReport: unknown;
+  structuredReport: unknown;
   command: string;
   stdout: string;
+  stdoutTruncated: boolean;
   stderr: string;
+  stderrTruncated: boolean;
   exitCode: number | null;
   error: string | null;
 }
@@ -793,9 +795,11 @@ function previewTachyonCorePreflight(): TachyonCorePreflightResult {
     exitCode: 0,
     ok: true,
     overall: "warning",
-    rawReport: null,
+    structuredReport: null,
     stderr: "",
+    stderrTruncated: false,
     stdout: "",
+    stdoutTruncated: false,
     supported: true,
   };
 }

@@ -270,10 +270,12 @@ struct TachyonCorePreflightResult {
     ok: bool,
     overall: String,
     checks: Vec<TachyonCorePreflightCheck>,
-    raw_report: Value,
+    structured_report: Value,
     command: String,
     stdout: String,
+    stdout_truncated: bool,
     stderr: String,
+    stderr_truncated: bool,
     exit_code: Option<i32>,
     error: Option<String>,
 }
@@ -304,6 +306,7 @@ const WINTUN_VERSION: &str = "0.14.1";
 const WINTUN_ARCHIVE_NAME: &str = "wintun-0.14.1.zip";
 const WINTUN_DOWNLOAD_URL: &str = "https://www.wintun.net/builds/wintun-0.14.1.zip";
 const WINTUN_SHA256: &str = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51";
+const PREFLIGHT_OUTPUT_LIMIT_BYTES: usize = 8 * 1024;
 
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -1070,17 +1073,26 @@ fn validation_command_line(binary: &Path, args_before_config: &[&str], config: &
 }
 
 fn preflight_command_line(binary: &Path, config: &Path) -> String {
+    let binary_name = path_file_name_for_display(binary).unwrap_or("tachyon-core");
+    let config_label = path_file_name_for_display(config).unwrap_or("<config>");
     [
-        path_string(binary),
+        binary_name.to_string(),
         "preflight".to_string(),
         "--config".to_string(),
-        path_string(config),
+        config_label.to_string(),
         "--json".to_string(),
     ]
     .into_iter()
     .map(|part| quote_command_part(&part))
     .collect::<Vec<_>>()
     .join(" ")
+}
+
+fn path_file_name_for_display(path: &Path) -> Option<&str> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .or_else(|| path.to_str()?.rsplit(['\\', '/']).next())
+        .filter(|name| !name.is_empty())
 }
 
 fn quote_command_part(part: &str) -> String {
@@ -1125,6 +1137,154 @@ fn config_validation_result(
     }
 }
 
+struct SanitizedPreflightOutput {
+    text: String,
+    truncated: bool,
+}
+
+fn sanitize_preflight_output(output: &str) -> SanitizedPreflightOutput {
+    let redacted = redact_sensitive_paths(output);
+    let mut end = redacted.len().min(PREFLIGHT_OUTPUT_LIMIT_BYTES);
+    while !redacted.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = end < redacted.len();
+    SanitizedPreflightOutput {
+        text: redacted[..end].to_string(),
+        truncated,
+    }
+}
+
+fn sanitize_preflight_string(value: &str) -> String {
+    sanitize_preflight_output(value).text
+}
+
+fn sanitize_preflight_report(value: Value) -> Value {
+    let Value::Object(object) = value else {
+        return Value::Null;
+    };
+    let mut report = serde_json::Map::new();
+    for key in [
+        "overall_status",
+        "overall",
+        "status",
+        "result",
+        "client_requires_tun",
+        "auto_route",
+        "checks",
+    ] {
+        if let Some(value) = object.get(key) {
+            report.insert(key.to_string(), sanitize_preflight_value(value));
+        }
+    }
+    Value::Object(report)
+}
+
+fn sanitize_preflight_value(value: &Value) -> Value {
+    match value {
+        Value::String(value) => Value::String(sanitize_preflight_string(value)),
+        Value::Array(values) => Value::Array(values.iter().map(sanitize_preflight_value).collect()),
+        Value::Object(object) => {
+            let mut sanitized = serde_json::Map::new();
+            for (key, value) in object {
+                if is_raw_preflight_field(key) {
+                    continue;
+                }
+                sanitized.insert(key.clone(), sanitize_preflight_value(value));
+            }
+            Value::Object(sanitized)
+        }
+        _ => value.clone(),
+    }
+}
+
+fn is_raw_preflight_field(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "stdout" | "stderr" | "command" | "raw_report" | "rawreport"
+    )
+}
+
+fn redact_sensitive_paths(value: &str) -> String {
+    let mut redacted = value.to_string();
+    for path in sensitive_user_path_prefixes() {
+        redacted = replace_ascii_case_insensitive(&redacted, &path, "<user-dir>");
+        redacted = replace_ascii_case_insensitive(
+            &redacted,
+            &path.replace('\\', "\\\\"),
+            "<user-dir>",
+        );
+        redacted = replace_ascii_case_insensitive(
+            &redacted,
+            &path.replace('\\', "/"),
+            "<user-dir>",
+        );
+    }
+    redacted = redact_after_marker(&redacted, "C:\\Users\\");
+    redacted = redact_after_marker(&redacted, "C:\\\\Users\\\\");
+    redacted = redact_after_marker(&redacted, "C:/Users/");
+    redacted = redact_after_marker(&redacted, "/Users/");
+    redact_after_marker(&redacted, "/home/")
+}
+
+fn sensitive_user_path_prefixes() -> Vec<String> {
+    let mut prefixes = Vec::new();
+    for key in ["USERPROFILE", "HOME"] {
+        if let Ok(value) = std::env::var(key) {
+            if !value.trim().is_empty() {
+                prefixes.push(value);
+            }
+        }
+    }
+    if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+        let home = format!("{drive}{path}");
+        if !home.trim().is_empty() {
+            prefixes.push(home);
+        }
+    }
+    prefixes.sort();
+    prefixes.dedup();
+    prefixes
+}
+
+fn replace_ascii_case_insensitive(input: &str, needle: &str, replacement: &str) -> String {
+    if needle.is_empty() {
+        return input.to_string();
+    }
+    let input_lower = input.to_ascii_lowercase();
+    let needle_lower = needle.to_ascii_lowercase();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while let Some(offset) = input_lower[index..].find(&needle_lower) {
+        let match_start = index + offset;
+        output.push_str(&input[index..match_start]);
+        output.push_str(replacement);
+        index = match_start + needle.len();
+    }
+    output.push_str(&input[index..]);
+    output
+}
+
+fn redact_after_marker(input: &str, marker: &str) -> String {
+    let lower_input = input.to_ascii_lowercase();
+    let lower_marker = marker.to_ascii_lowercase();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while let Some(offset) = lower_input[index..].find(&lower_marker) {
+        let match_start = index + offset;
+        let user_start = match_start + marker.len();
+        let user_end = input[user_start..]
+            .find(|character| matches!(character, '\\' | '/' | '"' | '\'' | ' ' | '\r' | '\n'))
+            .map(|offset| user_start + offset)
+            .unwrap_or(input.len());
+        output.push_str(&input[index..match_start]);
+        output.push_str("<user-dir>");
+        index = user_end;
+    }
+    output.push_str(&input[index..]);
+    output
+}
+
 fn tachyon_core_preflight_result(
     command: String,
     output: Result<Output, String>,
@@ -1132,6 +1292,7 @@ fn tachyon_core_preflight_result(
     let output = match output {
         Ok(output) => output,
         Err(error) => {
+            let error = sanitize_preflight_string(&error);
             return TachyonCorePreflightResult {
                 supported: true,
                 ok: false,
@@ -1143,10 +1304,12 @@ fn tachyon_core_preflight_result(
                     details: String::new(),
                     raw: Value::Null,
                 }],
-                raw_report: Value::Null,
+                structured_report: Value::Null,
                 command,
                 stdout: String::new(),
+                stdout_truncated: false,
                 stderr: String::new(),
+                stderr_truncated: false,
                 exit_code: None,
                 error: Some(error),
             };
@@ -1154,11 +1317,19 @@ fn tachyon_core_preflight_result(
     };
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let combined = validation_details(&stdout, &stderr);
+    let sanitized_stdout = sanitize_preflight_output(&stdout);
+    let sanitized_stderr = sanitize_preflight_output(&stderr);
+    let combined = validation_details(&sanitized_stdout.text, &sanitized_stderr.text);
     let exit_code = output.status.code();
 
     if let Ok(value) = serde_json::from_str::<Value>(&stdout) {
-        return parse_tachyon_core_preflight_json(command, stdout, stderr, exit_code, value);
+        return parse_tachyon_core_preflight_json(
+            command,
+            sanitized_stdout,
+            sanitized_stderr,
+            exit_code,
+            value,
+        );
     }
 
     if is_unsupported_preflight_output(&combined) {
@@ -1167,10 +1338,12 @@ fn tachyon_core_preflight_result(
             ok: true,
             overall: "unsupported".to_string(),
             checks: vec![],
-            raw_report: Value::Null,
+            structured_report: Value::Null,
             command,
-            stdout,
-            stderr,
+            stdout: sanitized_stdout.text,
+            stdout_truncated: sanitized_stdout.truncated,
+            stderr: sanitized_stderr.text,
+            stderr_truncated: sanitized_stderr.truncated,
             exit_code,
             error: Some("Core version lacks preflight; validate only".to_string()),
         };
@@ -1187,10 +1360,12 @@ fn tachyon_core_preflight_result(
             details: combined.clone(),
             raw: Value::Null,
         }],
-        raw_report: Value::Null,
+        structured_report: Value::Null,
         command,
-        stdout,
-        stderr,
+        stdout: sanitized_stdout.text,
+        stdout_truncated: sanitized_stdout.truncated,
+        stderr: sanitized_stderr.text,
+        stderr_truncated: sanitized_stderr.truncated,
         exit_code,
         error: Some(combined),
     }
@@ -1198,8 +1373,8 @@ fn tachyon_core_preflight_result(
 
 fn parse_tachyon_core_preflight_json(
     command: String,
-    stdout: String,
-    stderr: String,
+    stdout: SanitizedPreflightOutput,
+    stderr: SanitizedPreflightOutput,
     exit_code: Option<i32>,
     value: Value,
 ) -> TachyonCorePreflightResult {
@@ -1232,10 +1407,12 @@ fn parse_tachyon_core_preflight_json(
         ok,
         overall,
         checks,
-        raw_report: value,
+        structured_report: sanitize_preflight_report(value),
         command,
-        stdout,
-        stderr,
+        stdout: stdout.text,
+        stdout_truncated: stdout.truncated,
+        stderr: stderr.text,
+        stderr_truncated: stderr.truncated,
         exit_code,
         error,
     }
@@ -1246,10 +1423,13 @@ fn parse_tachyon_core_preflight_check(value: &Value) -> TachyonCorePreflightChec
         code: first_string(value, &["code", "name", "id", "check"])
             .unwrap_or_else(|| "UNKNOWN".to_string()),
         status: check_status(value),
-        message: first_string(value, &["message", "summary", "title"]).unwrap_or_default(),
-        details: first_string(value, &["details", "detail", "hint", "reason", "remediation"])
+        message: first_string(value, &["message", "summary", "title"])
+            .map(|message| sanitize_preflight_string(&message))
             .unwrap_or_default(),
-        raw: value.clone(),
+        details: first_string(value, &["details", "detail", "hint", "reason", "remediation"])
+            .map(|details| sanitize_preflight_string(&details))
+            .unwrap_or_default(),
+        raw: sanitize_preflight_value(value),
     }
 }
 
@@ -5504,7 +5684,85 @@ stat: <
         assert_eq!(result.checks[1].code, "AUTO_ROUTE_DISABLED");
         assert_eq!(result.checks[1].status, "warn");
         assert!(result.checks[1].details.contains("Prism/Xray-owned"));
-        assert!(result.raw_report.get("client_requires_tun").is_some());
+        assert!(result.structured_report.get("client_requires_tun").is_some());
+    }
+
+    #[test]
+    fn tachyon_core_preflight_truncates_long_stderr() {
+        let long_stderr = "stderr line\n".repeat(900);
+        let output = test_output(1, b"not-json", long_stderr.as_bytes());
+
+        let result = tachyon_core_preflight_result(
+            "tachyon-core preflight --config client.json --json".to_string(),
+            Ok(output),
+        );
+
+        assert!(!result.ok);
+        assert!(result.stderr_truncated);
+        assert!(result.stderr.len() <= PREFLIGHT_OUTPUT_LIMIT_BYTES);
+        assert!(result.error.unwrap().len() <= PREFLIGHT_OUTPUT_LIMIT_BYTES + "not-json\n".len());
+    }
+
+    #[test]
+    fn tachyon_core_preflight_redacts_user_and_config_paths() {
+        let output = test_output(
+            1,
+            br#"{
+  "overall": "error",
+  "stdout": "raw stdout should not be retained",
+  "checks": [
+    {"code": "CONFIG_VALID", "status": "error", "message": "config failed at C:\\Users\\alice\\AppData\\Roaming\\tachyon-prism\\client.json", "details": "see /Users/alice/.config/tachyon-prism/client.json", "command": "tachyon-core --config C:\\Users\\alice\\client.json"}
+  ]
+}"#,
+            b"C:\\Users\\alice\\AppData\\Roaming\\tachyon-prism\\client.json failed",
+        );
+
+        let result = tachyon_core_preflight_result(
+            preflight_command_line(
+                Path::new("C:\\Users\\alice\\bin\\tachyon-core.exe"),
+                Path::new("C:\\Users\\alice\\AppData\\Roaming\\tachyon-prism\\client.json"),
+            ),
+            Ok(output),
+        );
+
+        let serialized = serde_json::to_string(&result).expect("preflight result serializes");
+        let structured_report =
+            serde_json::to_string(&result.structured_report).expect("structured report serializes");
+        assert!(serialized.contains("<user-dir>"));
+        assert!(!serialized.contains("C:\\\\Users\\\\alice"));
+        assert!(!serialized.contains("/Users/alice"));
+        assert!(!structured_report.contains("raw stdout should not be retained"));
+        assert_eq!(result.command, "tachyon-core.exe preflight --config client.json --json");
+    }
+
+    #[test]
+    fn tachyon_core_preflight_keeps_structured_checks_available() {
+        let output = test_output(
+            0,
+            br#"{
+  "overall_status": "warn",
+  "client_requires_tun": true,
+  "checks": [
+    {"id": "AUTO_ROUTE_DISABLED", "status": "warn", "message": "auto_route=false", "remediation": "expected in Prism"}
+  ]
+}"#,
+            b"",
+        );
+
+        let result = tachyon_core_preflight_result(
+            "tachyon-core preflight --config client.json --json".to_string(),
+            Ok(output),
+        );
+
+        assert_eq!(result.checks[0].code, "AUTO_ROUTE_DISABLED");
+        assert_eq!(
+            result.structured_report["checks"][0]["id"],
+            Value::String("AUTO_ROUTE_DISABLED".to_string())
+        );
+        assert_eq!(
+            result.structured_report["client_requires_tun"],
+            Value::Bool(true)
+        );
     }
 
     #[test]

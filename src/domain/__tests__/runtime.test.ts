@@ -141,9 +141,11 @@ describe("tachyonCore preflight helpers", () => {
       exitCode: 1,
       ok: false,
       overall: "error",
-      rawReport: null,
+      structuredReport: null,
       stderr: "",
+      stderrTruncated: false,
       stdout: "",
+      stdoutTruncated: false,
       supported: true,
     };
 
@@ -159,9 +161,11 @@ describe("tachyonCore preflight helpers", () => {
       exitCode: 2,
       ok: true,
       overall: "unsupported",
-      rawReport: null,
+      structuredReport: null,
       stderr: "unrecognized subcommand",
+      stderrTruncated: false,
       stdout: "",
+      stdoutTruncated: false,
       supported: false,
     };
 
@@ -186,9 +190,11 @@ describe("tachyonCore preflight helpers", () => {
       exitCode: 0,
       ok: false,
       overall: "unknown",
-      rawReport: null,
+      structuredReport: null,
       stderr: "",
+      stderrTruncated: false,
       stdout: "",
+      stdoutTruncated: false,
       supported: true,
     };
 
