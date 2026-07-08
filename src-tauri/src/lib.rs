@@ -265,6 +265,31 @@ struct ConfigValidationResult {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct TachyonCorePreflightResult {
+    supported: bool,
+    ok: bool,
+    overall: String,
+    checks: Vec<TachyonCorePreflightCheck>,
+    raw_report: Value,
+    command: String,
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i32>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TachyonCorePreflightCheck {
+    code: String,
+    status: String,
+    message: String,
+    details: String,
+    raw: Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SystemProxyState {
     supported: bool,
     enabled: bool,
@@ -853,6 +878,29 @@ fn validate_tachyon_core_config(
 }
 
 #[tauri::command]
+fn tachyon_core_preflight(
+    app: tauri::AppHandle,
+    binary_path: Option<String>,
+    config_path: Option<String>,
+) -> Result<TachyonCorePreflightResult, String> {
+    let settings = load_runtime_settings(&app)?;
+    let paths = draft_paths(&app)?;
+    let binary = PathBuf::from(clean_path_input(
+        binary_path
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&settings.tachyon_core_binary_path),
+    ));
+    let config = PathBuf::from(clean_path_input(
+        config_path
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&paths.core_config_path),
+    ));
+    preflight_tachyon_core_config_file(&binary, &config)
+}
+
+#[tauri::command]
 fn system_proxy_status(app: tauri::AppHandle) -> Result<SystemProxyState, String> {
     let settings = load_runtime_settings(&app)?;
     Ok(platform_system_proxy_status(&settings))
@@ -954,6 +1002,36 @@ fn validate_tachyon_core_config_file(
     )
 }
 
+fn preflight_tachyon_core_config_file(
+    binary: &Path,
+    config: &Path,
+) -> Result<TachyonCorePreflightResult, String> {
+    if !binary.is_file() {
+        return Err(format!(
+            "tachyon-core binary not found: {}",
+            binary.display()
+        ));
+    }
+    if !config.is_file() {
+        return Err(format!(
+            "tachyon-core config not found: {}",
+            config.display()
+        ));
+    }
+
+    let args_before_config = ["preflight", "--config"];
+    let command_line = preflight_command_line(binary, config);
+    let mut command = Command::new(binary);
+    command.args(args_before_config);
+    command.arg(config);
+    command.arg("--json");
+    if let Some(work_dir) = config.parent().or_else(|| binary.parent()) {
+        command.current_dir(work_dir);
+    }
+    let output = command_output_with_timeout(command, Duration::from_secs(8));
+    Ok(tachyon_core_preflight_result(command_line, output))
+}
+
 fn validate_config_with_command(
     target: &str,
     binary: &Path,
@@ -989,6 +1067,20 @@ fn validation_command_line(binary: &Path, args_before_config: &[&str], config: &
         .map(|part| quote_command_part(&part))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn preflight_command_line(binary: &Path, config: &Path) -> String {
+    [
+        path_string(binary),
+        "preflight".to_string(),
+        "--config".to_string(),
+        path_string(config),
+        "--json".to_string(),
+    ]
+    .into_iter()
+    .map(|part| quote_command_part(&part))
+    .collect::<Vec<_>>()
+    .join(" ")
 }
 
 fn quote_command_part(part: &str) -> String {
@@ -1031,6 +1123,201 @@ fn config_validation_result(
             error: Some(error),
         },
     }
+}
+
+fn tachyon_core_preflight_result(
+    command: String,
+    output: Result<Output, String>,
+) -> TachyonCorePreflightResult {
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            return TachyonCorePreflightResult {
+                supported: true,
+                ok: false,
+                overall: "error".to_string(),
+                checks: vec![TachyonCorePreflightCheck {
+                    code: "PREFLIGHT_EXECUTION".to_string(),
+                    status: "error".to_string(),
+                    message: error.clone(),
+                    details: String::new(),
+                    raw: Value::Null,
+                }],
+                raw_report: Value::Null,
+                command,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                error: Some(error),
+            };
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let combined = validation_details(&stdout, &stderr);
+    let exit_code = output.status.code();
+
+    if let Ok(value) = serde_json::from_str::<Value>(&stdout) {
+        return parse_tachyon_core_preflight_json(command, stdout, stderr, exit_code, value);
+    }
+
+    if is_unsupported_preflight_output(&combined) {
+        return TachyonCorePreflightResult {
+            supported: false,
+            ok: true,
+            overall: "unsupported".to_string(),
+            checks: vec![],
+            raw_report: Value::Null,
+            command,
+            stdout,
+            stderr,
+            exit_code,
+            error: Some("Core version lacks preflight; validate only".to_string()),
+        };
+    }
+
+    TachyonCorePreflightResult {
+        supported: true,
+        ok: false,
+        overall: "error".to_string(),
+        checks: vec![TachyonCorePreflightCheck {
+            code: "PREFLIGHT_JSON".to_string(),
+            status: "error".to_string(),
+            message: "tachyon-core preflight did not return JSON".to_string(),
+            details: combined.clone(),
+            raw: Value::Null,
+        }],
+        raw_report: Value::Null,
+        command,
+        stdout,
+        stderr,
+        exit_code,
+        error: Some(combined),
+    }
+}
+
+fn parse_tachyon_core_preflight_json(
+    command: String,
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i32>,
+    value: Value,
+) -> TachyonCorePreflightResult {
+    let overall = first_string(&value, &["overall_status", "overall", "status", "result"])
+        .unwrap_or_else(|| inferred_preflight_overall(&value));
+    let checks = value
+        .get("checks")
+        .and_then(Value::as_array)
+        .map(|checks| {
+            checks
+                .iter()
+                .map(parse_tachyon_core_preflight_check)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let normalized_overall = overall.to_ascii_lowercase();
+    let has_error_check = checks
+        .iter()
+        .any(|check| matches!(check.status.as_str(), "error" | "failed" | "fail"));
+    let ok =
+        !has_error_check && !matches!(normalized_overall.as_str(), "error" | "failed" | "fail");
+    let error = if ok {
+        None
+    } else {
+        Some(preflight_error_summary(&checks))
+    };
+
+    TachyonCorePreflightResult {
+        supported: true,
+        ok,
+        overall,
+        checks,
+        raw_report: value,
+        command,
+        stdout,
+        stderr,
+        exit_code,
+        error,
+    }
+}
+
+fn parse_tachyon_core_preflight_check(value: &Value) -> TachyonCorePreflightCheck {
+    TachyonCorePreflightCheck {
+        code: first_string(value, &["code", "name", "id", "check"])
+            .unwrap_or_else(|| "UNKNOWN".to_string()),
+        status: check_status(value),
+        message: first_string(value, &["message", "summary", "title"]).unwrap_or_default(),
+        details: first_string(value, &["details", "detail", "hint", "reason", "remediation"])
+            .unwrap_or_default(),
+        raw: value.clone(),
+    }
+}
+
+fn inferred_preflight_overall(value: &Value) -> String {
+    let Some(checks) = value.get("checks").and_then(Value::as_array) else {
+        return "ok".to_string();
+    };
+    if checks
+        .iter()
+        .any(|check| matches!(check_status(check).as_str(), "error" | "failed" | "fail"))
+    {
+        return "error".to_string();
+    }
+    if checks
+        .iter()
+        .any(|check| matches!(check_status(check).as_str(), "warn" | "warning"))
+    {
+        return "warn".to_string();
+    }
+    "ok".to_string()
+}
+
+fn check_status(value: &Value) -> String {
+    first_string(value, &["status", "result", "state"])
+        .unwrap_or_else(|| "unknown".to_string())
+        .to_ascii_lowercase()
+}
+
+fn first_string(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| value.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn preflight_error_summary(checks: &[TachyonCorePreflightCheck]) -> String {
+    let summary = checks
+        .iter()
+        .filter(|check| matches!(check.status.as_str(), "error" | "failed" | "fail"))
+        .map(|check| {
+            let message = if check.message.is_empty() {
+                check.details.as_str()
+            } else {
+                check.message.as_str()
+            };
+            if message.is_empty() {
+                check.code.clone()
+            } else {
+                format!("{}: {message}", check.code)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    if summary.is_empty() {
+        "tachyon-core preflight reported an error".to_string()
+    } else {
+        summary
+    }
+}
+
+fn is_unsupported_preflight_output(output: &str) -> bool {
+    let output = output.to_ascii_lowercase();
+    output.contains("unrecognized subcommand")
+        || output.contains("unknown subcommand")
+        || output.contains("unexpected argument 'preflight'")
+        || output.contains("invalid subcommand")
+        || output.contains("no such command")
 }
 
 fn validation_details(stdout: &str, stderr: &str) -> String {
@@ -5162,6 +5449,103 @@ stat: <
     }
 
     #[test]
+    fn tachyon_core_preflight_parses_json_checks() {
+        let output = test_output(
+            1,
+            br#"{
+  "overall": "error",
+  "checks": [
+    {"code": "CONFIG_VALID", "status": "ok", "message": "config parsed"},
+    {"code": "TUN_PRIVILEGE", "status": "error", "message": "administrator required", "details": "Run Prism as administrator"}
+  ]
+}"#,
+            b"",
+        );
+
+        let result = tachyon_core_preflight_result(
+            "tachyon-core preflight --config client.json --json".to_string(),
+            Ok(output),
+        );
+
+        assert!(result.supported);
+        assert!(!result.ok);
+        assert_eq!(result.overall, "error");
+        assert_eq!(result.checks.len(), 2);
+        assert_eq!(result.checks[1].code, "TUN_PRIVILEGE");
+        assert_eq!(result.checks[1].status, "error");
+        assert!(result.error.unwrap().contains("administrator required"));
+    }
+
+    #[test]
+    fn tachyon_core_preflight_parses_core_doctor_json_contract() {
+        let output = test_output(
+            0,
+            br#"{
+  "overall_status": "warn",
+  "client_requires_tun": true,
+  "auto_route": false,
+  "checks": [
+    {"id": "CLIENT_REQUIRES_TUN", "status": "ok", "message": "Client mode starts a TUN device before the packet pipeline.", "remediation": ""},
+    {"id": "AUTO_ROUTE_DISABLED", "status": "warn", "message": "auto_route=false means Core will not take over the system default route; it does not mean TUN is unnecessary in client mode.", "remediation": "Keep auto_route=false for Prism/Xray-owned general proxy traffic."}
+  ]
+}"#,
+            b"",
+        );
+
+        let result = tachyon_core_preflight_result(
+            "tachyon-core preflight --config client.json --json".to_string(),
+            Ok(output),
+        );
+
+        assert!(result.supported);
+        assert!(result.ok);
+        assert_eq!(result.overall, "warn");
+        assert_eq!(result.checks[0].code, "CLIENT_REQUIRES_TUN");
+        assert_eq!(result.checks[1].code, "AUTO_ROUTE_DISABLED");
+        assert_eq!(result.checks[1].status, "warn");
+        assert!(result.checks[1].details.contains("Prism/Xray-owned"));
+        assert!(result.raw_report.get("client_requires_tun").is_some());
+    }
+
+    #[test]
+    fn tachyon_core_preflight_reports_old_core_as_supported_fallback() {
+        let output = test_output(2, b"", b"error: unrecognized subcommand 'preflight'\n");
+
+        let result = tachyon_core_preflight_result(
+            "tachyon-core preflight --config client.json --json".to_string(),
+            Ok(output),
+        );
+
+        assert!(!result.supported);
+        assert!(result.ok);
+        assert_eq!(result.overall, "unsupported");
+        assert_eq!(
+            result.error.as_deref(),
+            Some("Core version lacks preflight; validate only"),
+        );
+    }
+
+    #[cfg(unix)]
+    fn test_output(code: i32, stdout: &[u8], stderr: &[u8]) -> Output {
+        use std::os::unix::process::ExitStatusExt;
+        Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn test_output(code: u32, stdout: &[u8], stderr: &[u8]) -> Output {
+        use std::os::windows::process::ExitStatusExt;
+        Output {
+            status: std::process::ExitStatus::from_raw(code),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    #[test]
     fn runtime_privilege_status_from_flag_marks_tun_capability() {
         let elevated = runtime_privilege_status_from_flag("windows", true, "ok");
         assert!(elevated.elevated);
@@ -5343,6 +5727,7 @@ pub fn run() {
             test_xray_local_proxies,
             validate_xray_config,
             validate_tachyon_core_config,
+            tachyon_core_preflight,
             system_proxy_status,
             enable_system_proxy,
             disable_system_proxy,

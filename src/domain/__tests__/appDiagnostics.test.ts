@@ -34,4 +34,23 @@ describe("diagnostics UI wiring", () => {
     expect(stylesSource).toContain("overflow-wrap: anywhere");
     expect(stylesSource).toContain("white-space: normal");
   });
+
+  it("keeps Tachyon Core preflight separate from Xray startup", () => {
+    expect(appSource).toContain("preflightTachyonCore");
+    expect(appSource).toContain("assertTachyonCoreStartable(paths, settings)");
+    expect(appSource).toContain("kind === \"xray\"");
+    expect(appSource).toContain("await startXray(settings.xrayBinaryPath, paths.xrayConfigPath)");
+    expect(appSource).toContain("await startTachyonCore(settings.tachyonCoreBinaryPath, paths.coreConfigPath)");
+  });
+
+  it("explains TUN semantics without claiming game acceleration can run without TUN routing", () => {
+    expect(appSource).toContain("Core client still needs TUN device capability");
+    expect(appSource).toContain("Xray local HTTP/SOCKS proxy can be usable even when Tachyon Core game acceleration is blocked");
+    expect(appSource).not.toContain("Tachyon game acceleration can run without enabling OS TUN routing");
+  });
+
+  it("includes Tachyon Core failure details in Start All messages", () => {
+    expect(appSource).toContain("tachyonStart.error || \"Tachyon Core game acceleration unavailable\"");
+    expect(appSource).toContain("xrayStart.error || \"Xray failed\"");
+  });
 });

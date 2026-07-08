@@ -44,11 +44,15 @@ import {
   installLatestXray,
   installManagedBinary,
   installWintunSidecar,
+  preflightTachyonCore,
   saveRuntimeSettings,
   startTachyonCore,
   startXray,
   stopTachyonCore,
   stopXray,
+  tachyonCorePreflightFallbackMessage,
+  tachyonCorePreflightReadinessMessage,
+  tachyonCorePreflightStartBlockReason,
   tachyonIpcBaseUrl,
   testXrayLocalProxies,
   testTcpLatency,
@@ -69,6 +73,8 @@ import {
   type RuntimeSettings,
   type RuntimeStatus,
   type SystemProxyState,
+  type TachyonCorePreflightCheck,
+  type TachyonCorePreflightResult,
   type TcpLatencyResult,
   type XrayTrafficStats,
 } from "./domain/runtime";
@@ -133,6 +139,11 @@ type ReadinessState = "error" | "ok" | "warning";
 type SubscriptionViewMode = "grid" | "list";
 type ValidationResults = Partial<Record<ManagedBinaryKind, ConfigValidationResult>>;
 type ProbeState = "error" | "idle" | "ok" | "running";
+
+interface RuntimeStartResult {
+  error: string | null;
+  ok: boolean;
+}
 
 interface XrayProbeStatus {
   error: string | null;
@@ -815,7 +826,7 @@ function privilegeLabel(status: RuntimePrivilegeStatus | null): string {
   if (!status) {
     return "unknown";
   }
-  return status.canManageTun ? "ready" : "not required in alpha";
+  return status.canManageTun ? "TUN capable" : "needs admin/TUN capability";
 }
 
 function formatBytes(value: number | null): string {
@@ -1014,6 +1025,46 @@ function sidecarReadiness(binary: ManagedBinaryInfo | undefined): ReadinessItem[
       label: dependency.name,
       state: dependency.exists ? "ok" : "error",
     }));
+}
+
+function preflightCheckByCode(
+  preflight: TachyonCorePreflightResult | null,
+  codes: string[],
+): TachyonCorePreflightCheck | null {
+  const wanted = new Set(codes.map((code) => code.toUpperCase()));
+  return (
+    preflight?.checks.find((check) => wanted.has(check.code.toUpperCase())) ?? null
+  );
+}
+
+function checkReadiness(
+  check: TachyonCorePreflightCheck | null,
+  label: string,
+  fallback: ReadinessItem,
+): ReadinessItem {
+  if (!check) {
+    return fallback;
+  }
+  const status = check.status.toLowerCase();
+  return {
+    detail: check.message || check.details || fallback.detail,
+    label,
+    state: ["error", "failed", "fail"].includes(status)
+      ? "error"
+      : ["warning", "warn", "skipped"].includes(status)
+        ? "warning"
+        : "ok",
+  };
+}
+
+function preflightReadinessState(preflight: TachyonCorePreflightResult): ReadinessState {
+  if (!preflight.supported) {
+    return "warning";
+  }
+  if (!preflight.ok) {
+    return preflight.overall.toLowerCase() === "error" ? "error" : "warning";
+  }
+  return ["warn", "warning"].includes(preflight.overall.toLowerCase()) ? "warning" : "ok";
 }
 
 function draftText(
@@ -1261,6 +1312,7 @@ export function App() {
     Partial<Record<ManagedBinaryKind, CoreReleaseDiagnostics>>
   >({});
   const [validationResults, setValidationResults] = useState<ValidationResults>({});
+  const [tachyonPreflight, setTachyonPreflight] = useState<TachyonCorePreflightResult | null>(null);
   const [binaryBusy, setBinaryBusy] = useState(false);
   const [message, setMessage] = useState("Ready");
   const [alwaysOnTop, setAlwaysOnTop] = useState(false);
@@ -1386,18 +1438,113 @@ export function App() {
       items.push(...sidecarReadiness(coreBinary));
     }
     items.push(
-      runtimePrivilege?.canManageTun
+      tachyonPreflight
         ? {
-            detail: runtimePrivilege.message,
-            label: "TUN privilege",
-            state: "ok",
+            detail: tachyonCorePreflightReadinessMessage(tachyonPreflight),
+            label: "Tachyon Core preflight",
+            state: preflightReadinessState(tachyonPreflight),
           }
         : {
-            detail:
-              runtimePrivilege?.message ||
-              "TUN takeover is disabled in alpha; Tachyon game acceleration can run without enabling OS TUN routing.",
-            label: "TUN privilege",
+            detail: "Run Validate or Start to execute tachyon-core preflight --json.",
+            label: "Tachyon Core preflight",
             state: "warning",
+          },
+    );
+    items.push(
+      checkReadiness(
+        preflightCheckByCode(tachyonPreflight, ["CONFIG_VALID"]),
+        "Tachyon config valid",
+        drafts.core && !drafts.coreError
+          ? {
+              detail: "Client JSON can be generated; preflight has not confirmed Core validation yet.",
+              label: "Tachyon config valid",
+              state: "warning",
+            }
+          : {
+              detail: drafts.coreError || "Tachyon config needs a server address.",
+              label: "Tachyon config valid",
+              state: "error",
+            },
+      ),
+    );
+    items.push(
+      checkReadiness(
+        preflightCheckByCode(tachyonPreflight, ["CLIENT_REQUIRES_TUN", "TUN_REQUIRED"]),
+        "Client requires TUN",
+        {
+          detail: "Tachyon Core client mode uses a TUN device for game acceleration.",
+          label: "Client requires TUN",
+          state: "warning",
+        },
+      ),
+    );
+    items.push(
+      checkReadiness(
+        preflightCheckByCode(tachyonPreflight, ["AUTO_ROUTE_DISABLED", "AUTO_ROUTE_SEMANTICS"]),
+        "auto_route=false",
+        {
+          detail: "auto_route=false avoids taking over the OS default route, but Core client still needs TUN device capability.",
+          label: "auto_route=false",
+          state: "warning",
+        },
+      ),
+    );
+    items.push(
+      checkReadiness(
+        preflightCheckByCode(tachyonPreflight, ["WINTUN_DLL_PRESENT"]),
+        "Wintun sidecar",
+        {
+          detail: coreBinary?.sidecarDependencies.some((dependency) => dependency.required && dependency.exists)
+            ? "Required Wintun sidecar is present."
+            : "Windows Tachyon Core requires wintun.dll next to the binary.",
+          label: "Wintun sidecar",
+          state: coreBinary?.sidecarDependencies.some((dependency) => dependency.required && dependency.exists)
+            ? "ok"
+            : "warning",
+        },
+      ),
+    );
+    items.push(
+      checkReadiness(
+        preflightCheckByCode(tachyonPreflight, ["TUN_PRIVILEGE", "TUN_DEVICE_PRESENT"]),
+        "TUN device privilege",
+        runtimePrivilege?.canManageTun
+          ? {
+              detail: runtimePrivilege.message,
+              label: "TUN device privilege",
+              state: "ok",
+            }
+          : {
+              detail:
+                runtimePrivilege?.message ||
+                "Tachyon game acceleration needs permission to create or open a TUN device.",
+              label: "TUN device privilege",
+              state: "warning",
+            },
+      ),
+    );
+    items.push(
+      {
+        detail: "Xray local HTTP/SOCKS proxy can be usable even when Tachyon Core game acceleration is blocked.",
+        label: "Xray and Tachyon independence",
+        state: "ok",
+      },
+    );
+    items.push(
+      tachyonCorePreflightStartBlockReason(tachyonPreflight)
+        ? {
+            detail: tachyonCorePreflightStartBlockReason(tachyonPreflight) || "",
+            label: "Game acceleration startable",
+            state: "error",
+          }
+        : {
+            detail: tachyonPreflight
+              ? tachyonPreflight.supported
+                ? "No preflight TUN/Wintun startup blocker detected for Tachyon Core."
+                : "Core version lacks preflight; validate-only fallback cannot confirm TUN/Wintun readiness."
+              : "Preflight has not run yet; Start will check before launching Tachyon Core.",
+            label: "Game acceleration startable",
+            state: tachyonPreflight?.supported ? "ok" : "warning",
           },
     );
     items.push(
@@ -1429,6 +1576,7 @@ export function App() {
     runtimePrivilege,
     runtimeInputs.tachyonCoreBinaryPath,
     runtimeInputs.xrayBinaryPath,
+    tachyonPreflight,
   ]);
   const readinessErrors = useMemo(
     () => readinessItems.filter((item) => item.state === "error").length,
@@ -1994,7 +2142,33 @@ export function App() {
       throw new Error(result.error || `${managedBinaryDisplayName(kind)} config validation failed`);
     }
     if (announce) {
-      setMessage(`${managedBinaryDisplayName(kind)} config validated`);
+      if (kind === "tachyonCore") {
+        const preflight = await runTachyonCorePreflight(paths, settings);
+        setMessage(tachyonCorePreflightReadinessMessage(preflight));
+      } else {
+        setMessage(`${managedBinaryDisplayName(kind)} config validated`);
+      }
+    }
+    return result;
+  }
+
+  async function runTachyonCorePreflight(
+    paths: ConfigDraftPaths,
+    settings: RuntimeSettings,
+  ): Promise<TachyonCorePreflightResult> {
+    const result = await preflightTachyonCore(settings.tachyonCoreBinaryPath, paths.coreConfigPath);
+    setTachyonPreflight(result);
+    return result;
+  }
+
+  async function assertTachyonCoreStartable(
+    paths: ConfigDraftPaths,
+    settings: RuntimeSettings,
+  ): Promise<TachyonCorePreflightResult> {
+    const result = await runTachyonCorePreflight(paths, settings);
+    const blocker = tachyonCorePreflightStartBlockReason(result);
+    if (blocker) {
+      throw new Error(blocker);
     }
     return result;
   }
@@ -2005,14 +2179,17 @@ export function App() {
       const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
       const results: ConfigValidationResult[] = [];
+      let preflightFallback: string | null = null;
       if (drafts.xray) {
         results.push(await runConfigValidation("xray", paths, settings, false));
       }
       if (drafts.core) {
         results.push(await runConfigValidation("tachyonCore", paths, settings, false));
+        const preflight = await runTachyonCorePreflight(paths, settings);
+        preflightFallback = tachyonCorePreflightReadinessMessage(preflight);
       }
       const ok = results.length > 0 && results.every((result) => result.ok);
-      setMessage(ok ? ui.configsValidated : ui.configsValidationErrors);
+      setMessage(preflightFallback || (ok ? ui.configsValidated : ui.configsValidationErrors));
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Config validation failed");
     }
@@ -2285,12 +2462,16 @@ export function App() {
     }
   }
 
-  async function startRuntime(kind: ManagedBinaryKind): Promise<boolean> {
+  async function startRuntime(kind: ManagedBinaryKind): Promise<RuntimeStartResult> {
     try {
       const paths = await writeDrafts(kind);
       const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
       await runConfigValidation(kind, paths, settings, false);
+      if (kind === "tachyonCore") {
+        const preflight = await assertTachyonCoreStartable(paths, settings);
+        setMessage(tachyonCorePreflightReadinessMessage(preflight));
+      }
       const status =
         kind === "xray"
           ? await startXray(settings.xrayBinaryPath, paths.xrayConfigPath)
@@ -2320,10 +2501,11 @@ export function App() {
               },
       }));
       setMessage(`${managedBinaryDisplayName(kind)} started`);
-      return true;
+      return { error: null, ok: true };
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Start failed");
-      return false;
+      const message = error instanceof Error ? error.message : "Start failed";
+      setMessage(message);
+      return { error: message, ok: false };
     }
   }
 
@@ -2370,16 +2552,28 @@ export function App() {
   }
 
   async function startAllRuntime() {
-    const xrayStarted = await startRuntime("xray");
-    const tachyonStarted = await startRuntime("tachyonCore");
+    const xrayStart = await startRuntime("xray");
+    const tachyonStart = await startRuntime("tachyonCore");
     await refreshRuntime();
-    if (xrayStarted && tachyonStarted) {
+    if (xrayStart.ok && tachyonStart.ok) {
       setMessage(ui.startAllComplete);
-    } else if (xrayStarted || tachyonStarted) {
+    } else if (xrayStart.ok || tachyonStart.ok) {
+      const tachyonStatus = tachyonStart.ok
+        ? ui.runtimeStarted
+        : `${ui.runtimeFailed}: ${tachyonStart.error || "Tachyon Core game acceleration unavailable"}`;
       setMessage(
         templateValues(ui.startAllPartial, {
-          xray: xrayStarted ? ui.runtimeStarted : ui.runtimeFailed,
-          tachyon: tachyonStarted ? ui.runtimeStarted : ui.runtimeFailed,
+          xray: xrayStart.ok ? ui.runtimeStarted : `${ui.runtimeFailed}: ${xrayStart.error || "Xray failed"}`,
+          tachyon: tachyonStatus,
+        }),
+      );
+    } else {
+      setMessage(
+        templateValues(ui.startAllPartial, {
+          xray: `${ui.runtimeFailed}: ${xrayStart.error || "Xray failed"}`,
+          tachyon: `${ui.runtimeFailed}: ${
+            tachyonStart.error || "Tachyon Core game acceleration unavailable"
+          }`,
         }),
       );
     }

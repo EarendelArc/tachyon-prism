@@ -182,6 +182,27 @@ export interface ConfigValidationResult {
   error: string | null;
 }
 
+export interface TachyonCorePreflightCheck {
+  code: string;
+  status: string;
+  message: string;
+  details: string;
+  raw: unknown;
+}
+
+export interface TachyonCorePreflightResult {
+  supported: boolean;
+  ok: boolean;
+  overall: string;
+  checks: TachyonCorePreflightCheck[];
+  rawReport: unknown;
+  command: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  error: string | null;
+}
+
 export interface SystemProxyState {
   supported: boolean;
   enabled: boolean;
@@ -441,6 +462,95 @@ export async function validateTachyonCoreConfig(
   });
 }
 
+export async function preflightTachyonCore(
+  binaryPath?: string,
+  configPath?: string,
+): Promise<TachyonCorePreflightResult> {
+  if (!isTauriRuntime()) {
+    return previewTachyonCorePreflight();
+  }
+  return invokeDesktop<TachyonCorePreflightResult>("tachyon_core_preflight", {
+    binaryPath,
+    configPath,
+  });
+}
+
+const tachyonCoreStartBlockCodes = new Set([
+  "WINTUN_DLL_PRESENT",
+  "TUN_PRIVILEGE",
+  "TUN_DEVICE_PRESENT",
+]);
+
+export function tachyonCorePreflightFallbackMessage(result: TachyonCorePreflightResult): string | null {
+  return result.supported ? null : "Core version lacks preflight; validate only";
+}
+
+export function tachyonCorePreflightReadinessMessage(result: TachyonCorePreflightResult): string {
+  const fallback = tachyonCorePreflightFallbackMessage(result);
+  if (fallback) {
+    return fallback;
+  }
+  if (result.ok) {
+    return result.overall.toLowerCase() === "warn" || result.overall.toLowerCase() === "warning"
+      ? `Tachyon Core preflight completed with warnings: ${preflightWarningSummary(result)}`
+      : "Tachyon Core preflight passed";
+  }
+  return `Tachyon Core preflight found readiness issues: ${
+    result.error || preflightFailureSummary(result)
+  }`;
+}
+
+export function tachyonCorePreflightStartBlockReason(
+  result: TachyonCorePreflightResult | null,
+): string | null {
+  if (!result?.supported) {
+    return null;
+  }
+  const blockingChecks = result.checks.filter(
+    (check) =>
+      tachyonCoreStartBlockCodes.has(check.code.toUpperCase()) &&
+      ["error", "failed", "fail"].includes(check.status.toLowerCase()),
+  );
+  if (blockingChecks.length === 0) {
+    return null;
+  }
+  const details = blockingChecks
+    .map((check) => {
+      const message = check.message || check.details || "required capability is unavailable";
+      return `${check.code}: ${message}`;
+    })
+    .join("; ");
+  return `Tachyon Core game acceleration cannot start: ${details}. Xray local proxy can still run independently.`;
+}
+
+function preflightFailureSummary(result: TachyonCorePreflightResult): string {
+  const failedChecks = result.checks.filter((check) =>
+    ["error", "failed", "fail"].includes(check.status.toLowerCase()),
+  );
+  const checks = failedChecks.length > 0 ? failedChecks : result.checks;
+  return preflightCheckSummary(checks) || `overall=${result.overall}`;
+}
+
+function preflightWarningSummary(result: TachyonCorePreflightResult): string {
+  return (
+    preflightCheckSummary(
+      result.checks.filter((check) =>
+        ["warn", "warning"].includes(check.status.toLowerCase()),
+      ),
+    ) || `overall=${result.overall}`
+  );
+}
+
+function preflightCheckSummary(checks: TachyonCorePreflightCheck[]): string {
+  return checks
+    .map((check) => {
+      const message = check.message || check.details;
+      return message ? `${check.code}: ${message}` : check.code;
+    })
+    .filter(Boolean)
+    .join("; ");
+}
+
 export async function getSystemProxyStatus(): Promise<SystemProxyState> {
   if (!isTauriRuntime()) {
     return previewSystemProxyState(false);
@@ -657,6 +767,36 @@ function previewConfigValidation(target: string): ConfigValidationResult {
     error: null,
     ok: true,
     target,
+  };
+}
+
+function previewTachyonCorePreflight(): TachyonCorePreflightResult {
+  return {
+    checks: [
+      {
+        code: "CONFIG_VALID",
+        details: "Preview runtime does not execute tachyon-core.",
+        message: "Tachyon Core client JSON can be parsed.",
+        raw: null,
+        status: "ok",
+      },
+      {
+        code: "AUTO_ROUTE_DISABLED",
+        details: "auto_route=false avoids default-route takeover, but Core client still needs TUN device capability.",
+        message: "OS default route takeover is disabled.",
+        raw: null,
+        status: "warning",
+      },
+    ],
+    command: "tachyon-core preflight --config preview --json",
+    error: null,
+    exitCode: 0,
+    ok: true,
+    overall: "warning",
+    rawReport: null,
+    stderr: "",
+    stdout: "",
+    supported: true,
   };
 }
 

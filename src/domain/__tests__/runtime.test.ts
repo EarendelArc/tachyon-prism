@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildReleaseDiagnosticsDisplay,
+  tachyonCorePreflightFallbackMessage,
+  tachyonCorePreflightReadinessMessage,
+  tachyonCorePreflightStartBlockReason,
   tachyonIpcBaseUrl,
   testXrayLocalProxies,
   type CoreReleaseDiagnostics,
+  type TachyonCorePreflightResult,
 } from "../runtime";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -117,5 +121,78 @@ describe("buildReleaseDiagnosticsDisplay", () => {
     expect(versionRow?.value).toBe("Not probed - diagnostics does not execute installed binaries");
     expect(versionRow?.wide).toBe(true);
     expect(pathRow?.value).toBe("C:\\Users\\tester\\AppData\\Roaming\\tachyon-prism\\bin\\xray.exe");
+  });
+});
+
+describe("tachyonCore preflight helpers", () => {
+  it("blocks Tachyon Core startup for TUN and Wintun preflight errors", () => {
+    const result: TachyonCorePreflightResult = {
+      checks: [
+        {
+          code: "WINTUN_DLL_PRESENT",
+          details: "Install wintun.dll next to tachyon-core.exe.",
+          message: "wintun.dll missing",
+          raw: null,
+          status: "error",
+        },
+      ],
+      command: "tachyon-core preflight --config client.json --json",
+      error: "WINTUN_DLL_PRESENT: wintun.dll missing",
+      exitCode: 1,
+      ok: false,
+      overall: "error",
+      rawReport: null,
+      stderr: "",
+      stdout: "",
+      supported: true,
+    };
+
+    expect(tachyonCorePreflightStartBlockReason(result)).toContain("Tachyon Core game acceleration cannot start");
+    expect(tachyonCorePreflightStartBlockReason(result)).toContain("Xray local proxy can still run independently");
+  });
+
+  it("falls back to validate-only mode for old Core without blocking startup", () => {
+    const result: TachyonCorePreflightResult = {
+      checks: [],
+      command: "tachyon-core preflight --config client.json --json",
+      error: "Core version lacks preflight; validate only",
+      exitCode: 2,
+      ok: true,
+      overall: "unsupported",
+      rawReport: null,
+      stderr: "unrecognized subcommand",
+      stdout: "",
+      supported: false,
+    };
+
+    expect(tachyonCorePreflightFallbackMessage(result)).toBe("Core version lacks preflight; validate only");
+    expect(tachyonCorePreflightReadinessMessage(result)).toBe("Core version lacks preflight; validate only");
+    expect(tachyonCorePreflightStartBlockReason(result)).toBeNull();
+  });
+
+  it("blocks targeted startup errors even if overall is not normalized to error", () => {
+    const result: TachyonCorePreflightResult = {
+      checks: [
+        {
+          code: "TUN_PRIVILEGE",
+          details: "Run Prism as administrator.",
+          message: "",
+          raw: null,
+          status: "error",
+        },
+      ],
+      command: "tachyon-core preflight --config client.json --json",
+      error: "TUN_PRIVILEGE: Run Prism as administrator.",
+      exitCode: 0,
+      ok: false,
+      overall: "unknown",
+      rawReport: null,
+      stderr: "",
+      stdout: "",
+      supported: true,
+    };
+
+    expect(tachyonCorePreflightStartBlockReason(result)).toContain("TUN_PRIVILEGE");
+    expect(tachyonCorePreflightReadinessMessage(result)).toContain("preflight found readiness issues");
   });
 });
