@@ -1220,11 +1220,20 @@ fn redact_sensitive_paths(value: &str) -> String {
             "<user-dir>",
         );
     }
-    redacted = redact_after_marker(&redacted, "C:\\Users\\");
-    redacted = redact_after_marker(&redacted, "C:\\\\Users\\\\");
-    redacted = redact_after_marker(&redacted, "C:/Users/");
-    redacted = redact_after_marker(&redacted, "/Users/");
-    redact_after_marker(&redacted, "/home/")
+    for marker in common_user_dir_markers() {
+        redacted = redact_after_marker(&redacted, marker);
+    }
+    redacted
+}
+
+fn common_user_dir_markers() -> &'static [&'static str] {
+    &[
+        "C:\\Users\\",
+        "C:\\\\Users\\\\",
+        "C:/Users/",
+        "/Users/",
+        "/home/",
+    ]
 }
 
 fn sensitive_user_path_prefixes() -> Vec<String> {
@@ -5711,10 +5720,10 @@ stat: <
   "overall": "error",
   "stdout": "raw stdout should not be retained",
   "checks": [
-    {"code": "CONFIG_VALID", "status": "error", "message": "config failed at C:\\Users\\alice\\AppData\\Roaming\\tachyon-prism\\client.json", "details": "see /Users/alice/.config/tachyon-prism/client.json", "command": "tachyon-core --config C:\\Users\\alice\\client.json"}
+    {"code": "CONFIG_VALID", "status": "error", "message": "config failed at C:\\Users\\alice\\AppData\\Roaming\\tachyon-prism\\client.json", "details": "see /Users/alice/.config/tachyon-prism/client.json and /home/alice/.config/tachyon-prism/client.json and C:/Users/alice/AppData/Roaming/tachyon-prism/client.json", "command": "tachyon-core --config C:\\Users\\alice\\client.json"}
   ]
 }"#,
-            b"C:\\Users\\alice\\AppData\\Roaming\\tachyon-prism\\client.json failed",
+            b"C:\\Users\\alice\\AppData\\Roaming\\tachyon-prism\\client.json failed; /home/alice/.config/tachyon-prism/client.json failed",
         );
 
         let result = tachyon_core_preflight_result(
@@ -5730,9 +5739,14 @@ stat: <
             serde_json::to_string(&result.structured_report).expect("structured report serializes");
         assert!(serialized.contains("<user-dir>"));
         assert!(!serialized.contains("C:\\\\Users\\\\alice"));
+        assert!(!serialized.contains("C:/Users/alice"));
         assert!(!serialized.contains("/Users/alice"));
+        assert!(!serialized.contains("/home/alice"));
         assert!(!structured_report.contains("raw stdout should not be retained"));
-        assert_eq!(result.command, "tachyon-core.exe preflight --config client.json --json");
+        assert_eq!(
+            result.command,
+            "tachyon-core.exe preflight --config client.json --json"
+        );
     }
 
     #[test]
