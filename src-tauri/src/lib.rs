@@ -1089,9 +1089,10 @@ fn preflight_command_line(binary: &Path, config: &Path) -> String {
 }
 
 fn path_file_name_for_display(path: &Path) -> Option<&str> {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .or_else(|| path.to_str()?.rsplit(['\\', '/']).next())
+    let raw = path.to_str()?;
+    raw.rsplit(['\\', '/'])
+        .find(|name| !name.is_empty())
+        .or_else(|| path.file_name().and_then(|name| name.to_str()))
         .filter(|name| !name.is_empty())
 }
 
@@ -1209,16 +1210,10 @@ fn redact_sensitive_paths(value: &str) -> String {
     let mut redacted = value.to_string();
     for path in sensitive_user_path_prefixes() {
         redacted = replace_ascii_case_insensitive(&redacted, &path, "<user-dir>");
-        redacted = replace_ascii_case_insensitive(
-            &redacted,
-            &path.replace('\\', "\\\\"),
-            "<user-dir>",
-        );
-        redacted = replace_ascii_case_insensitive(
-            &redacted,
-            &path.replace('\\', "/"),
-            "<user-dir>",
-        );
+        redacted =
+            replace_ascii_case_insensitive(&redacted, &path.replace('\\', "\\\\"), "<user-dir>");
+        redacted =
+            replace_ascii_case_insensitive(&redacted, &path.replace('\\', "/"), "<user-dir>");
     }
     for marker in common_user_dir_markers() {
         redacted = redact_after_marker(&redacted, marker);
@@ -1435,9 +1430,12 @@ fn parse_tachyon_core_preflight_check(value: &Value) -> TachyonCorePreflightChec
         message: first_string(value, &["message", "summary", "title"])
             .map(|message| sanitize_preflight_string(&message))
             .unwrap_or_default(),
-        details: first_string(value, &["details", "detail", "hint", "reason", "remediation"])
-            .map(|details| sanitize_preflight_string(&details))
-            .unwrap_or_default(),
+        details: first_string(
+            value,
+            &["details", "detail", "hint", "reason", "remediation"],
+        )
+        .map(|details| sanitize_preflight_string(&details))
+        .unwrap_or_default(),
         raw: sanitize_preflight_value(value),
     }
 }
@@ -5613,6 +5611,30 @@ stat: <
     }
 
     #[test]
+    fn preflight_command_line_uses_basename_for_foreign_paths() {
+        let windows_line = preflight_command_line(
+            Path::new("C:\\Users\\alice\\bin\\tachyon-core.exe"),
+            Path::new("C:\\Users\\alice\\AppData\\Roaming\\tachyon-prism\\client.json"),
+        );
+        assert_eq!(
+            windows_line,
+            "tachyon-core.exe preflight --config client.json --json"
+        );
+        assert!(!windows_line.contains("C:\\Users\\alice"));
+
+        let unix_line = preflight_command_line(
+            Path::new("/Users/alice/bin/tachyon-core"),
+            Path::new("/home/alice/.config/tachyon-prism/client.json"),
+        );
+        assert_eq!(
+            unix_line,
+            "tachyon-core preflight --config client.json --json"
+        );
+        assert!(!unix_line.contains("/Users/alice"));
+        assert!(!unix_line.contains("/home/alice"));
+    }
+
+    #[test]
     fn validation_details_prefers_combined_output_when_available() {
         assert_eq!(
             validation_details("stdout ok", "stderr note"),
@@ -5693,7 +5715,10 @@ stat: <
         assert_eq!(result.checks[1].code, "AUTO_ROUTE_DISABLED");
         assert_eq!(result.checks[1].status, "warn");
         assert!(result.checks[1].details.contains("Prism/Xray-owned"));
-        assert!(result.structured_report.get("client_requires_tun").is_some());
+        assert!(result
+            .structured_report
+            .get("client_requires_tun")
+            .is_some());
     }
 
     #[test]
