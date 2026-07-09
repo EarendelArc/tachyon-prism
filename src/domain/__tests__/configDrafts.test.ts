@@ -217,7 +217,7 @@ describe("buildXrayClientConfigDraft", () => {
       [
         "vmess://eyJ2IjoiMiIsInBzIjoiV01lc3MgV1MiLCJhZGQiOiJ2bWVzcy5leGFtcGxlLmNvbSIsInBvcnQiOiI0NDMiLCJpZCI6InZtZXNzLXV1aWQiLCJhaWQiOiIwIiwibmV0Ijoid3MiLCJ0eXBlIjoibm9uZSIsImhvc3QiOiJjZG4uZXhhbXBsZS5jb20iLCJwYXRoIjoiL3dzIiwidGxzIjoidGxzIn0=",
         "trojan-go://secret@trojan.example.com:443?type=ws&path=/trojan&sni=edge.example.com#TrojanGo",
-        "hy2://auth@example.com:443?up=25&down=100#Hy2",
+        "hy2://auth@example.com:443?security=tls&sni=hy2.example.com&up=25&down=100#Hy2",
         "tuic://uuid:secret@tuic.example.com:443?sni=edge.example.com&congestion=bbr#Tuic",
       ].join("\n"),
     );
@@ -340,6 +340,55 @@ describe("buildXrayClientConfigDraft", () => {
       generatedOutbounds = draft.outbounds as Array<Record<string, unknown>>;
     }).toThrow(/unsupported-by-xray/);
     expect(generatedOutbounds).toBeUndefined();
+  });
+
+  it("follows Xray Reality and Hysteria stream compatibility rules", () => {
+    const [rawReality, xhttpReality, grpcReality, wsReality, hysteriaNoTls] = parseSubscription(
+      [
+        "vless://uuid@example.com:443?type=tcp&security=reality&sni=www.example.com&pbk=public-key#Reality Raw",
+        "vless://uuid@example.com:443?type=splithttp&security=reality&sni=www.example.com&pbk=public-key&path=/xhttp&mode=auto#Reality XHTTP",
+        "vless://uuid@example.com:443?type=grpc&security=reality&sni=www.example.com&pbk=public-key&serviceName=tunnel#Reality gRPC",
+        "vless://uuid@example.com:443?type=ws&security=reality&sni=www.example.com&pbk=public-key#Reality WS",
+        "hysteria2://secret@example.com:443?sni=game.example.com#Hysteria No TLS",
+      ].join("\n"),
+    );
+
+    expect(buildXrayClientConfigDraft(rawReality)).toMatchObject({
+      outbounds: expect.arrayContaining([
+        expect.objectContaining({
+          tag: "tachyon-proxy",
+          protocol: "vless",
+          streamSettings: expect.objectContaining({
+            network: "raw",
+            security: "reality",
+          }),
+        }),
+      ]),
+    });
+    expect(buildXrayClientConfigDraft(xhttpReality)).toMatchObject({
+      outbounds: expect.arrayContaining([
+        expect.objectContaining({
+          tag: "tachyon-proxy",
+          streamSettings: expect.objectContaining({
+            network: "xhttp",
+            security: "reality",
+          }),
+        }),
+      ]),
+    });
+    expect(buildXrayClientConfigDraft(grpcReality)).toMatchObject({
+      outbounds: expect.arrayContaining([
+        expect.objectContaining({
+          tag: "tachyon-proxy",
+          streamSettings: expect.objectContaining({
+            network: "grpc",
+            security: "reality",
+          }),
+        }),
+      ]),
+    });
+    expect(() => buildXrayClientConfigDraft(wsReality)).toThrow(/REALITY only works/);
+    expect(() => buildXrayClientConfigDraft(hysteriaNoTls)).toThrow(/Hysteria outbounds require TLS/);
   });
 });
 

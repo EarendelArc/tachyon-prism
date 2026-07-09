@@ -14,6 +14,8 @@ import {
 const xrayBinaryPath = process.env.TACHYON_XRAY_BINARY_PATH?.trim();
 const itWithXray = xrayBinaryPath ? it : it.skip;
 const xrayExecHelper = vi.fn(runXrayConfigTest);
+// Stable X25519 Reality public key input for live config validation.
+const realityPublicKey = "QNNCH0rpsoqjwyLiEuvvM38dpQaSteremSU96JdCuC8";
 const baseLiveContractCases: Array<Omit<LiveContractCase, "portOffset">> = [
   { fixtureId: "vless-ws-tls", protocol: "vless", secrets: ["vless-ws-uuid"] },
   { fixtureId: "vmess-ws-tls", protocol: "vmess", secrets: ["vmess-uuid"] },
@@ -30,6 +32,21 @@ const baseLiveContractCases: Array<Omit<LiveContractCase, "portOffset">> = [
       "bmksqJz2tpgoNqoSqIxgcSxosP2NfQ2fK10zzju93yI=",
     ],
   },
+  {
+    payload: `vless://reality-raw-uuid@reality-raw.example.com:443?encryption=none&type=tcp&security=reality&sni=www.cloudflare.com&pbk=${realityPublicKey}&sid=01&flow=xtls-rprx-vision#VLESS Reality Raw`,
+    protocol: "vless",
+    secrets: ["reality-raw-uuid"],
+  },
+  {
+    payload: `vless://reality-xhttp-uuid@reality-xhttp.example.com:443?encryption=none&type=splithttp&security=reality&sni=www.cloudflare.com&pbk=${realityPublicKey}&path=/xhttp&mode=auto#VLESS Reality XHTTP`,
+    protocol: "vless",
+    secrets: ["reality-xhttp-uuid"],
+  },
+  {
+    payload: `vless://reality-grpc-uuid@reality-grpc.example.com:443?encryption=none&type=grpc&security=reality&sni=www.cloudflare.com&pbk=${realityPublicKey}&serviceName=tunnel#VLESS Reality gRPC`,
+    protocol: "vless",
+    secrets: ["reality-grpc-uuid"],
+  },
 ];
 const liveContractCases: LiveContractCase[] = baseLiveContractCases.map((item, portOffset) => ({
   ...item,
@@ -43,8 +60,8 @@ beforeEach(() => {
 describe("live Xray config contract", () => {
   itWithXray.each(liveContractCases)(
     "generates an xray-client.json for $protocol accepted by xray run -test -config",
-    ({ fixtureId, protocol, secrets, portOffset }) => {
-      const [node] = parseSubscription(fixturePayload(fixtureId));
+    ({ fixtureId, payload, protocol, secrets, portOffset }) => {
+      const [node] = parseSubscription(resolveLiveContractPayload(fixtureId, payload));
       expect(node).toMatchObject({ protocol });
 
       const config = buildXrayClientConfigDraft(node, {
@@ -95,8 +112,19 @@ function fixturePayload(id: string): string {
   return fixture.payload;
 }
 
+function resolveLiveContractPayload(fixtureId: string | undefined, payload: string | undefined): string {
+  if (payload) {
+    return payload;
+  }
+  if (fixtureId) {
+    return fixturePayload(fixtureId);
+  }
+  throw new Error("Live contract case is missing a payload");
+}
+
 interface LiveContractCase {
-  fixtureId: string;
+  fixtureId?: string;
+  payload?: string;
   portOffset: number;
   protocol: ProxyProtocol;
   secrets: string[];

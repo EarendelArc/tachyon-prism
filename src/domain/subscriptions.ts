@@ -94,6 +94,8 @@ const xraySupportedOutboundProtocols = new Set<XrayOutboundProtocol>([
   "wireguard",
 ]);
 
+const xrayRealityCompatibleNetworks = new Set(["raw", "xhttp", "grpc"]);
+
 const retainedProxyProtocols = new Set<ProxyProtocol>([
   ...xraySupportedOutboundProtocols,
   "tuic",
@@ -291,7 +293,16 @@ export function xrayOutboundCompatibilityForProtocol(
 export function xrayOutboundCompatibilityForNode(
   node: ProxyNode,
 ): XrayOutboundCompatibility {
-  return xrayOutboundCompatibilityForProtocol(node.protocol);
+  const protocolCompatibility = xrayOutboundCompatibilityForProtocol(node.protocol);
+  if (protocolCompatibility.status !== "supported") {
+    return protocolCompatibility;
+  }
+
+  if (!node.outbound) {
+    return protocolCompatibility;
+  }
+
+  return xrayOutboundCompatibilityForOutbound(node.outbound);
 }
 
 export function assertXrayOutboundSupported(node: ProxyNode): void {
@@ -1185,7 +1196,7 @@ function nodeFromOutbound(value: Record<string, unknown>, raw: string): ProxyNod
   const tag = stringValue(outbound.tag);
   const name = tag || `${protocol.toUpperCase()} ${endpoint.address}`;
 
-  return {
+  const node: ProxyNode = {
     id: stableNodeId(JSON.stringify(outbound)),
     name,
     protocol,
@@ -1196,9 +1207,10 @@ function nodeFromOutbound(value: Record<string, unknown>, raw: string): ProxyNod
     transport: stringValue(stream.network),
     sni: sniFromStream(stream),
     outbound,
-    xrayCompatibility: xrayOutboundCompatibilityForProtocol(protocol),
     rawUri: raw,
   };
+  node.xrayCompatibility = xrayOutboundCompatibilityForNode(node);
+  return node;
 }
 
 function parseProxyUri(rawUri: string): ProxyNode | null {
@@ -1332,7 +1344,7 @@ function nodeFromVMessShare(value: Record<string, unknown>, rawUri: string): Pro
     streamSettings: streamSettingsFromParams(streamParams),
   });
 
-  return {
+  const node: ProxyNode = {
     id: stableNodeId(rawUri),
     name: stringValue(value.ps) || `VMESS ${address}`,
     protocol: "vmess",
@@ -1344,9 +1356,10 @@ function nodeFromVMessShare(value: Record<string, unknown>, rawUri: string): Pro
     sni: stringValue(value.sni) || stringValue(value.host),
     parameters: params,
     outbound,
-    xrayCompatibility: xrayOutboundCompatibilityForProtocol("vmess"),
     rawUri,
   };
+  node.xrayCompatibility = xrayOutboundCompatibilityForNode(node);
+  return node;
 }
 
 function parseShadowsocksUri(rawUri: string): ProxyNode | null {
@@ -1571,7 +1584,7 @@ function nodeFromUri(
     stringValue(outbound.settings?.security) ??
     stringValue(outbound.settings?.encryption);
 
-  return {
+  const node: ProxyNode = {
     id: stableNodeId(rawUri),
     name: nodeName(parsed, protocol, parsed.hostname),
     protocol,
@@ -1583,9 +1596,10 @@ function nodeFromUri(
     sni: overrides.sni ?? sniFromStream(asRecord(outbound.streamSettings)),
     parameters: overrides.parameters,
     outbound,
-    xrayCompatibility: xrayOutboundCompatibilityForProtocol(protocol),
     rawUri,
   };
+  node.xrayCompatibility = xrayOutboundCompatibilityForNode(node);
+  return node;
 }
 
 function parseShadowsocksAuthority(rawUri: string):
@@ -2014,7 +2028,7 @@ function normalizeStoredNode(value: unknown): ProxyNode | null {
       ? reparsed.outbound
       : storedOutbound;
 
-  return {
+  const node: ProxyNode = {
     id,
     name,
     protocol,
@@ -2026,9 +2040,10 @@ function normalizeStoredNode(value: unknown): ProxyNode | null {
     sni: stringOrUndefined(stringValue(value.sni)),
     parameters: asStringRecord(value.parameters),
     outbound,
-    xrayCompatibility: xrayOutboundCompatibilityForProtocol(protocol),
     rawUri,
   };
+  node.xrayCompatibility = xrayOutboundCompatibilityForNode(node);
+  return node;
 }
 
 function outboundRequiresCanonicalUpgrade(
@@ -2048,6 +2063,30 @@ function outboundRequiresCanonicalUpgrade(
     default:
       return false;
   }
+}
+
+function xrayOutboundCompatibilityForOutbound(
+  outbound: XrayOutboundObject,
+): XrayOutboundCompatibility {
+  const stream = asRecord(outbound.streamSettings);
+  const network = normalizeNetwork(stringValue(stream.network));
+  const security = stringValue(stream.security);
+
+  if (security === "reality" && !xrayRealityCompatibleNetworks.has(network)) {
+    return {
+      status: "unsupported-by-xray",
+      reason: `Xray REALITY only works with raw, xhttp, or grpc transports; this outbound uses ${network || "no"} transport.`,
+    };
+  }
+
+  if (network === "hysteria" && security !== "tls") {
+    return {
+      status: "unsupported-by-xray",
+      reason: "Xray Hysteria outbounds require TLS; this outbound does not enable TLS.",
+    };
+  }
+
+  return { status: "supported", reason: null };
 }
 
 function normalizeSubscriptionProfiles(value: unknown): SubscriptionProfile[] {

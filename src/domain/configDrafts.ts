@@ -45,7 +45,8 @@ export function buildXrayClientConfigDraft(
   node: ProxyNode,
   options: XrayClientDraftOptions = {},
 ): Record<string, unknown> {
-  const outbound = withTag(buildXrayOutboundDraft(node), "tachyon-proxy");
+  const xrayOutbound = buildXrayOutboundDraft(node);
+  const outbound = withTag(xrayOutbound, "tachyon-proxy");
   const inbounds: Array<Record<string, unknown>> = [
     {
       tag: "tachyon-socks",

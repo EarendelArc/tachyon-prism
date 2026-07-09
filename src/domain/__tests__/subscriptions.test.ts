@@ -170,8 +170,10 @@ describe("parseSubscription", () => {
 
   it("maps current Reality and TLS share parameters into Xray stream settings", () => {
     const realityUri = "vless://uuid@example.com:443?type=tcp&security=reality&sni=www.example.com&pbk=public-key&sid=0123&mldsa65Verify=pq-verify&spx=/probe&fp=chrome#Reality";
+    const xhttpUri = "vless://uuid@example.com:443?type=splithttp&security=reality&sni=www.example.com&pbk=public-key&path=/xhttp&mode=auto#Reality XHTTP";
+    const grpcUri = "vless://uuid@example.com:443?type=grpc&security=reality&sni=www.example.com&pbk=public-key&serviceName=tunnel#Reality gRPC";
     const tlsUri = "trojan://password@tls.example.com:443?security=tls&sni=edge.example.com&echConfigList=ech-list&pinnedPeerCertSha256=sha256-pin&alpn=h2,http/1.1#TLS";
-    const [reality, tls] = parseSubscription([realityUri, tlsUri].join("\n"));
+    const [reality, xhttp, grpc, tls] = parseSubscription([realityUri, xhttpUri, grpcUri, tlsUri].join("\n"));
 
     expect(reality.outbound?.streamSettings).toMatchObject({
       network: "raw",
@@ -184,6 +186,21 @@ describe("parseSubscription", () => {
         spiderX: "/probe",
       },
     });
+    expect(xhttp.outbound?.streamSettings).toMatchObject({
+      network: "xhttp",
+      security: "reality",
+      xhttpSettings: {
+        path: "/xhttp",
+        mode: "auto",
+      },
+    });
+    expect(grpc.outbound?.streamSettings).toMatchObject({
+      network: "grpc",
+      security: "reality",
+      grpcSettings: {
+        serviceName: "tunnel",
+      },
+    });
     expect(tls.outbound?.streamSettings).toMatchObject({
       security: "tls",
       tlsSettings: {
@@ -193,6 +210,24 @@ describe("parseSubscription", () => {
         alpn: ["h2", "http/1.1"],
       },
     });
+  });
+
+  it("rejects Reality on websocket and Hysteria without TLS when building Xray outbounds", () => {
+    const wsRealityUri = "vless://uuid@example.com:443?type=ws&security=reality&sni=www.example.com&pbk=public-key#Reality WS";
+    const hysteriaNoTlsUri = "hysteria2://secret@example.com:443?sni=game.example.com#Hysteria No TLS";
+    const [wsReality, hysteriaNoTls] = parseSubscription([wsRealityUri, hysteriaNoTlsUri].join("\n"));
+
+    expect(xrayOutboundCompatibilityForNode(wsReality)).toMatchObject({
+      status: "unsupported-by-xray",
+      reason: expect.stringContaining("REALITY"),
+    });
+    expect(() => buildXrayOutboundDraft(wsReality)).toThrow(/REALITY only works/);
+
+    expect(xrayOutboundCompatibilityForNode(hysteriaNoTls)).toMatchObject({
+      status: "unsupported-by-xray",
+      reason: expect.stringContaining("Hysteria"),
+    });
+    expect(() => buildXrayOutboundDraft(hysteriaNoTls)).toThrow(/Hysteria outbounds require TLS/);
   });
 
   it("parses Trojan URIs", () => {
@@ -262,7 +297,7 @@ describe("parseSubscription", () => {
   });
 
   it("parses Hysteria URIs", () => {
-    const uri = "hy2://secret@example.com:443?insecure=1&up=25&down=100&udpIdleTimeout=30s#Hysteria Node";
+    const uri = "hy2://secret@example.com:443?security=tls&sni=game.example.com&up=25&down=100&udpIdleTimeout=30s#Hysteria Node";
     const nodes = parseSubscription(uri);
     expect(nodes).toHaveLength(1);
     expect(nodes[0].protocol).toBe("hysteria");
@@ -272,6 +307,10 @@ describe("parseSubscription", () => {
     expect(nodes[0].credential).toBe("secret");
     expect(buildXrayOutboundDraft(nodes[0]).streamSettings).toMatchObject({
       network: "hysteria",
+      security: "tls",
+      tlsSettings: {
+        serverName: "game.example.com",
+      },
       hysteriaSettings: {
         auth: "secret",
         udpIdleTimeout: 30,

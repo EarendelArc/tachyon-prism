@@ -459,6 +459,7 @@ proxies:
   },
   {
     id: "sing-box-full-outbound-json",
+    xrayCompatibilityStatus: "unsupported-by-xray",
     payload: JSON.stringify({
       log: { level: "info" },
       outbounds: [
