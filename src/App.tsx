@@ -105,6 +105,16 @@ import {
   type TachyonServerProfile,
   type TachyonServerSnapshot,
 } from "./domain/tachyonServers";
+import {
+  emptyTrafficSample,
+  emptyXrayTrafficStats,
+  hasTrafficSource,
+  trafficRateSample,
+  trafficSeriesFromSamples,
+  trafficTotalsFromSources,
+  type TrafficSample,
+  type TrafficTotals,
+} from "./domain/trafficMetrics";
 import type {
   ProxyNode,
   SubscriptionParseReport,
@@ -129,7 +139,7 @@ import {
   type PluginStateSnapshot,
 } from "./domain/plugins";
 import { TelemetryClient } from "./domain/telemetry";
-import type { TelemetryData, TelemetryState } from "./domain/telemetry";
+import type { TelemetryState } from "./domain/telemetry";
 import { invokeDesktop, isTauriRuntime } from "./domain/tauri";
 
 type ConnectionState = "checking" | "connected" | "disconnected";
@@ -158,22 +168,6 @@ interface ReadinessItem {
   detail: string;
   label: string;
   state: ReadinessState;
-}
-
-interface TrafficSample {
-  tachyonDown: number;
-  tachyonUp: number;
-  xrayDown: number;
-  xrayUp: number;
-}
-
-interface TrafficTotals {
-  tachyonDown: number;
-  tachyonUp: number;
-  totalDown: number;
-  totalUp: number;
-  xrayDown: number;
-  xrayUp: number;
 }
 
 interface TrafficSourceBadge {
@@ -277,6 +271,8 @@ const zh = {
   launchers: "启动器",
   list: "列表",
   memory: "内存",
+  memoryNotExposed: "内存接口待接入",
+  metricUnknown: "未知",
   nodeSelector: "节点选择",
   overview: "概览",
   plugins: "插件",
@@ -300,6 +296,8 @@ const zh = {
   startAllPartial: "Xray Core {xray} / Tachyon Core {tachyon}",
   runtimeStarted: "已启动",
   runtimeFailed: "启动失败",
+  runtimeOnline: "运行中",
+  runtimeOffline: "未运行",
   stop: "停止",
   stopAll: "停止全部",
   subscriptions: "订阅",
@@ -486,6 +484,8 @@ const zh = {
   xrayStopped: "Xray 未运行",
   tachyonTelemetryActive: "遥测已连接",
   tachyonTelemetryWaiting: "等待遥测",
+  tachyonStopped: "Tachyon 未运行",
+  tgpSessions: "TGP 会话",
   workMode: "工作模式",
 };
 
@@ -517,6 +517,8 @@ const en: typeof zh = {
   launchers: "Launchers",
   list: "List",
   memory: "Memory",
+  memoryNotExposed: "Memory API not exposed",
+  metricUnknown: "Unknown",
   nodeSelector: "Node Selector",
   overview: "Overview",
   plugins: "Plugins",
@@ -540,6 +542,8 @@ const en: typeof zh = {
   startAllPartial: "Xray Core {xray} / Tachyon Core {tachyon}",
   runtimeStarted: "started",
   runtimeFailed: "failed",
+  runtimeOnline: "Online",
+  runtimeOffline: "Offline",
   stop: "Stop",
   stopAll: "Stop All",
   subscriptions: "Subscriptions",
@@ -726,6 +730,8 @@ const en: typeof zh = {
   xrayStopped: "Xray stopped",
   tachyonTelemetryActive: "Telemetry connected",
   tachyonTelemetryWaiting: "Waiting telemetry",
+  tachyonStopped: "Tachyon stopped",
+  tgpSessions: "TGP sessions",
   workMode: "Work Mode",
 };
 
@@ -1146,63 +1152,6 @@ function parseLocalAddrs(value: string): string[] {
     .filter(Boolean);
 }
 
-function telemetryBytes(data: TelemetryData | null, xrayStats: XrayTrafficStats): TrafficTotals {
-  if (!data && !xrayStats.queriedAt && xrayStats.bytesSent === 0 && xrayStats.bytesReceived === 0) {
-    return emptyTrafficTotals();
-  }
-  const tachyonUp = data?.tgp_bytes_sent ?? data?.bytes_tgp ?? 0;
-  const tachyonDown = data?.tgp_bytes_received ?? 0;
-  const xrayUp = xrayStats.bytesSent || data?.xray_bytes_sent || 0;
-  const xrayDown = xrayStats.bytesReceived || data?.xray_bytes_received || 0;
-  return {
-    tachyonDown,
-    tachyonUp,
-    totalDown: tachyonDown + xrayDown,
-    totalUp: tachyonUp + xrayUp,
-    xrayDown,
-    xrayUp,
-  };
-}
-
-function emptyTrafficTotals(): TrafficTotals {
-  return {
-    tachyonDown: 0,
-    tachyonUp: 0,
-    totalDown: 0,
-    totalUp: 0,
-    xrayDown: 0,
-    xrayUp: 0,
-  };
-}
-
-function isEmptyTrafficTotals(totals: TrafficTotals): boolean {
-  return (
-    totals.tachyonDown === 0 &&
-    totals.tachyonUp === 0 &&
-    totals.totalDown === 0 &&
-    totals.totalUp === 0 &&
-    totals.xrayDown === 0 &&
-    totals.xrayUp === 0
-  );
-}
-
-function emptyTrafficSample(): TrafficSample {
-  return {
-    tachyonDown: 0,
-    tachyonUp: 0,
-    xrayDown: 0,
-    xrayUp: 0,
-  };
-}
-
-function emptyXrayTrafficStats(): XrayTrafficStats {
-  return {
-    bytesReceived: 0,
-    bytesSent: 0,
-    queriedAt: null,
-  };
-}
-
 async function fetchSubscriptionReport(sourceUrl: string): Promise<SubscriptionParseReport> {
   return parseSubscriptionWithReport(await fetchSubscriptionText(sourceUrl));
 }
@@ -1236,20 +1185,6 @@ function templateValues(template: string, values: Record<string, string>): strin
     (current, [key, value]) => current.replace(`{${key}}`, value),
     template,
   );
-}
-
-function trafficRateSample(previous: TrafficTotals, current: TrafficTotals, elapsedMs: number): TrafficSample {
-  const seconds = Math.max(elapsedMs / 1000, 0.1);
-  return {
-    tachyonDown: rateDelta(previous.tachyonDown, current.tachyonDown, seconds),
-    tachyonUp: rateDelta(previous.tachyonUp, current.tachyonUp, seconds),
-    xrayDown: rateDelta(previous.xrayDown, current.xrayDown, seconds),
-    xrayUp: rateDelta(previous.xrayUp, current.xrayUp, seconds),
-  };
-}
-
-function rateDelta(previous: number, current: number, seconds: number): number {
-  return Math.max(0, current - previous) / seconds;
 }
 
 function polyline(points: number[], width: number, height: number, padding = 0, maxValue?: number): string {
@@ -1364,7 +1299,7 @@ export function App() {
     [activeNode, effectiveRuntimeInputs, launcherSettings, profiles, routingMode],
   );
   const trafficTotals = useMemo(
-    () => telemetryBytes(telemetry.latestTelemetry, xrayTrafficStats),
+    () => trafficTotalsFromSources(telemetry.latestTelemetry, xrayTrafficStats),
     [telemetry.latestTelemetry, xrayTrafficStats],
   );
   const trafficRates = trafficSamples[trafficSamples.length - 1] ?? emptyTrafficSample();
@@ -1975,7 +1910,7 @@ export function App() {
       if (pluginId === "traffic-stats") {
         const stats = await getXrayTrafficStats();
         setXrayTrafficStats(stats);
-        const totals = telemetryBytes(telemetry.latestTelemetry, stats);
+        const totals = trafficTotalsFromSources(telemetry.latestTelemetry, stats);
         const result = templateValues(ui.pluginStatsSnapshot, {
           tachyonDown: formatBytes(totals.tachyonDown),
           tachyonUp: formatBytes(totals.tachyonUp),
@@ -2767,7 +2702,7 @@ export function App() {
   ]);
 
   useEffect(() => {
-    if (!telemetry.latestTelemetry && isEmptyTrafficTotals(trafficTotals)) {
+    if (!hasTrafficSource(trafficTotals)) {
       previousTrafficRef.current = null;
       setTrafficSamples([]);
       return;
@@ -3140,19 +3075,35 @@ function OverviewView({
   const width = 560;
   const height = 220;
   const chartPadding = 48;
-  const trafficSeries = [
-    { className: "tachyon up", label: "Tachyon ↑", values: trafficSamples.map((item) => item.tachyonUp) },
-    { className: "tachyon down", label: "Tachyon ↓", values: trafficSamples.map((item) => item.tachyonDown) },
-    { className: "xray up", label: "Xray ↑", values: trafficSamples.map((item) => item.xrayUp) },
-    { className: "xray down", label: "Xray ↓", values: trafficSamples.map((item) => item.xrayDown) },
-  ];
-  const maxTraffic = Math.max(...trafficSeries.flatMap((item) => item.values), 1);
-  const hasTrafficSamples = trafficSamples.length > 0 && maxTraffic > 0;
+  const trafficSeries = trafficSeriesFromSamples(trafficSamples, {
+    tachyonDown: `${ui.tachyon} ↓`,
+    tachyonUp: `${ui.tachyon} ↑`,
+    xrayDown: `${ui.xray} ↓`,
+    xrayUp: `${ui.xray} ↑`,
+  });
+  const rawMaxTraffic = Math.max(...trafficSeries.flatMap((item) => item.values), 0);
+  const maxTraffic = Math.max(rawMaxTraffic, 1);
+  const hasTrafficSamples = trafficSamples.length > 0 && hasTrafficSource(trafficTotals);
+  const hasRealtimeTrafficSource = hasTrafficSource(trafficTotals);
+  const activeConnectionsPrimary = trafficTotals.activeConnections.known
+    ? String(trafficTotals.activeConnections.value ?? 0)
+    : "--";
+  const memoryPrimary = trafficTotals.memoryBytes.known
+    ? formatBytes(trafficTotals.memoryBytes.value)
+    : "--";
   const trafficSources: TrafficSourceBadge[] = [
     {
-      detail: telemetry.connection === "connected" ? ui.tachyonTelemetryActive : ui.tachyonTelemetryWaiting,
+      detail: tachyonRunning
+        ? telemetry.connection === "connected"
+          ? ui.tachyonTelemetryActive
+          : ui.tachyonTelemetryWaiting
+        : ui.tachyonStopped,
       label: ui.tachyon,
-      state: telemetry.connection === "connected" ? "ok" : "checking",
+      state: tachyonRunning
+        ? telemetry.connection === "connected"
+          ? "ok"
+          : "checking"
+        : "idle",
     },
     xrayStatsError
       ? {
@@ -3193,19 +3144,35 @@ function OverviewView({
   return (
     <div className="overview-page page-enter">
       <div className="overview-metrics">
-        <MetricCard label={ui.realTimeTraffic} primary={`↑ ${formatRate(trafficRates.tachyonUp + trafficRates.xrayUp)}`} secondary={`↓ ${formatRate(trafficRates.tachyonDown + trafficRates.xrayDown)}`} />
-        <MetricCard label={ui.totalTraffic} primary={`↑ ${formatBytes(trafficTotals.totalUp)}`} secondary={`↓ ${formatBytes(trafficTotals.totalDown)}`} />
-        <MetricCard label={ui.activeConnections} primary={`${telemetry.latestTelemetry?.tgp_sessions ?? 0}`} secondary={`${nodeCount} nodes`} />
-        <MetricCard label={ui.memory} primary={`${telemetry.latestTelemetry?.goroutines ?? 0}`} secondary="goroutines" />
+        <MetricCard
+          label={ui.realTimeTraffic}
+          primary={hasRealtimeTrafficSource ? `↑ ${formatRate(trafficRates.tachyonUp + trafficRates.xrayUp)}` : "--"}
+          secondary={hasRealtimeTrafficSource ? `↓ ${formatRate(trafficRates.tachyonDown + trafficRates.xrayDown)}` : ui.metricUnknown}
+        />
+        <MetricCard
+          label={ui.totalTraffic}
+          primary={hasRealtimeTrafficSource ? `↑ ${formatBytes(trafficTotals.totalUp)}` : "--"}
+          secondary={hasRealtimeTrafficSource ? `↓ ${formatBytes(trafficTotals.totalDown)}` : ui.metricUnknown}
+        />
+        <MetricCard
+          label={ui.activeConnections}
+          primary={activeConnectionsPrimary}
+          secondary={trafficTotals.activeConnections.known ? ui.tgpSessions : ui.tachyonTelemetryWaiting}
+        />
+        <MetricCard
+          label={ui.memory}
+          primary={memoryPrimary}
+          secondary={trafficTotals.memoryBytes.known ? "RSS" : ui.memoryNotExposed}
+        />
       </div>
 
       <div className="runtime-presence">
         <span className={xrayRunning ? "status-dot connected" : "status-dot stopped"} />
         <strong>{ui.xray}</strong>
-        <span>{xrayRunning ? "online" : "offline"}</span>
+        <span>{xrayRunning ? ui.runtimeOnline : ui.runtimeOffline}</span>
         <span className={tachyonRunning ? "status-dot connected" : "status-dot stopped"} />
         <strong>{ui.tachyon}</strong>
-        <span>{tachyonRunning ? "online" : "offline"}</span>
+        <span>{tachyonRunning ? ui.runtimeOnline : ui.runtimeOffline}</span>
         <strong>Server</strong>
         <span>
           {activeTachyonServer
