@@ -59,6 +59,143 @@ export const singBoxTuicJsonFixture = JSON.stringify({
   ],
 });
 
+export const xrayFullConfigJsonFixture = JSON.stringify({
+  log: { loglevel: "info", dnsLog: true },
+  dns: {
+    servers: [
+      {
+        address: "1.1.1.1",
+        port: 53,
+      },
+    ],
+    queryStrategy: "UseIPv4",
+  },
+  routing: {
+    domainStrategy: "IPOnDemand",
+    domainMatcher: "hybrid",
+    rules: [
+      {
+        type: "field",
+        domain: ["full:user.example.com"],
+        outboundTag: "tachyon-proxy",
+      },
+      {
+        type: "field",
+        inboundTag: ["tachyon-socks"],
+        outboundTag: "tachyon-proxy",
+      },
+    ],
+    userRoutingField: { retained: true },
+  },
+  policy: {
+    levels: {
+      "0": {
+        handshake: 7,
+        userUplink: true,
+      },
+    },
+    system: {
+      statsUserUplink: true,
+    },
+    userPolicyField: "keep-policy",
+  },
+  stats: {
+    userStatsField: ["keep", "stats"],
+  },
+  api: {
+    tag: "user-api",
+    services: ["HandlerService"],
+    userApiField: { retained: true },
+  },
+  fakedns: [
+    {
+      ipPool: "198.18.0.0/15",
+      poolSize: 1024,
+    },
+  ],
+  observatory: {
+    subjectSelector: ["Xray Full"],
+    probeUrl: "https://www.gstatic.com/generate_204",
+    probeInterval: "30s",
+    enableConcurrency: true,
+  },
+  burstObservatory: {
+    subjectSelector: ["tachyon-proxy"],
+    pingConfig: {
+      destination: "https://www.gstatic.com/generate_204",
+      connectivity: "http",
+      interval: "10s",
+      sampling: 3,
+      timeout: "5s",
+    },
+  },
+  inbounds: [
+    {
+      tag: "tachyon-socks",
+      listen: "127.0.0.1",
+      port: 18000,
+      protocol: "dokodemo-door",
+      settings: { address: "127.0.0.1", port: 9, network: "tcp" },
+      userInboundField: "keep-inbound",
+    },
+  ],
+  outbounds: [
+    {
+      tag: "Xray Full Trojan TLS",
+      protocol: "trojan",
+      settings: {
+        servers: [
+          {
+            address: "xray-trojan.example.com",
+            port: 443,
+            password: "xray-trojan-secret",
+          },
+        ],
+      },
+      streamSettings: {
+        security: "tls",
+        tlsSettings: {
+          serverName: "edge.example.com",
+          fingerprint: "chrome",
+        },
+        sockopt: {
+          tcpKeepAliveIdle: 60,
+          tcpKeepAliveInterval: 30,
+        },
+      },
+      userOutboundField: { retained: true },
+    },
+    {
+      tag: "tachyon-proxy",
+      protocol: "vmess",
+      settings: {
+        address: "backup-vmess.example.com",
+        port: 8443,
+        id: "backup-vmess-uuid",
+        security: "auto",
+      },
+      streamSettings: {
+        network: "xhttp",
+        security: "tls",
+        tlsSettings: {
+          serverName: "backup-edge.example.com",
+          alpn: ["h2", "http/1.1"],
+        },
+        xhttpSettings: {
+          path: "/xhttp",
+          mode: "auto",
+          extra: {
+            xPaddingBytes: "100-1000",
+          },
+        },
+      },
+    },
+  ],
+  userTopLevelField: {
+    nested: ["preserve", { exactly: true }],
+  },
+});
+
 export const subscriptionCompatibilityFixtures: SubscriptionCompatibilityFixture[] = [
   {
     id: "vless-reality",

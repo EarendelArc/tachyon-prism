@@ -1,6 +1,9 @@
 import { defaultLauncherSettings } from "./gameProfiles";
 import type { GameProfile, LauncherSettings } from "./gameProfiles";
-import { buildXrayOutboundDraft } from "./subscriptions";
+import {
+  buildXrayOutboundDraft,
+  xrayConfigTemplateForNode,
+} from "./subscriptions";
 import type { ProxyNode, XrayOutboundObject } from "./subscriptions";
 
 export interface XrayClientDraftOptions {
@@ -46,10 +49,50 @@ export function buildXrayClientConfigDraft(
   options: XrayClientDraftOptions = {},
 ): Record<string, unknown> {
   const xrayOutbound = buildXrayOutboundDraft(node);
-  const outbound = withTag(xrayOutbound, "tachyon-proxy");
+  const importedConfig = xrayConfigTemplateForNode(node) ?? {};
+  const importedInbounds = recordArray(importedConfig.inbounds);
+  const importedOutbounds = recordArray(importedConfig.outbounds);
+  const importedApi = asRecord(importedConfig.api);
+  const importedApiTag = stringValue(importedApi.tag);
+  const usedTags = new Set(
+    [...importedInbounds, ...importedOutbounds]
+      .map((item) => stringValue(item.tag))
+      .filter(Boolean),
+  );
+  if (importedApiTag) {
+    usedTags.add(importedApiTag);
+  }
+  const importedOutboundIndex = node.xrayOutboundIndex;
+  const importedSelectedOutbound = Number.isInteger(importedOutboundIndex)
+    ? importedOutbounds[importedOutboundIndex!]
+    : undefined;
+  const importedProxyTag = stringValue(importedSelectedOutbound?.tag);
+  const proxyTag = importedProxyTag || uniqueManagedTag("tachyon-proxy", usedTags);
+  const directTag = uniqueManagedTag("tachyon-direct", usedTags);
+  const blockTag = uniqueManagedTag("tachyon-block", usedTags);
+  const socksTag = uniqueManagedTag("tachyon-socks", usedTags);
+  const httpTag = uniqueManagedTag("tachyon-http", usedTags);
+  const statsEnabled = Boolean(options.enableStats);
+  const apiTag = statsEnabled
+    ? importedApiTag || uniqueManagedTag("tachyon-xray-api", usedTags)
+    : "";
+  const apiInboundTag = statsEnabled
+    ? uniqueManagedTag("tachyon-xray-api-in", usedTags)
+    : "";
+  if (importedSelectedOutbound && !importedProxyTag) {
+    importedSelectedOutbound.tag = proxyTag;
+  }
+  const outbound = withTag(xrayOutbound, proxyTag);
+  const config: Record<string, unknown> = {
+    ...importedConfig,
+    log: importedConfig.log ?? {
+      loglevel: "warning",
+    },
+  };
   const inbounds: Array<Record<string, unknown>> = [
+    ...importedInbounds,
     {
-      tag: "tachyon-socks",
+      tag: socksTag,
       listen: options.socksListen ?? "127.0.0.1",
       port: options.socksPort ?? 10808,
       protocol: "socks",
@@ -60,7 +103,7 @@ export function buildXrayClientConfigDraft(
     },
   ];
   inbounds.push({
-    tag: "tachyon-http",
+    tag: httpTag,
     listen: options.httpListen ?? "127.0.0.1",
     port: options.httpPort ?? 10809,
     protocol: "http",
@@ -69,27 +112,34 @@ export function buildXrayClientConfigDraft(
     },
   });
   const outbounds = [
-    outbound,
+    ...(importedSelectedOutbound ? [] : [outbound]),
     {
-      tag: "tachyon-direct",
+      tag: directTag,
       protocol: "freedom",
     },
     {
-      tag: "tachyon-block",
+      tag: blockTag,
       protocol: "blackhole",
     },
+    ...importedOutbounds,
   ];
-  const config: Record<string, unknown> = {
-    log: {
-      loglevel: "warning",
-    },
-    inbounds,
-    routing: xrayRouting(options.routingMode ?? "rule", Boolean(options.enableStats)),
-    outbounds,
-  };
-  if (options.enableStats) {
+  config.inbounds = inbounds;
+  config.outbounds = outbounds;
+  config.routing = mergeXrayRouting(
+    importedConfig.routing,
+    xrayRouting(options.routingMode ?? "rule", statsEnabled, {
+      apiInboundTag,
+      apiTag,
+      blockTag,
+      directTag,
+      httpTag,
+      proxyTag,
+      socksTag,
+    }),
+  );
+  if (statsEnabled) {
     inbounds.push({
-      tag: "tachyon-xray-api-in",
+      tag: apiInboundTag,
       listen: options.statsListen ?? "127.0.0.1",
       port: options.statsPort ?? 10085,
       protocol: "tunnel",
@@ -98,20 +148,82 @@ export function buildXrayClientConfigDraft(
       },
     });
     config.api = {
-      tag: "tachyon-xray-api",
-      services: ["StatsService"],
+      ...importedApi,
+      tag: apiTag,
+      services: mergeStringList(importedApi.services, "StatsService"),
     };
+    const importedPolicy = asRecord(importedConfig.policy);
+    const importedSystemPolicy = asRecord(importedPolicy.system);
     config.policy = {
+      ...importedPolicy,
       system: {
+        ...importedSystemPolicy,
         statsInboundDownlink: true,
         statsInboundUplink: true,
         statsOutboundDownlink: true,
         statsOutboundUplink: true,
       },
     };
-    config.stats = {};
+    config.stats = isRecord(importedConfig.stats)
+      ? cloneRecord(importedConfig.stats)
+      : {};
   }
   return config;
+}
+
+function cloneRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+}
+
+function recordArray(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value)
+    ? value.filter(isRecord).map((item) => cloneRecord(item))
+    : [];
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function uniqueManagedTag(preferred: string, usedTags: Set<string>): string {
+  let tag = preferred;
+  let suffix = 2;
+  while (usedTags.has(tag)) {
+    tag = `${preferred}-${suffix}`;
+    suffix += 1;
+  }
+  usedTags.add(tag);
+  return tag;
+}
+
+function mergeStringList(value: unknown, required: string): string[] {
+  const items = Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+  return items.includes(required) ? items : [...items, required];
+}
+
+function mergeXrayRouting(
+  imported: unknown,
+  managed: Record<string, unknown>,
+): Record<string, unknown> {
+  const importedRouting = asRecord(imported);
+  return {
+    ...managed,
+    ...cloneRecord(importedRouting),
+    rules: [
+      ...recordArray(managed.rules),
+      ...recordArray(importedRouting.rules),
+    ],
+  };
 }
 
 export function buildCoreClientConfigDraft(
@@ -212,13 +324,28 @@ function withTag(outbound: XrayOutboundObject, tag: string): XrayOutboundObject 
   };
 }
 
-function xrayRouting(mode: XrayRoutingMode, enableStats = false): Record<string, unknown> {
+interface XrayManagedTags {
+  apiInboundTag: string;
+  apiTag: string;
+  blockTag: string;
+  directTag: string;
+  httpTag: string;
+  proxyTag: string;
+  socksTag: string;
+}
+
+function xrayRouting(
+  mode: XrayRoutingMode,
+  enableStats: boolean,
+  tags: XrayManagedTags,
+): Record<string, unknown> {
+  const localInboundTags = [tags.socksTag, tags.httpTag];
   const apiRule = enableStats
     ? [
         {
           type: "field",
-          inboundTag: ["tachyon-xray-api-in"],
-          outboundTag: "tachyon-xray-api",
+          inboundTag: [tags.apiInboundTag],
+          outboundTag: tags.apiTag,
         },
       ]
     : [];
@@ -229,8 +356,8 @@ function xrayRouting(mode: XrayRoutingMode, enableStats = false): Record<string,
         ...apiRule,
         {
           type: "field",
-          inboundTag: ["tachyon-socks", "tachyon-http"],
-          outboundTag: mode === "direct" ? "tachyon-direct" : "tachyon-proxy",
+          inboundTag: localInboundTags,
+          outboundTag: mode === "direct" ? tags.directTag : tags.proxyTag,
         },
       ],
     };
@@ -242,21 +369,21 @@ function xrayRouting(mode: XrayRoutingMode, enableStats = false): Record<string,
       ...apiRule,
       {
         type: "field",
-        inboundTag: ["tachyon-socks", "tachyon-http"],
+        inboundTag: localInboundTags,
         ip: ["geoip:private"],
-        outboundTag: "tachyon-direct",
+        outboundTag: tags.directTag,
       },
       {
         type: "field",
-        inboundTag: ["tachyon-socks", "tachyon-http"],
+        inboundTag: localInboundTags,
         domain: ["geosite:private"],
-        outboundTag: "tachyon-direct",
+        outboundTag: tags.directTag,
       },
       {
         type: "field",
-        inboundTag: ["tachyon-socks", "tachyon-http"],
+        inboundTag: localInboundTags,
         protocol: ["bittorrent"],
-        outboundTag: "tachyon-block",
+        outboundTag: tags.blockTag,
       },
     ],
   };

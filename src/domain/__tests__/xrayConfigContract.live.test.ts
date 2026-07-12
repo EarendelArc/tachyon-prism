@@ -84,6 +84,59 @@ describe("live Xray config contract", () => {
     },
   );
 
+  itWithXray("accepts a managed-tag merge from an imported multi-outbound config", () => {
+    const payload = JSON.stringify({
+      log: { loglevel: "warning" },
+      inbounds: [
+        {
+          tag: "tachyon-socks",
+          listen: "127.0.0.1",
+          port: 19120,
+          protocol: "socks",
+          settings: { auth: "noauth", udp: true },
+        },
+      ],
+      routing: {
+        domainStrategy: "AsIs",
+        rules: [
+          {
+            type: "field",
+            inboundTag: ["tachyon-socks"],
+            outboundTag: "tachyon-proxy",
+          },
+        ],
+      },
+      outbounds: [
+        {
+          tag: "tachyon-proxy",
+          protocol: "freedom",
+          settings: { domainStrategy: "UseIPv4" },
+        },
+        {
+          tag: "user-backup",
+          protocol: "freedom",
+          settings: { domainStrategy: "UseIPv6" },
+        },
+      ],
+    });
+    const nodes = parseSubscription(payload);
+    const config = buildXrayClientConfigDraft(nodes[1], {
+      enableStats: false,
+      httpPort: 19122,
+      routingMode: "global",
+      socksPort: 19121,
+    });
+    const tempDir = mkdtempSync(join(tmpdir(), "tachyon-prism-xray-import-contract-"));
+    const configPath = join(tempDir, "xray-client.json");
+
+    try {
+      writeFileSync(configPath, stringifyDraft(config), "utf8");
+      xrayExecHelper(xrayBinaryPath!, configPath, []);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("blocks TUIC before any xray exec helper is called", () => {
     const [node] = parseSubscription(singBoxTuicJsonFixture);
 

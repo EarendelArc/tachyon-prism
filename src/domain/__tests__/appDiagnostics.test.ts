@@ -49,8 +49,18 @@ describe("diagnostics UI wiring", () => {
     expect(appSource).not.toContain("Tachyon game acceleration can run without enabling OS TUN routing");
   });
 
-  it("includes Tachyon Core failure details in Start All messages", () => {
-    expect(appSource).toContain("tachyonStart.error || \"Tachyon Core game acceleration unavailable\"");
-    expect(appSource).toContain("xrayStart.error || \"Xray failed\"");
+  it("uses atomic dual-core commands and refreshes runtime state after failures", () => {
+    const startAll = /async function startAllRuntime[\s\S]*?\n  async function stopAllRuntime/.exec(appSource)?.[0];
+    const stopAll = /async function stopAllRuntime[\s\S]*?\n  async function handleWindowAction/.exec(appSource)?.[0];
+
+    expect(startAll).toContain('invokeDesktop<StartAllResult>("start_all"');
+    expect(startAll).toContain("setRuntimeStatus(result.runtime)");
+    expect(startAll).toContain("String(error || ui.capabilityUnavailable)");
+    expect(startAll).toContain("await refreshRuntime()");
+    expect(startAll).not.toContain('startRuntime("xray")');
+    expect(stopAll).toContain('invokeDesktop<StopAllResult>("stop_all")');
+    expect(stopAll).toContain('result.errors.join("; ")');
+    expect(stopAll).toContain("await refreshRuntime()");
+    expect(stopAll).not.toContain('stopRuntime("xray")');
   });
 });

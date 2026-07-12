@@ -20,6 +20,11 @@
         "height": 540,
         "minWidth": 800,
         "minHeight": 540,
+        "maxWidth": 800,
+        "maxHeight": 540,
+        "resizable": false,
+        "maximizable": false,
+        "fullscreen": false,
         "decorations": false,
         "visible": true,
         "shadow": true

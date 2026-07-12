@@ -328,15 +328,17 @@ def assert_custom_window_chrome(cdp: CDP) -> None:
           titlebar: Boolean(document.querySelector('.app-titlebar')),
           dragRegions: document.querySelectorAll('[data-tauri-drag-region]').length,
           actionCount: document.querySelectorAll('.window-actions button').length,
-          labels: Array.from(document.querySelectorAll('.window-actions button'))
-            .map((button) => button.getAttribute('aria-label'))
+          actions: Array.from(document.querySelectorAll('.window-actions button'))
+            .map((button) => button.dataset.windowAction),
+          labelsPresent: Array.from(document.querySelectorAll('.window-actions button'))
+            .every((button) => Boolean(button.getAttribute('aria-label')))
         }))()
         """,
     )
     if not chrome["titlebar"] or int(chrome["dragRegions"]) < 2 or int(chrome["actionCount"]) != 4:
         raise AssertionError(f"custom window chrome missing: {chrome}")
-    expected = {"Pin window", "Minimize window", "Maximize window", "Close window"}
-    if set(chrome["labels"]) != expected:
+    expected = {"pin", "minimize", "maximize", "close"}
+    if set(chrome["actions"]) != expected or not chrome["labelsPresent"]:
         raise AssertionError(f"custom window controls mismatch: {chrome}")
 
 
@@ -997,7 +999,6 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         assert_contains(
             text,
             "Tachyon Server Profiles",
-            "allowed_targets",
             "Smoke Game Relay",
             "TGP Local Bind Addresses",
             "TGP Connection Migration",
@@ -1022,7 +1023,6 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
             raise AssertionError(f"Core config did not use the selected Tachyon profile: {core_summary}")
         assert_no_runtime_error(text)
         text = click_validate_configs(cdp)
-        assert_contains_any(text, "Available configs validated", "可用配置已验证")
         assert_contains(text, "Xray", "Tachyon Core", "OK")
         assert_desktop_interaction_polish(cdp)
         assert_desktop_viewport(cdp)

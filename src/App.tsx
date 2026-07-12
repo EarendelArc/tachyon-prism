@@ -40,6 +40,7 @@ import {
   getSystemProxyStatus,
   getXrayTrafficStats,
   disableSystemProxy,
+  enableSystemProxy,
   installLatestTachyonCore,
   installLatestXray,
   installManagedBinary,
@@ -149,10 +150,27 @@ type ReadinessState = "error" | "ok" | "warning";
 type SubscriptionViewMode = "grid" | "list";
 type ValidationResults = Partial<Record<ManagedBinaryKind, ConfigValidationResult>>;
 type ProbeState = "error" | "idle" | "ok" | "running";
+type PluginFilter = "all" | "enabled" | "installed";
+
+interface TimedTrafficSample extends TrafficSample {
+  at: number;
+}
 
 interface RuntimeStartResult {
   error: string | null;
   ok: boolean;
+}
+
+interface StartAllResult {
+  runtime: RuntimeStatus;
+  confirmation: string;
+}
+
+interface StopAllResult {
+  runtime: RuntimeStatus;
+  proxyRestored: boolean;
+  proxyRestoreStatus: string;
+  errors: string[];
 }
 
 interface XrayProbeStatus {
@@ -246,6 +264,7 @@ const pluginCatalogIds = [
 const zh = {
   activeConnections: "活动连接",
   add: "添加",
+  all: "全部",
   addProgram: "添加程序",
   autoSelect: "自动选择",
   cardMode: "卡片模式",
@@ -256,6 +275,8 @@ const zh = {
   configs: "配置",
   controller: "控制器",
   coreSettings: "核心",
+  coreControl: "核心控制",
+  coreStatus: "双核心状态",
   currentNode: "当前节点",
   directMode: "直连",
   directModeDesc: "直接连接所有流量",
@@ -265,6 +286,7 @@ const zh = {
   globalMode: "全局",
   import: "导入",
   install: "安装",
+  installed: "已安装",
   installLatest: "安装最新版",
   installWintun: "安装 Wintun",
   language: "语言",
@@ -274,6 +296,7 @@ const zh = {
   memoryNotExposed: "内存接口待接入",
   metricUnknown: "未知",
   nodeSelector: "节点选择",
+  nodes: "节点",
   overview: "概览",
   plugins: "插件",
   readiness: "就绪检查",
@@ -293,13 +316,18 @@ const zh = {
   start: "启动",
   startAll: "启动全部",
   startAllComplete: "Xray Core 与 Tachyon Core 已启动",
+  startAllFailed: "双核心启动事务失败",
   startAllPartial: "Xray Core {xray} / Tachyon Core {tachyon}",
   runtimeStarted: "已启动",
   runtimeFailed: "启动失败",
   runtimeOnline: "运行中",
   runtimeOffline: "未运行",
+  capabilityChecking: "正在检查能力",
+  capabilityUnavailable: "能力不可用",
   stop: "停止",
   stopAll: "停止全部",
+  stopAllComplete: "Xray Core 与 Tachyon Core 已停止",
+  stopAllFailed: "双核心停止事务失败",
   subscriptions: "订阅",
   tachyon: "Tachyon",
   tachyonAdaptiveFec: "TGP 自适应 FEC",
@@ -363,6 +391,7 @@ const zh = {
   executablePath: "可执行文件路径",
   expand: "展开",
   filter: "筛选",
+  fixedWindow: "固定 800 × 540 窗口",
   followSystem: "跟随系统",
   gameMode: "游戏模式",
   globalModeDesc: "仅走 Global 策略组",
@@ -398,6 +427,7 @@ const zh = {
   pluginLastRun: "最后运行",
   pluginLastResult: "最后结果",
   pluginNeverRun: "未运行",
+  pluginNoMatches: "当前筛选下没有插件",
   pluginNoResult: "暂无结果",
   pluginNotInstalled: "未安装",
   pluginRunCompleted: "{title} 运行完成",
@@ -469,14 +499,23 @@ const zh = {
   subscriptionsUpdated: "{count} 个订阅已更新",
   subscriptionsUpdatedPartial: "{ok}/{total} 个订阅已更新",
   systemProxy: "系统代理",
+  systemProxyEnabled: "由 Prism 接管",
+  systemProxyDisabled: "未启用",
+  systemProxyNeedsXray: "启动 Xray 后可用",
+  systemProxyOtherActive: "检测到其他系统代理",
+  systemProxyUnsupported: "当前平台后端不支持",
   theme: "主题",
   totalTraffic: "总流量",
   tunMode: "TUN模式",
+  tunRuntimeUnavailable: "runtime 尚未暴露启停能力",
+  tunSettingUnavailable: "runtime 尚未暴露该设置；当前配置固定为关闭",
   unavailableInThisBuild: "当前版本禁用，避免影响正在进行的游戏",
   unavailable: "不可用",
   uploadRate: "上传速率",
   urlTest: "URLTest",
   waitingTelemetry: "等待遥测流...",
+  liveWindow: "实时窗口",
+  openCoreSettings: "打开核心设置",
   xrayStatsActive: "Stats 已连接",
   xrayStatsDisabled: "Stats 已关闭",
   xrayStatsError: "Stats 错误",
@@ -487,11 +526,17 @@ const zh = {
   tachyonStopped: "Tachyon 未运行",
   tgpSessions: "TGP 会话",
   workMode: "工作模式",
+  windowControls: "窗口控制",
+  pinWindow: "置顶窗口",
+  minimizeWindow: "最小化窗口",
+  maximizeUnavailable: "固定窗口不可最大化",
+  closeWindow: "关闭窗口",
 };
 
 const en: typeof zh = {
   activeConnections: "Active",
   add: "Add",
+  all: "All",
   addProgram: "Add Program",
   autoSelect: "Auto Select",
   cardMode: "Card Mode",
@@ -502,6 +547,8 @@ const en: typeof zh = {
   configs: "Config",
   controller: "Controller",
   coreSettings: "Core",
+  coreControl: "Core Control",
+  coreStatus: "Dual-core status",
   currentNode: "Current Node",
   directMode: "Direct",
   directModeDesc: "Direct all traffic",
@@ -511,6 +558,7 @@ const en: typeof zh = {
   globalMode: "Global",
   import: "Import",
   install: "Install",
+  installed: "Installed",
   installLatest: "Install Latest",
   installWintun: "Install Wintun",
   language: "Language",
@@ -520,6 +568,7 @@ const en: typeof zh = {
   memoryNotExposed: "Memory API not exposed",
   metricUnknown: "Unknown",
   nodeSelector: "Node Selector",
+  nodes: "nodes",
   overview: "Overview",
   plugins: "Plugins",
   readiness: "Readiness",
@@ -539,13 +588,18 @@ const en: typeof zh = {
   start: "Start",
   startAll: "Start All",
   startAllComplete: "Xray Core and Tachyon Core started",
+  startAllFailed: "Dual-core start transaction failed",
   startAllPartial: "Xray Core {xray} / Tachyon Core {tachyon}",
   runtimeStarted: "started",
   runtimeFailed: "failed",
   runtimeOnline: "Online",
   runtimeOffline: "Offline",
+  capabilityChecking: "Checking capability",
+  capabilityUnavailable: "Capability unavailable",
   stop: "Stop",
   stopAll: "Stop All",
+  stopAllComplete: "Xray Core and Tachyon Core stopped",
+  stopAllFailed: "Dual-core stop transaction failed",
   subscriptions: "Subscriptions",
   tachyon: "Tachyon",
   tachyonAdaptiveFec: "TGP Adaptive FEC",
@@ -609,6 +663,7 @@ const en: typeof zh = {
   executablePath: "Executable path",
   expand: "Expand",
   filter: "Filter",
+  fixedWindow: "Fixed 800 × 540 window",
   followSystem: "Follow system",
   gameMode: "Game Mode",
   globalModeDesc: "Use only the Global policy group",
@@ -644,6 +699,7 @@ const en: typeof zh = {
   pluginLastRun: "Last run",
   pluginLastResult: "Last result",
   pluginNeverRun: "Never run",
+  pluginNoMatches: "No plugins match this filter",
   pluginNoResult: "No result yet",
   pluginNotInstalled: "Not installed",
   pluginRunCompleted: "{title} run completed",
@@ -715,14 +771,23 @@ const en: typeof zh = {
   subscriptionsUpdated: "{count} subscriptions updated",
   subscriptionsUpdatedPartial: "{ok}/{total} subscriptions updated",
   systemProxy: "System Proxy",
+  systemProxyEnabled: "Managed by Prism",
+  systemProxyDisabled: "Disabled",
+  systemProxyNeedsXray: "Available after Xray starts",
+  systemProxyOtherActive: "Another system proxy is active",
+  systemProxyUnsupported: "Unsupported by this platform backend",
   theme: "Theme",
   totalTraffic: "Total Traffic",
   tunMode: "TUN Mode",
+  tunRuntimeUnavailable: "Runtime start/stop capability is not exposed yet",
+  tunSettingUnavailable: "Runtime does not expose this setting yet; the generated config keeps it off",
   unavailableInThisBuild: "Disabled in this build to avoid disrupting active games",
   unavailable: "Unavailable",
   uploadRate: "Upload rate",
   urlTest: "URLTest",
   waitingTelemetry: "Waiting for telemetry stream...",
+  liveWindow: "Live window",
+  openCoreSettings: "Open Core Settings",
   xrayStatsActive: "Stats connected",
   xrayStatsDisabled: "Stats disabled",
   xrayStatsError: "Stats error",
@@ -733,6 +798,11 @@ const en: typeof zh = {
   tachyonStopped: "Tachyon stopped",
   tgpSessions: "TGP sessions",
   workMode: "Work Mode",
+  windowControls: "Window controls",
+  pinWindow: "Pin window",
+  minimizeWindow: "Minimize window",
+  maximizeUnavailable: "Maximize is unavailable for the fixed window",
+  closeWindow: "Close window",
 };
 
 function selectedNode(snapshot: SubscriptionSnapshot): ProxyNode | undefined {
@@ -1251,7 +1321,6 @@ export function App() {
   const [binaryBusy, setBinaryBusy] = useState(false);
   const [message, setMessage] = useState("Ready");
   const [alwaysOnTop, setAlwaysOnTop] = useState(false);
-  const [windowMaximized, setWindowMaximized] = useState(false);
   const [telemetry, setTelemetry] = useState<TelemetryState>(() => ({
     connection: "disconnected",
     hello: null,
@@ -1274,7 +1343,7 @@ export function App() {
     report: null,
     state: "idle",
   });
-  const [trafficSamples, setTrafficSamples] = useState<TrafficSample[]>([]);
+  const [trafficSamples, setTrafficSamples] = useState<TimedTrafficSample[]>([]);
   const previousTrafficRef = useRef<{ at: number; totals: TrafficTotals } | null>(null);
   const subscriptionNameInputRef = useRef<HTMLInputElement | null>(null);
   const t = useMemo(() => createTranslator(language), [language]);
@@ -1523,6 +1592,23 @@ export function App() {
     { label: "Xray Core", value: processStatusLabel(runtimeStatus?.xray) },
     { label: "Tachyon Core", value: processStatusLabel(runtimeStatus?.tachyonCore) },
   ];
+  const xrayRunning = runtimeStatus?.xray.state === "running";
+  const tachyonRunning = runtimeStatus?.tachyonCore.state === "running";
+  const systemProxyActive = Boolean(systemProxy?.matchesPrism);
+  const systemProxyInteractive = Boolean(
+    systemProxy?.supported && (systemProxy.matchesPrism || (!systemProxy.enabled && xrayRunning)),
+  );
+  const systemProxyReason = !systemProxy
+    ? ui.capabilityChecking
+    : !systemProxy.supported
+      ? systemProxy.error || ui.systemProxyUnsupported
+      : systemProxy.enabled && !systemProxy.matchesPrism
+        ? ui.systemProxyOtherActive
+        : !systemProxy.matchesPrism && !xrayRunning
+          ? ui.systemProxyNeedsXray
+          : systemProxy.matchesPrism
+            ? ui.systemProxyEnabled
+            : ui.systemProxyDisabled;
   const connectionLabel =
     connection === "connected"
       ? t("common.connected")
@@ -2359,7 +2445,20 @@ export function App() {
   }
 
   async function toggleSystemProxy() {
-    setMessage(ui.unavailableInThisBuild);
+    if (!systemProxyInteractive) {
+      setMessage(systemProxyReason);
+      return;
+    }
+    try {
+      const status = systemProxyActive
+        ? await disableSystemProxy()
+        : await enableSystemProxy();
+      setSystemProxy(status);
+      setMessage(status.matchesPrism ? ui.systemProxyEnabled : ui.systemProxyDisabled);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : ui.capabilityUnavailable);
+      await refreshSystemProxy();
+    }
   }
 
   async function probeXrayProxy() {
@@ -2487,49 +2586,51 @@ export function App() {
   }
 
   async function startAllRuntime() {
-    const xrayStart = await startRuntime("xray");
-    const tachyonStart = await startRuntime("tachyonCore");
-    await refreshRuntime();
-    if (xrayStart.ok && tachyonStart.ok) {
+    try {
+      const paths = await writeDrafts();
+      const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
+      setRuntimeInputs(settings);
+      await runConfigValidation("xray", paths, settings, false);
+      await runConfigValidation("tachyonCore", paths, settings, false);
+      const preflight = await assertTachyonCoreStartable(paths, settings);
+      setMessage(tachyonCorePreflightReadinessMessage(preflight));
+      const result = await invokeDesktop<StartAllResult>("start_all", {
+        tachyonCoreBinaryPath: settings.tachyonCoreBinaryPath,
+        tachyonCoreConfigPath: paths.coreConfigPath,
+        xrayBinaryPath: settings.xrayBinaryPath,
+        xrayConfigPath: paths.xrayConfigPath,
+      });
+      setRuntimeStatus(result.runtime);
       setMessage(ui.startAllComplete);
-    } else if (xrayStart.ok || tachyonStart.ok) {
-      const tachyonStatus = tachyonStart.ok
-        ? ui.runtimeStarted
-        : `${ui.runtimeFailed}: ${tachyonStart.error || "Tachyon Core game acceleration unavailable"}`;
-      setMessage(
-        templateValues(ui.startAllPartial, {
-          xray: xrayStart.ok ? ui.runtimeStarted : `${ui.runtimeFailed}: ${xrayStart.error || "Xray failed"}`,
-          tachyon: tachyonStatus,
-        }),
-      );
-    } else {
-      setMessage(
-        templateValues(ui.startAllPartial, {
-          xray: `${ui.runtimeFailed}: ${xrayStart.error || "Xray failed"}`,
-          tachyon: `${ui.runtimeFailed}: ${
-            tachyonStart.error || "Tachyon Core game acceleration unavailable"
-          }`,
-        }),
-      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error || ui.capabilityUnavailable);
+      setMessage(`${ui.startAllFailed}: ${detail}`);
+      await refreshRuntime();
     }
   }
 
   async function stopAllRuntime() {
     try {
-      if (systemProxy?.matchesPrism) {
-        const proxy = await disableSystemProxy();
-        setSystemProxy(proxy);
+      const result = await invokeDesktop<StopAllResult>("stop_all");
+      setRuntimeStatus(result.runtime);
+      setMessage(
+        result.errors.length === 0
+          ? ui.stopAllComplete
+          : `${ui.stopAllFailed}: ${result.errors.join("; ")}`,
+      );
+      if (result.errors.length > 0) {
+        await refreshRuntime();
       }
-    } catch {
-      // Continue stopping subprocesses even if proxy cleanup fails.
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error || ui.capabilityUnavailable);
+      setMessage(`${ui.stopAllFailed}: ${detail}`);
+      await refreshRuntime();
+    } finally {
+      await refreshSystemProxy();
     }
-    await stopRuntime("xray");
-    await stopRuntime("tachyonCore");
-    await refreshRuntime();
-    await refreshSystemProxy();
   }
 
-  async function handleWindowAction(action: "pin" | "minimize" | "maximize" | "close") {
+  async function handleWindowAction(action: "pin" | "minimize" | "close") {
     if (!isTauriRuntime()) {
       return;
     }
@@ -2543,13 +2644,6 @@ export function App() {
       }
       if (action === "minimize") {
         await invokeDesktop<void>("window_minimize");
-        return;
-      }
-      if (action === "maximize") {
-        const maximized = await invokeDesktop<boolean>("window_set_maximized", {
-          value: !windowMaximized,
-        });
-        setWindowMaximized(maximized);
         return;
       }
       await invokeDesktop<void>("window_close");
@@ -2573,13 +2667,6 @@ export function App() {
       .startDragging()
       .catch(() => invokeDesktop<void>("window_start_dragging"))
       .catch(() => undefined);
-  }
-
-  function handleTitlebarDoubleClick(event: React.MouseEvent<HTMLElement>) {
-    if (titlebarDragBlocked(event.target)) {
-      return;
-    }
-    void handleWindowAction("maximize");
   }
 
   function changeLanguage(nextLanguage: Language) {
@@ -2715,7 +2802,7 @@ export function App() {
       return;
     }
     const sample = trafficRateSample(previous.totals, totals, now - previous.at);
-    setTrafficSamples((current) => [...current, sample].slice(-34));
+    setTrafficSamples((current) => [...current, { ...sample, at: now }].slice(-34));
   }, [telemetry.latestTelemetry, trafficTotals]);
 
   const navItems: Array<{ icon: string; id: PrismView; label: string }> = [
@@ -2731,7 +2818,6 @@ export function App() {
       <header
         className="app-titlebar"
         data-tauri-drag-region
-        onDoubleClick={handleTitlebarDoubleClick}
         onMouseDown={startWindowDrag}
       >
         <div className="title-left" data-tauri-drag-region>
@@ -2740,35 +2826,38 @@ export function App() {
           <span>Rolling Preview</span>
         </div>
         <div className="title-drag-fill" data-tauri-drag-region />
-        <div className="window-actions" aria-label="Window controls">
+        <div className="window-actions" aria-label={ui.windowControls} data-no-window-drag>
           <button
-            aria-label="Pin window"
+            aria-label={ui.pinWindow}
             aria-pressed={alwaysOnTop}
             className={alwaysOnTop ? "active" : ""}
+            data-window-action="pin"
             type="button"
             onClick={() => void handleWindowAction("pin")}
           >
             ⌖
           </button>
           <button
-            aria-label="Minimize window"
+            aria-label={ui.minimizeWindow}
+            data-window-action="minimize"
             type="button"
             onClick={() => void handleWindowAction("minimize")}
           >
             −
           </button>
           <button
-            aria-label="Maximize window"
-            aria-pressed={windowMaximized}
-            className={windowMaximized ? "active" : ""}
+            aria-label={ui.maximizeUnavailable}
+            data-window-action="maximize"
+            disabled
+            title={ui.fixedWindow}
             type="button"
-            onClick={() => void handleWindowAction("maximize")}
           >
             □
           </button>
           <button
-            aria-label="Close window"
+            aria-label={ui.closeWindow}
             className="close"
+            data-window-action="close"
             type="button"
             onClick={() => void handleWindowAction("close")}
           >
@@ -2792,28 +2881,70 @@ export function App() {
         ))}
       </nav>
 
-      <section className="quick-strip">
-        <div className="mode-pills">
+      <section className="quick-strip" aria-label={ui.coreStatus}>
+        <div className="mode-pills capability-pills">
           <button
-            aria-pressed={false}
-            className="pill"
+            aria-pressed={systemProxyActive}
+            className={systemProxyActive ? "pill capability-pill active" : "pill capability-pill"}
+            disabled={!systemProxyInteractive}
+            title={systemProxyReason}
             type="button"
             onClick={() => void toggleSystemProxy()}
           >
-            {ui.systemProxy}
+            <strong>{ui.systemProxy}</strong>
+            <small>{systemProxyReason}</small>
+          </button>
+          <div
+            className="capability-pill unavailable"
+            data-capability="tun-runtime"
+            role="status"
+            title={ui.tunRuntimeUnavailable}
+          >
+            <strong>{ui.tunMode}</strong>
+            <small>{ui.tunRuntimeUnavailable}</small>
+          </div>
+        </div>
+        <div className="core-switches">
+          <button
+            aria-label={`${xrayRunning ? ui.stop : ui.start} Xray Core`}
+            className={xrayRunning ? "core-switch running" : "core-switch stopped"}
+            title={`${xrayRunning ? ui.stop : ui.start} Xray Core`}
+            type="button"
+            onClick={() => void toggleRuntime("xray")}
+          >
+            <span className="core-led" />
+            <strong>Xray</strong>
+            <small>{xrayRunning ? ui.runtimeOnline : ui.runtimeOffline}</small>
           </button>
           <button
-            aria-pressed={false}
-            className="pill"
+            aria-label={`${tachyonRunning ? ui.stop : ui.start} Tachyon Core`}
+            className={tachyonRunning ? "core-switch running" : "core-switch stopped"}
+            title={`${tachyonRunning ? ui.stop : ui.start} Tachyon Core`}
             type="button"
-            onClick={() => setMessage(ui.unavailableInThisBuild)}
+            onClick={() => void toggleRuntime("tachyonCore")}
           >
-            {ui.tunMode}
+            <span className="core-led" />
+            <strong>Tachyon</strong>
+            <small>{tachyonRunning ? ui.runtimeOnline : ui.runtimeOffline}</small>
           </button>
         </div>
+        <button
+          className={activeNode ? "quick-node active" : "quick-node"}
+          title={activeNode ? nodeXrayCompatibilityTitle(activeNode, ui) : ui.noNodeSelected}
+          type="button"
+          onClick={() => setNodePickerOpen(true)}
+        >
+          <span className={activeNode && nodeAvailable(activeNode, nodeLatencies) ? "status-dot connected" : "status-dot checking"} />
+          <span>
+            <small>{ui.currentNode}</small>
+            <strong>{activeNode?.name ?? ui.noNodeSelected}</strong>
+          </span>
+          <em>⌃</em>
+        </button>
         <div className="strip-actions">
           <button
             aria-label={ui.coreSettings}
+            title={ui.openCoreSettings}
             type="button"
             onClick={() => {
               setSettingsSection("core");
@@ -2822,13 +2953,15 @@ export function App() {
           >
             ⚙
           </button>
-          <button type="button" onClick={() => void saveDrafts()}>
+          <button aria-label={ui.save} title={ui.save} type="button" onClick={() => void saveDrafts()}>
             ◫
           </button>
-          <button aria-label={ui.runProxyProbe} type="button" onClick={() => void probeXrayProxy()}>
-            {ui.runProxyProbe}
+          <button aria-label={ui.runProxyProbe} title={ui.runProxyProbe} type="button" onClick={() => void probeXrayProxy()}>
+            ⌁
           </button>
           <button
+            aria-label={ui.refresh}
+            title={ui.refresh}
             type="button"
             onClick={() => {
               void refreshRuntime();
@@ -2838,8 +2971,13 @@ export function App() {
           >
             ↻
           </button>
-          <button type="button" onClick={() => void stopAllRuntime()}>
-            ◎
+          <button
+            aria-label={xrayRunning || tachyonRunning ? ui.stopAll : ui.startAll}
+            title={xrayRunning || tachyonRunning ? ui.stopAll : ui.startAll}
+            type="button"
+            onClick={() => void (xrayRunning || tachyonRunning ? stopAllRuntime() : startAllRuntime())}
+          >
+            {xrayRunning || tachyonRunning ? "■" : "▶"}
           </button>
         </div>
       </section>
@@ -2852,6 +2990,10 @@ export function App() {
             latencyMap={nodeLatencies}
             nodeCount={subscriptionNodeCount}
             onOpenNodePicker={() => setNodePickerOpen(true)}
+            onOpenCoreSettings={() => {
+              setSettingsSection("core");
+              navigateView("settings");
+            }}
             onProbeXray={() => void probeXrayProxy()}
             onRoutingModeChange={changeRoutingMode}
             routingMode={routingMode}
@@ -2862,9 +3004,9 @@ export function App() {
             xrayStatsEnabled={runtimeInputs.xrayStatsEnabled}
             xrayStatsError={xrayTrafficError}
             xrayStatsQueriedAt={xrayTrafficStats.queriedAt}
-            xrayRunning={runtimeStatus?.xray.state === "running"}
+            xrayRunning={xrayRunning}
             xrayProbe={xrayProbe}
-            tachyonRunning={runtimeStatus?.tachyonCore.state === "running"}
+            tachyonRunning={tachyonRunning}
             ui={ui}
           />
         ) : null}
@@ -2952,6 +3094,11 @@ export function App() {
             onDownloadLatest={(kind) => void downloadLatestRelease(kind)}
             onInstallWintun={() => void installWintun()}
             onRefreshBinaries={() => void refreshManagedBinaries()}
+            onRefreshRuntime={() => {
+              void refreshRuntime();
+              void refreshRuntimePrivilege();
+              void refreshSystemProxy();
+            }}
             onRemoveProfile={(id) => void removeProfile(id)}
             onSaveTachyonServer={saveTachyonServerProfile}
             onSaveDrafts={() => void saveDrafts()}
@@ -2972,6 +3119,7 @@ export function App() {
             runtimeInputs={runtimeInputs}
             runtimePaths={runtimePaths}
             runtimeRows={runtimeRows}
+            runtimeStatus={runtimeStatus}
             section={settingsSection}
             setBinarySourceInputs={setBinarySourceInputs}
             setManualProfile={setManualProfile}
@@ -2984,6 +3132,7 @@ export function App() {
             validationResults={validationResults}
             manualProfile={manualProfile}
             steamRoot={steamRoot}
+            systemProxy={systemProxy}
             setReleaseChannelForKind={setReleaseChannelForKind}
             setTachyonServerDraft={setTachyonServerDraft}
             launcherSettings={launcherSettings}
@@ -3037,6 +3186,7 @@ function OverviewView({
   latencyMap,
   nodeCount,
   onOpenNodePicker,
+  onOpenCoreSettings,
   onProbeXray,
   onRoutingModeChange,
   routingMode,
@@ -3057,12 +3207,13 @@ function OverviewView({
   latencyMap: NodeLatencyMap;
   nodeCount: number;
   onOpenNodePicker: () => void;
+  onOpenCoreSettings: () => void;
   onProbeXray: () => void;
   onRoutingModeChange: (mode: XrayRoutingMode) => void;
   routingMode: XrayRoutingMode;
   telemetry: TelemetryState;
   trafficRates: TrafficSample;
-  trafficSamples: TrafficSample[];
+  trafficSamples: TimedTrafficSample[];
   trafficTotals: TrafficTotals;
   xrayRunning: boolean;
   xrayProbe: XrayProbeStatus;
@@ -3074,6 +3225,7 @@ function OverviewView({
 }) {
   const width = 560;
   const height = 220;
+  const plotHeight = 196;
   const chartPadding = 48;
   const trafficSeries = trafficSeriesFromSamples(trafficSamples, {
     tachyonDown: `${ui.tachyon} ↓`,
@@ -3140,6 +3292,12 @@ function OverviewView({
   const activeNodeTransport = activeNode?.transport || "udp";
   const activeNodeCompatibility = activeNode ? nodeXrayCompatibilityLabel(activeNode, ui) : "--";
   const activeNodeAvailable = activeNode ? nodeAvailable(activeNode, latencyMap) : false;
+  const firstSampleAt = trafficSamples[0]?.at ?? null;
+  const lastSampleAt = trafficSamples[trafficSamples.length - 1]?.at ?? null;
+  const chartTimeLabel = (value: number | null) =>
+    value
+      ? new Date(value).toLocaleTimeString([], { minute: "2-digit", second: "2-digit" })
+      : "--:--";
 
   return (
     <div className="overview-page page-enter">
@@ -3167,18 +3325,25 @@ function OverviewView({
       </div>
 
       <div className="runtime-presence">
-        <span className={xrayRunning ? "status-dot connected" : "status-dot stopped"} />
-        <strong>{ui.xray}</strong>
-        <span>{xrayRunning ? ui.runtimeOnline : ui.runtimeOffline}</span>
-        <span className={tachyonRunning ? "status-dot connected" : "status-dot stopped"} />
-        <strong>{ui.tachyon}</strong>
-        <span>{tachyonRunning ? ui.runtimeOnline : ui.runtimeOffline}</span>
-        <strong>Server</strong>
-        <span>
+        <div className={xrayRunning ? "runtime-presence-item running" : "runtime-presence-item stopped"}>
+          <span className="core-led" />
+          <strong>{ui.xray}</strong>
+          <span>{xrayRunning ? ui.runtimeOnline : ui.runtimeOffline}</span>
+        </div>
+        <div className={tachyonRunning ? "runtime-presence-item running" : "runtime-presence-item stopped"}>
+          <span className="core-led" />
+          <strong>{ui.tachyon}</strong>
+          <span>{tachyonRunning ? ui.runtimeOnline : ui.runtimeOffline}</span>
+        </div>
+        <div className="runtime-presence-server">
+          <strong>{ui.tachyonServer}</strong>
+          <span>
           {activeTachyonServer
             ? `${activeTachyonServer.name} (${tachyonServerEndpoint(activeTachyonServer)})`
-            : "No Tachyon server selected"}
-        </span>
+            : ui.noTachyonServerProfiles}
+          </span>
+        </div>
+        <button type="button" onClick={onOpenCoreSettings}>{ui.openCoreSettings}</button>
       </div>
 
       <div className="overview-grid">
@@ -3189,7 +3354,8 @@ function OverviewView({
               <div className="legend">
                 {trafficSeries.map((series) => (
                   <span className={`legend-item ${series.className.replace(" ", "-")}`} key={series.label}>
-                    ● {series.label}
+                    <i /> {series.label}
+                    <b>{formatRate(series.values[series.values.length - 1] ?? 0)}</b>
                   </span>
                 ))}
               </div>
@@ -3202,18 +3368,18 @@ function OverviewView({
                 ))}
               </div>
             </div>
-            <svg className="traffic-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Traffic chart">
+            <svg className="traffic-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${ui.traffic} · ${ui.liveWindow}`}>
             {Array.from({ length: 7 }, (_, index) => (
               <g key={index}>
-                <text className="chart-axis-label" x="4" y={Math.max(10, (height / 6) * index - 4)}>
+                <text className="chart-axis-label" x="4" y={Math.max(10, (plotHeight / 6) * index - 4)}>
                   {formatBytes(Math.round(((6 - index) / 6) * maxTraffic))}
                 </text>
                 <line
                   className="chart-grid"
                   x1="48"
                   x2={width}
-                  y1={(height / 6) * index}
-                  y2={(height / 6) * index}
+                  y1={(plotHeight / 6) * index}
+                  y2={(plotHeight / 6) * index}
                 />
               </g>
             ))}
@@ -3222,7 +3388,7 @@ function OverviewView({
                 <polyline
                   className={`traffic-line ${series.className}`}
                   key={series.label}
-                  points={polyline(series.values, width, height, chartPadding, maxTraffic)}
+                  points={polyline(series.values, width, plotHeight, chartPadding, maxTraffic)}
                 />
               ))
             ) : (
@@ -3230,6 +3396,12 @@ function OverviewView({
                 {ui.waitingTelemetry}
               </text>
             )}
+            <text className="chart-time-label" x={chartPadding} y={height - 4}>
+              {chartTimeLabel(firstSampleAt)}
+            </text>
+            <text className="chart-time-label end" x={width} y={height - 4}>
+              {chartTimeLabel(lastSampleAt)}
+            </text>
             </svg>
             {!hasTrafficSamples ? <p className="chart-empty-detail">{ui.trafficNoSamplesHint}</p> : null}
           </article>
@@ -3611,21 +3783,27 @@ function SubscriptionsView({
   return (
     <div className="subscriptions-page page-enter">
       <div className="section-toolbar">
-        <div className="segmented">
-          <button
-            className={viewMode === "grid" ? "active" : ""}
-            type="button"
-            onClick={() => setViewMode("grid")}
-          >
-            {ui.grid}
-          </button>
-          <button
-            className={viewMode === "list" ? "active" : ""}
-            type="button"
-            onClick={() => setViewMode("list")}
-          >
-            {ui.list}
-          </button>
+        <div className="section-toolbar-start">
+          <div className="section-heading">
+            <h1>{ui.subscriptions}</h1>
+            <p>{subscription.subscriptions.length} {ui.subscriptions} · {nodeCount} {ui.nodes}</p>
+          </div>
+          <div className="segmented">
+            <button
+              className={viewMode === "grid" ? "active" : ""}
+              type="button"
+              onClick={() => setViewMode("grid")}
+            >
+              {ui.grid}
+            </button>
+            <button
+              className={viewMode === "list" ? "active" : ""}
+              type="button"
+              onClick={() => setViewMode("list")}
+            >
+              {ui.list}
+            </button>
+          </div>
         </div>
         <div className="toolbar-actions">
           <button type="button" onClick={onUpdateAll}>
@@ -3679,7 +3857,7 @@ function SubscriptionsView({
               >
                 <button type="button" onClick={() => onChooseSubscription(item.id)}>
                   <strong>{item.name}</strong>
-                  <span>{item.nodes.length} nodes</span>
+                  <span>{item.nodes.length} {ui.nodes}</span>
                   <small>{item.updatedAt ? new Date(item.updatedAt).toLocaleString() : "--"}</small>
                 </button>
                 <button type="button" onClick={() => onDeleteSubscription(item.id)}>
@@ -3749,6 +3927,7 @@ function PluginsView({
   pluginState: PluginStateSnapshot;
   ui: typeof zh;
 }) {
+  const [filter, setFilter] = useState<PluginFilter>("all");
   const plugins = [
     {
       badge: "",
@@ -3781,21 +3960,37 @@ function PluginsView({
   ];
   const installed = installedPluginCount(pluginState);
   const enabled = enabledPluginCount(pluginState);
+  const visiblePlugins = plugins.filter((plugin) => {
+    const state = pluginState[plugin.id] ?? emptyPluginState();
+    if (filter === "enabled") {
+      return state.enabled;
+    }
+    if (filter === "installed") {
+      return state.installed;
+    }
+    return true;
+  });
   return (
     <div className="plugins-page page-enter">
       <div className="section-toolbar">
-        <div className="segmented">
-          <button className="active" type="button">
-            {ui.pluginCenter}
-          </button>
-          <button type="button">
-            {enabled}/{plugins.length} {ui.pluginEnabled}
-          </button>
+        <div className="section-toolbar-start">
+          <div className="section-heading">
+            <h1>{ui.pluginCenter}</h1>
+            <p>{installed}/{plugins.length} {ui.installed} · {enabled}/{plugins.length} {ui.pluginEnabled}</p>
+          </div>
+          <div className="segmented">
+            <button className={filter === "all" ? "active" : ""} type="button" onClick={() => setFilter("all")}>
+              {ui.all}
+            </button>
+            <button className={filter === "installed" ? "active" : ""} type="button" onClick={() => setFilter("installed")}>
+              {ui.installed}
+            </button>
+            <button className={filter === "enabled" ? "active" : ""} type="button" onClick={() => setFilter("enabled")}>
+              {ui.pluginEnabled}
+            </button>
+          </div>
         </div>
         <div className="toolbar-actions">
-          <button type="button">
-            {installed}/{plugins.length} {ui.pluginInstalled}
-          </button>
           <button type="button" onClick={onCheckUpdates}>{ui.checkUpdates}</button>
           <button className="primary-action" type="button" onClick={onInstallAll}>
             + {ui.add}
@@ -3803,7 +3998,7 @@ function PluginsView({
         </div>
       </div>
       <div className="plugin-card-grid">
-        {plugins.map((plugin) => {
+        {visiblePlugins.map((plugin) => {
           const state = pluginState[plugin.id] ?? emptyPluginState();
           const status = !state.installed
             ? ui.pluginNotInstalled
@@ -3868,6 +4063,7 @@ function PluginsView({
             </article>
           );
         })}
+        {visiblePlugins.length === 0 ? <div className="empty-note">{ui.pluginNoMatches}</div> : null}
       </div>
     </div>
   );
@@ -3897,6 +4093,7 @@ function SettingsView({
   onDownloadLatest,
   onInstallWintun,
   onRefreshBinaries,
+  onRefreshRuntime,
   onRemoveProfile,
   onSaveTachyonServer,
   onSaveDrafts,
@@ -3917,6 +4114,7 @@ function SettingsView({
   runtimeInputs,
   runtimePaths,
   runtimeRows,
+  runtimeStatus,
   section,
   setBinarySourceInputs,
   setManualProfile,
@@ -3924,6 +4122,7 @@ function SettingsView({
   setRuntimeInputs,
   setSteamRoot,
   steamRoot,
+  systemProxy,
   suggestions,
   tachyonServerDraft,
   tachyonServers,
@@ -3955,6 +4154,7 @@ function SettingsView({
   onDownloadLatest: (kind: ManagedBinaryKind) => void;
   onInstallWintun: () => void;
   onRefreshBinaries: () => void;
+  onRefreshRuntime: () => void;
   onRemoveProfile: (id: string) => void;
   onSaveTachyonServer: () => void;
   onSaveDrafts: () => void;
@@ -3975,6 +4175,7 @@ function SettingsView({
   runtimeInputs: RuntimeSettings;
   runtimePaths: RuntimePaths | null;
   runtimeRows: Array<{ label: string; value: string }>;
+  runtimeStatus: RuntimeStatus | null;
   section: SettingsSection;
   setBinarySourceInputs: React.Dispatch<React.SetStateAction<typeof emptyBinarySourceInputs>>;
   setManualProfile: React.Dispatch<React.SetStateAction<typeof emptyProfile>>;
@@ -3986,6 +4187,7 @@ function SettingsView({
   setRuntimeInputs: React.Dispatch<React.SetStateAction<RuntimeSettings>>;
   setSteamRoot: (value: string) => void;
   steamRoot: string;
+  systemProxy: SystemProxyState | null;
   suggestions: GameProfile[];
   tachyonServerDraft: TachyonServerDraft;
   tachyonServers: TachyonServerSnapshot;
@@ -4003,6 +4205,25 @@ function SettingsView({
     { id: "rules", label: ui.rulesMode },
     { id: "plugins", label: ui.plugins },
     { id: "about", label: ui.settingsAbout },
+  ];
+  const coreRuntimeItems: Array<{
+    kind: ManagedBinaryKind;
+    label: string;
+    path: string;
+    status: ProcessStatus | undefined;
+  }> = [
+    {
+      kind: "xray",
+      label: "Xray Core",
+      path: runtimeInputs.xrayBinaryPath,
+      status: runtimeStatus?.xray,
+    },
+    {
+      kind: "tachyonCore",
+      label: "Tachyon Core",
+      path: runtimeInputs.tachyonCoreBinaryPath,
+      status: runtimeStatus?.tachyonCore,
+    },
   ];
   return (
     <div className="settings-page page-enter">
@@ -4076,6 +4297,70 @@ function SettingsView({
 
         {section === "core" ? (
           <div className="settings-stack">
+            <article className="settings-card core-control-card">
+              <header>
+                <div>
+                  <h1>{ui.coreControl}</h1>
+                  <p>{ui.coreStatus}</p>
+                </div>
+                <div className="row-actions">
+                  <button type="button" onClick={onSaveRuntime}>{ui.savePaths}</button>
+                  <button type="button" onClick={onRefreshRuntime}>{ui.refresh}</button>
+                </div>
+              </header>
+              <div className="core-control-grid">
+                {coreRuntimeItems.map((item) => {
+                  const running = item.status?.state === "running";
+                  return (
+                    <section className={running ? "core-control-item running" : "core-control-item stopped"} key={item.kind}>
+                      <span className="core-led" />
+                      <div>
+                        <strong>{item.label}</strong>
+                        <span>{running ? ui.runtimeOnline : ui.runtimeOffline}</span>
+                        <small title={item.path}>{item.path || ui.notConfigured}</small>
+                      </div>
+                      <button
+                        className={running ? "danger-action" : "primary-action"}
+                        type="button"
+                        onClick={() => running ? onStopRuntime(item.kind) : onStartRuntime(item.kind)}
+                      >
+                        {running ? ui.stop : ui.start}
+                      </button>
+                    </section>
+                  );
+                })}
+              </div>
+              <div className="capability-summary">
+                <div className={systemProxy?.supported ? "capability-row available" : "capability-row unavailable"}>
+                  <strong>{ui.systemProxy}</strong>
+                  <span>
+                    {!systemProxy
+                      ? ui.capabilityChecking
+                      : !systemProxy.supported
+                        ? ui.capabilityUnavailable
+                        : systemProxy.matchesPrism
+                          ? ui.systemProxyEnabled
+                          : systemProxy.enabled
+                            ? ui.systemProxyOtherActive
+                            : ui.systemProxyDisabled}
+                  </span>
+                  <small>
+                    {systemProxy?.error ||
+                      (systemProxy?.supported
+                        ? systemProxy.matchesPrism
+                          ? ui.systemProxyEnabled
+                          : ui.systemProxyDisabled
+                        : ui.systemProxyUnsupported)}
+                  </small>
+                </div>
+                <div className="capability-row unavailable" data-capability="tun-runtime">
+                  <strong>{ui.tunMode}</strong>
+                  <span>{ui.capabilityUnavailable}</span>
+                  <small>{ui.tunRuntimeUnavailable}</small>
+                </div>
+              </div>
+            </article>
+
             <article className="settings-card diagnostics-export-card">
               <header>
                 <div>
@@ -4116,7 +4401,7 @@ function SettingsView({
                 <header>
                   <div>
                     <h2>{ui.tachyonServerProfiles}</h2>
-                    <p>Server must configure allowed_targets. Copy PSK from server-side tgp.auth.psk; do not use ordinary Xray subscription nodes here.</p>
+                    <p>{ui.tachyonServerProfileDesc}</p>
                   </div>
                   <button type="button" onClick={onSaveTachyonServer}>{ui.save}</button>
                 </header>
@@ -4381,25 +4666,17 @@ function SettingsView({
                 </label>
                 <label className="wide-field">
                   <span>{ui.tachyonTunAutoRoute}</span>
-                  <label className="mini-check">
-                    <input
-                      checked={false}
-                      disabled
-                      type="checkbox"
-                    />
-                    {ui.unavailableInThisBuild}
-                  </label>
+                  <div className="capability-setting unavailable" data-capability="tun-auto-route">
+                    <span>{ui.capabilityUnavailable}</span>
+                    <small>{ui.tunSettingUnavailable}</small>
+                  </div>
                 </label>
                 <label className="wide-field">
                   <span>{ui.tachyonTunDnsHijack}</span>
-                  <label className="mini-check">
-                    <input
-                      checked={false}
-                      disabled
-                      type="checkbox"
-                    />
-                    {ui.unavailableInThisBuild}
-                  </label>
+                  <div className="capability-setting unavailable" data-capability="tun-dns-hijack">
+                    <span>{ui.capabilityUnavailable}</span>
+                    <small>{ui.tunSettingUnavailable}</small>
+                  </div>
                 </label>
                 <label>
                   <span>{ui.tachyonFecShards}</span>

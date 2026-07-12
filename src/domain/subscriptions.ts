@@ -47,8 +47,22 @@ export interface ProxyNode {
   sni?: string;
   parameters?: Record<string, string>;
   outbound?: XrayOutboundObject;
+  xrayConfigId?: string;
+  xrayOutboundIndex?: number;
   xrayCompatibility?: XrayOutboundCompatibility;
   rawUri: string;
+}
+
+export interface XrayImportedConfig {
+  [key: string]: unknown;
+  api?: Record<string, unknown>;
+  burstObservatory?: Record<string, unknown>;
+  dns?: Record<string, unknown>;
+  fakedns?: unknown;
+  observatory?: Record<string, unknown>;
+  policy?: Record<string, unknown>;
+  routing?: Record<string, unknown>;
+  stats?: Record<string, unknown>;
 }
 
 export interface SubscriptionParseReport {
@@ -66,6 +80,7 @@ export interface SubscriptionProfile {
   sourceUrl: string;
   updatedAt: string;
   nodes: ProxyNode[];
+  xrayConfigTemplates?: Record<string, XrayImportedConfig>;
 }
 
 export interface SubscriptionSnapshot {
@@ -78,6 +93,7 @@ export interface SubscriptionSnapshot {
 }
 
 const storageKey = "tachyon.prism.subscription.v1";
+const xrayConfigTemplateByNode = new WeakMap<ProxyNode, XrayImportedConfig>();
 
 const xraySupportedOutboundProtocols = new Set<XrayOutboundProtocol>([
   "blackhole",
@@ -214,6 +230,7 @@ export function createSubscriptionSnapshot(
     sourceUrl: normalizedSource,
     updatedAt: new Date().toISOString(),
     nodes,
+    ...profileXrayConfigTemplates(nodes),
   };
   const nextProfiles = [
     ...existing.filter((profile) => profile.id !== profileId),
@@ -266,9 +283,14 @@ export function selectSubscriptionNode(
   snapshot: SubscriptionSnapshot,
   nodeId: string,
 ): SubscriptionSnapshot {
-  const subscription = snapshot.subscriptions.find((item) =>
-    item.nodes.some((node) => node.id === nodeId),
+  const active = snapshot.subscriptions.find(
+    (item) => item.id === snapshot.selectedSubscriptionId,
   );
+  const subscription = active?.nodes.some((node) => node.id === nodeId)
+    ? active
+    : snapshot.subscriptions.find((item) =>
+        item.nodes.some((node) => node.id === nodeId),
+      );
   if (!subscription) {
     throw new Error("Selected node no longer exists");
   }
@@ -293,6 +315,10 @@ export function xrayOutboundCompatibilityForProtocol(
 export function xrayOutboundCompatibilityForNode(
   node: ProxyNode,
 ): XrayOutboundCompatibility {
+  const importedOutbound = xrayOutboundTemplateForNode(node);
+  if (importedOutbound) {
+    return xrayOutboundCompatibilityForOutbound(importedOutbound);
+  }
   const protocolCompatibility = xrayOutboundCompatibilityForProtocol(node.protocol);
   if (protocolCompatibility.status !== "supported") {
     return protocolCompatibility;
@@ -316,10 +342,23 @@ export function assertXrayOutboundSupported(node: ProxyNode): void {
 
 export function buildXrayOutboundDraft(node: ProxyNode): XrayOutboundObject {
   assertXrayOutboundSupported(node);
+  const importedOutbound = xrayOutboundTemplateForNode(node);
+  if (importedOutbound) {
+    return importedOutbound;
+  }
   if (node.outbound) {
     return cloneRecord(node.outbound) as XrayOutboundObject;
   }
   throw new Error("Node does not contain an Xray outbound draft");
+}
+
+export function xrayConfigTemplateForNode(
+  node: ProxyNode,
+): XrayImportedConfig | undefined {
+  const template = xrayConfigTemplateByNode.get(node);
+  return template
+    ? (cloneRecord(template) as XrayImportedConfig)
+    : undefined;
 }
 
 export function loadSubscriptionSnapshot(): SubscriptionSnapshot {
@@ -341,8 +380,11 @@ export function loadSubscriptionSnapshot(): SubscriptionSnapshot {
       );
     }
 
+    const legacyXrayConfigTemplates: Record<string, XrayImportedConfig> = {};
     const nodes = Array.isArray(snapshot.nodes)
-      ? snapshot.nodes.map(normalizeStoredNode).filter((node): node is ProxyNode => node !== null)
+      ? snapshot.nodes
+          .map((node) => normalizeStoredNode(node, legacyXrayConfigTemplates))
+          .filter((node): node is ProxyNode => node !== null)
       : [];
     if (nodes.length === 0) {
       return emptySubscriptionSnapshot;
@@ -360,7 +402,14 @@ export function loadSubscriptionSnapshot(): SubscriptionSnapshot {
 }
 
 export function saveSubscriptionSnapshot(snapshot: SubscriptionSnapshot): void {
-  globalThis.localStorage?.setItem(storageKey, JSON.stringify(snapshot));
+  const canonical = snapshotFromProfiles(
+    snapshot.subscriptions,
+    snapshot.selectedSubscriptionId,
+    snapshot.selectedNodeId,
+  );
+  const persisted: Partial<SubscriptionSnapshot> = { ...canonical };
+  delete persisted.nodes;
+  globalThis.localStorage?.setItem(storageKey, JSON.stringify(persisted));
 }
 
 function subscriptionPayloadCandidates(input: string): string[] {
@@ -975,23 +1024,29 @@ function nodesFromJSON(value: unknown, raw: string): ProxyNode[] {
     return [];
   }
 
+  const xrayConfig = xrayImportedConfigFromJSON(value);
   if (Array.isArray(value.outbounds)) {
     return value.outbounds.flatMap((item, index) => {
       if (!isRecord(item)) {
         return [];
       }
-      const node = nodeFromJSONOutbound(item, `${raw}#outbound-${index}`);
+      const node = nodeFromJSONOutbound(
+        item,
+        `${raw}#outbound-${index}`,
+        xrayConfig,
+        index,
+      );
       return node ? [node] : [];
     });
   }
 
   if (isRecord(value.outbound)) {
-    const node = nodeFromJSONOutbound(value.outbound, raw);
+    const node = nodeFromJSONOutbound(value.outbound, raw, xrayConfig);
     return node ? [node] : [];
   }
 
   if (typeof value.protocol === "string" || typeof value.type === "string") {
-    const node = nodeFromJSONOutbound(value, raw);
+    const node = nodeFromJSONOutbound(value, raw, xrayConfig);
     return node ? [node] : [];
   }
 
@@ -999,9 +1054,16 @@ function nodesFromJSON(value: unknown, raw: string): ProxyNode[] {
   return vmessNode ? [vmessNode] : [];
 }
 
-function nodeFromJSONOutbound(value: Record<string, unknown>, raw: string): ProxyNode | null {
+function nodeFromJSONOutbound(
+  value: Record<string, unknown>,
+  raw: string,
+  xrayConfig?: XrayImportedConfig,
+  xrayOutboundIndex?: number,
+): ProxyNode | null {
   const outbound = normalizedJSONOutbound(value);
-  return outbound ? nodeFromOutbound(outbound, raw) : null;
+  return outbound
+    ? nodeFromOutbound(outbound, raw, xrayConfig, xrayOutboundIndex)
+    : null;
 }
 
 function normalizedJSONOutbound(value: Record<string, unknown>): Record<string, unknown> | null {
@@ -1182,9 +1244,18 @@ function singBoxStreamSettings(
   return streamSettingsFromParams(params);
 }
 
-function nodeFromOutbound(value: Record<string, unknown>, raw: string): ProxyNode | null {
+function nodeFromOutbound(
+  value: Record<string, unknown>,
+  raw: string,
+  xrayConfig?: XrayImportedConfig,
+  xrayOutboundIndex?: number,
+): ProxyNode | null {
   const protocol = normalizeProtocol(stringValue(value.protocol));
-  if (protocol === "unknown" && stringValue(value.protocol) !== "unknown") {
+  if (
+    protocol === "unknown" &&
+    stringValue(value.protocol) !== "unknown" &&
+    !xrayConfig
+  ) {
     return null;
   }
 
@@ -1195,6 +1266,7 @@ function nodeFromOutbound(value: Record<string, unknown>, raw: string): ProxyNod
   const endpoint = endpointFromSettings(protocol, settings);
   const tag = stringValue(outbound.tag);
   const name = tag || `${protocol.toUpperCase()} ${endpoint.address}`;
+  const xrayConfigId = xrayConfig ? importedXrayConfigId(xrayConfig) : undefined;
 
   const node: ProxyNode = {
     id: stableNodeId(JSON.stringify(outbound)),
@@ -1202,13 +1274,27 @@ function nodeFromOutbound(value: Record<string, unknown>, raw: string): ProxyNod
     protocol,
     address: endpoint.address,
     port: endpoint.port,
-    credential: credentialFromSettings(protocol, settings) ?? credentialFromStream(protocol, stream),
+    ...(xrayConfig
+      ? {}
+      : {
+          credential:
+            credentialFromSettings(protocol, settings) ??
+            credentialFromStream(protocol, stream),
+        }),
     security: stringValue(stream.security) || stringValue(settings.security) || stringValue(settings.encryption),
     transport: stringValue(stream.network),
     sni: sniFromStream(stream),
-    outbound,
-    rawUri: raw,
+    ...(xrayConfig ? {} : { outbound }),
+    xrayConfigId,
+    xrayOutboundIndex,
+    rawUri:
+      xrayConfig && xrayConfigId && xrayOutboundIndex !== undefined
+        ? `${xrayConfigId}#outbound-${xrayOutboundIndex}`
+        : raw,
   };
+  if (xrayConfig) {
+    xrayConfigTemplateByNode.set(node, xrayConfig);
+  }
   node.xrayCompatibility = xrayOutboundCompatibilityForNode(node);
   return node;
 }
@@ -2005,7 +2091,10 @@ function sniFromStream(stream: Record<string, unknown>): string | undefined {
   );
 }
 
-function normalizeStoredNode(value: unknown): ProxyNode | null {
+function normalizeStoredNode(
+  value: unknown,
+  xrayConfigTemplates: Record<string, XrayImportedConfig> = {},
+): ProxyNode | null {
   if (!isRecord(value)) {
     return null;
   }
@@ -2022,6 +2111,19 @@ function normalizeStoredNode(value: unknown): ProxyNode | null {
   const storedOutbound = isRecord(value.outbound)
     ? (cloneRecord(value.outbound) as XrayOutboundObject)
     : undefined;
+  const legacyXrayConfig = normalizeXrayImportedConfig(value.xrayConfig);
+  const xrayConfigId =
+    stringValue(value.xrayConfigId) ||
+    (legacyXrayConfig ? importedXrayConfigId(legacyXrayConfig) : undefined);
+  if (xrayConfigId && legacyXrayConfig && !xrayConfigTemplates[xrayConfigId]) {
+    xrayConfigTemplates[xrayConfigId] = legacyXrayConfig;
+  }
+  const xrayConfigTemplate = xrayConfigId
+    ? xrayConfigTemplates[xrayConfigId]
+    : undefined;
+  const xrayOutboundIndex = xrayConfigTemplate
+    ? storedXrayOutboundIndex(value, storedOutbound, xrayConfigTemplate, rawUri)
+    : undefined;
   const reparsed = parseProxyUri(rawUri);
   const outbound =
     reparsed?.outbound && (!storedOutbound || outboundRequiresCanonicalUpgrade(protocol, storedOutbound))
@@ -2034,14 +2136,21 @@ function normalizeStoredNode(value: unknown): ProxyNode | null {
     protocol,
     address,
     port,
-    credential: stringOrUndefined(stringValue(value.credential)),
+    ...(xrayOutboundIndex === undefined
+      ? { credential: stringOrUndefined(stringValue(value.credential)) }
+      : {}),
     security: stringOrUndefined(stringValue(value.security)),
     transport: stringOrUndefined(stringValue(value.transport)),
     sni: stringOrUndefined(stringValue(value.sni)),
     parameters: asStringRecord(value.parameters),
-    outbound,
+    ...(xrayOutboundIndex === undefined ? { outbound } : {}),
+    xrayConfigId,
+    xrayOutboundIndex,
     rawUri,
   };
+  if (xrayConfigTemplate) {
+    xrayConfigTemplateByNode.set(node, xrayConfigTemplate);
+  }
   node.xrayCompatibility = xrayOutboundCompatibilityForNode(node);
   return node;
 }
@@ -2100,8 +2209,11 @@ function normalizeSubscriptionProfiles(value: unknown): SubscriptionProfile[] {
     if (!isRecord(item)) {
       continue;
     }
+    const xrayConfigTemplates = normalizeXrayConfigTemplates(item.xrayConfigTemplates);
     const nodes = Array.isArray(item.nodes)
-      ? item.nodes.map(normalizeStoredNode).filter((node): node is ProxyNode => node !== null)
+      ? item.nodes
+          .map((node) => normalizeStoredNode(node, xrayConfigTemplates))
+          .filter((node): node is ProxyNode => node !== null)
       : [];
     const sourceUrl = stringValue(item.sourceUrl);
     const name = normalizeSubscriptionName(stringValue(item.name), sourceUrl);
@@ -2116,6 +2228,9 @@ function normalizeSubscriptionProfiles(value: unknown): SubscriptionProfile[] {
       sourceUrl,
       updatedAt: stringValue(item.updatedAt),
       nodes,
+      ...(Object.keys(xrayConfigTemplates).length > 0
+        ? { xrayConfigTemplates }
+        : {}),
     });
   }
   return profiles.sort((left, right) => left.name.localeCompare(right.name));
@@ -2510,4 +2625,113 @@ function compactRecord<T extends Record<string, unknown>>(value: T): T {
 
 function cloneRecord(value: Record<string, unknown>): Record<string, unknown> {
   return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+}
+
+function importedXrayConfigId(value: XrayImportedConfig): string {
+  return `xray-config-${stableNodeId(JSON.stringify(value)).replace(/^node-/, "")}`;
+}
+
+function profileXrayConfigTemplates(
+  nodes: ProxyNode[],
+): Pick<SubscriptionProfile, "xrayConfigTemplates"> {
+  const xrayConfigTemplates: Record<string, XrayImportedConfig> = {};
+  for (const node of nodes) {
+    const template = xrayConfigTemplateByNode.get(node);
+    if (!node.xrayConfigId || !template) {
+      continue;
+    }
+    if (!xrayConfigTemplates[node.xrayConfigId]) {
+      xrayConfigTemplates[node.xrayConfigId] = cloneRecord(template) as XrayImportedConfig;
+    }
+    xrayConfigTemplateByNode.set(node, xrayConfigTemplates[node.xrayConfigId]);
+  }
+  return Object.keys(xrayConfigTemplates).length > 0
+    ? { xrayConfigTemplates }
+    : {};
+}
+
+function xrayOutboundTemplateForNode(
+  node: ProxyNode,
+): XrayOutboundObject | undefined {
+  const template = xrayConfigTemplateByNode.get(node);
+  if (!template || !Number.isInteger(node.xrayOutboundIndex)) {
+    return undefined;
+  }
+  const outbound = Array.isArray(template.outbounds)
+    ? template.outbounds[node.xrayOutboundIndex!]
+    : undefined;
+  return isRecord(outbound)
+    ? (cloneRecord(outbound) as XrayOutboundObject)
+    : undefined;
+}
+
+function storedXrayOutboundIndex(
+  value: Record<string, unknown>,
+  storedOutbound: XrayOutboundObject | undefined,
+  template: XrayImportedConfig,
+  rawUri: string,
+): number | undefined {
+  const outbounds = Array.isArray(template.outbounds) ? template.outbounds : [];
+  const explicitIndex = value.xrayOutboundIndex;
+  if (
+    typeof explicitIndex === "number" &&
+    Number.isInteger(explicitIndex) &&
+    explicitIndex >= 0 &&
+    isRecord(outbounds[explicitIndex])
+  ) {
+    return explicitIndex;
+  }
+  const rawIndex = Number.parseInt(rawUri.match(/#outbound-(\d+)$/)?.[1] ?? "", 10);
+  if (Number.isInteger(rawIndex) && isRecord(outbounds[rawIndex])) {
+    return rawIndex;
+  }
+  if (!storedOutbound) {
+    return undefined;
+  }
+  const serialized = JSON.stringify(storedOutbound);
+  const exactIndex = outbounds.findIndex(
+    (outbound) => isRecord(outbound) && JSON.stringify(outbound) === serialized,
+  );
+  if (exactIndex >= 0) {
+    return exactIndex;
+  }
+  const tag = stringValue(storedOutbound.tag);
+  const taggedIndex = tag
+    ? outbounds.findIndex(
+        (outbound) => isRecord(outbound) && stringValue(outbound.tag) === tag,
+      )
+    : -1;
+  return taggedIndex >= 0 ? taggedIndex : undefined;
+}
+
+function normalizeXrayConfigTemplates(
+  value: unknown,
+): Record<string, XrayImportedConfig> {
+  if (!isRecord(value)) {
+    return {};
+  }
+  const templates: Record<string, XrayImportedConfig> = {};
+  for (const [id, template] of Object.entries(value)) {
+    const normalized = normalizeXrayImportedConfig(template);
+    if (id && normalized) {
+      templates[id] = normalized;
+    }
+  }
+  return templates;
+}
+
+function xrayImportedConfigFromJSON(value: Record<string, unknown>): XrayImportedConfig | undefined {
+  return Array.isArray(value.outbounds) && value.outbounds.some(
+    (outbound) => isRecord(outbound) && typeof outbound.protocol === "string",
+  )
+    ? (cloneRecord(value) as XrayImportedConfig)
+    : undefined;
+}
+
+function normalizeXrayImportedConfig(value: unknown): XrayImportedConfig | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  return cloneRecord(value) as XrayImportedConfig;
 }

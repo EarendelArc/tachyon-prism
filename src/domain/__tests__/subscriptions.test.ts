@@ -10,7 +10,9 @@ import {
   removeSubscription,
   selectSubscription,
   selectSubscriptionNode,
+  saveSubscriptionSnapshot,
   totalSubscriptionNodes,
+  xrayConfigTemplateForNode,
   xrayOutboundCompatibilityForNode,
 } from "../subscriptions";
 import type { ProxyNode } from "../subscriptions";
@@ -18,6 +20,7 @@ import {
   subscriptionCompatibilityFixtures,
   unsupportedSingBoxJsonFixture,
   unsupportedSubscriptionFixture,
+  xrayFullConfigJsonFixture,
 } from "./subscriptionFixtures";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -490,7 +493,6 @@ describe("parseSubscription", () => {
       protocol: "vless",
       address: "vless.example.com",
       port: 443,
-      credential: "vless-uuid",
       security: "reality",
       sni: "www.microsoft.com",
     });
@@ -499,8 +501,8 @@ describe("parseSubscription", () => {
       protocol: "vmess",
       address: "vmess.example.com",
       port: 8443,
-      credential: "vmess-uuid",
     });
+    expect(nodes.every((node) => !("credential" in node))).toBe(true);
     expect(buildXrayOutboundDraft(nodes[0]).settings).toHaveProperty("vnext");
   });
 
@@ -552,22 +554,20 @@ describe("parseSubscription", () => {
       protocol: "trojan",
       address: "trojan.example.com",
       port: 443,
-      credential: "secret",
     });
     expect(nodes[1]).toMatchObject({
       name: "Legacy Shadowsocks",
       protocol: "shadowsocks",
       address: "ss.example.com",
       port: 8388,
-      credential: "2022-blake3-aes-128-gcm:ss-secret",
     });
     expect(nodes[2]).toMatchObject({
       name: "Legacy HTTP",
       protocol: "http",
       address: "http.example.com",
       port: 8080,
-      credential: "alice:***",
     });
+    expect(nodes.every((node) => !("credential" in node))).toBe(true);
   });
 
   it("keeps all built-in Xray outbound protocols from JSON configs", () => {
@@ -594,6 +594,109 @@ describe("parseSubscription", () => {
     });
     expect(nodes[1].name).toBe("Block");
     expect(nodes[2]).toMatchObject({ address: "1.1.1.1", port: 53 });
+  });
+
+  it("attaches the complete source config to every selectable Xray JSON outbound", () => {
+    const nodes = parseSubscription(xrayFullConfigJsonFixture);
+    const source = JSON.parse(xrayFullConfigJsonFixture) as Record<string, unknown>;
+
+    expect(nodes).toHaveLength(2);
+    expect(nodes[0].xrayConfigId).toBe(nodes[1].xrayConfigId);
+    expect(nodes.map((node) => node.xrayOutboundIndex)).toEqual([0, 1]);
+    expect(nodes[0]).not.toHaveProperty("xrayConfig");
+    expect(nodes[1]).not.toHaveProperty("xrayConfig");
+    expect(nodes[0]).not.toHaveProperty("outbound");
+    expect(nodes[1]).not.toHaveProperty("outbound");
+    expect(xrayConfigTemplateForNode(nodes[0])).toEqual(source);
+    expect(xrayConfigTemplateForNode(nodes[1])).toEqual(source);
+    expect(buildXrayOutboundDraft(nodes[0])).toMatchObject({
+      tag: "Xray Full Trojan TLS",
+      userOutboundField: { retained: true },
+      streamSettings: {
+        security: "tls",
+        tlsSettings: {
+          serverName: "edge.example.com",
+          fingerprint: "chrome",
+        },
+        sockopt: {
+          tcpKeepAliveIdle: 60,
+          tcpKeepAliveInterval: 30,
+        },
+      },
+    });
+    expect(buildXrayOutboundDraft(nodes[1])).toMatchObject({
+      tag: "tachyon-proxy",
+      streamSettings: {
+        network: "xhttp",
+        xhttpSettings: {
+          path: "/xhttp",
+          mode: "auto",
+          extra: { xPaddingBytes: "100-1000" },
+        },
+      },
+    });
+  });
+
+  it("retains future Xray protocols and their unknown fields through template references", () => {
+    const payload = JSON.stringify({
+      outbounds: [
+        {
+          tag: "Future protocol",
+          protocol: "future-xray-protocol",
+          settings: { credential: "future-secret", futureOption: { enabled: true } },
+          futureOutboundField: ["kept"],
+        },
+      ],
+      futureTopLevelField: { kept: true },
+    });
+    const [node] = parseSubscription(payload);
+
+    expect(node).toMatchObject({
+      protocol: "unknown",
+      xrayOutboundIndex: 0,
+      xrayCompatibility: { status: "supported" },
+    });
+    expect(node).not.toHaveProperty("outbound");
+    expect(buildXrayOutboundDraft(node)).toEqual(
+      expect.objectContaining({
+        protocol: "future-xray-protocol",
+        settings: { credential: "future-secret", futureOption: { enabled: true } },
+        futureOutboundField: ["kept"],
+      }),
+    );
+    expect(xrayConfigTemplateForNode(node)).toMatchObject({
+      futureTopLevelField: { kept: true },
+    });
+  });
+
+  it("keeps multiple full Xray templates once each at the subscription profile boundary", () => {
+    const secondConfig = JSON.stringify({
+      outbounds: [
+        {
+          tag: "Second VLESS",
+          protocol: "vless",
+          settings: {
+            address: "second.example.com",
+            port: 443,
+            id: "second-vless-uuid",
+            encryption: "none",
+          },
+        },
+      ],
+      secondUnknownTopLevel: { retained: true },
+    });
+    const nodes = parseSubscription(`${xrayFullConfigJsonFixture}\n${secondConfig}`);
+    const snapshot = createSubscriptionSnapshot("https://example.com/multi-config", nodes);
+    const profile = activeSubscription(snapshot);
+
+    expect(nodes).toHaveLength(3);
+    expect(nodes[0].xrayConfigId).toBe(nodes[1].xrayConfigId);
+    expect(nodes[2].xrayConfigId).not.toBe(nodes[0].xrayConfigId);
+    expect(Object.keys(profile?.xrayConfigTemplates ?? {})).toHaveLength(2);
+    expect(xrayConfigTemplateForNode(snapshot.nodes[2])).toMatchObject({
+      secondUnknownTopLevel: { retained: true },
+    });
+    expect(snapshot.nodes.every((node) => !("xrayConfig" in node))).toBe(true);
   });
 
   it("parses common Clash/Mihomo YAML proxy lists", () => {
@@ -926,6 +1029,36 @@ describe("createSubscriptionSnapshot", () => {
     expect(removed.subscriptions).toHaveLength(1);
     expect(activeSubscription(removed)?.name).toBe("Beta");
   });
+
+  it("uses name and URL as the profile identity and updates that exact pair", () => {
+    const first = createSubscriptionSnapshot(
+      "https://example.com/shared",
+      nodes,
+      undefined,
+      "Alpha",
+    );
+    const second = createSubscriptionSnapshot(
+      "https://example.com/shared",
+      [nodes[1]],
+      first,
+      "Beta",
+    );
+    const alphaUpdate = createSubscriptionSnapshot(
+      "https://example.com/shared",
+      [nodes[1]],
+      second,
+      "Alpha",
+    );
+
+    expect(alphaUpdate.subscriptions).toHaveLength(2);
+    expect(alphaUpdate.subscriptions.map((item) => item.name)).toEqual(["Alpha", "Beta"]);
+    expect(activeSubscription(alphaUpdate)).toMatchObject({
+      name: "Alpha",
+      sourceUrl: "https://example.com/shared",
+      nodes: [expect.objectContaining({ id: "node-bbbbbbbb" })],
+    });
+    expect(alphaUpdate.selectedNodeId).toBe("node-bbbbbbbb");
+  });
 });
 
 describe("selectSubscriptionNode", () => {
@@ -952,6 +1085,26 @@ describe("selectSubscriptionNode", () => {
     expect(() => selectSubscriptionNode(snapshot, "nonexistent")).toThrow(
       "Selected node no longer exists",
     );
+  });
+
+  it("keeps the active subscription when node IDs exist in multiple profiles", () => {
+    const first = createSubscriptionSnapshot(
+      "https://example.com/alpha",
+      nodes,
+      undefined,
+      "Alpha",
+    );
+    const second = createSubscriptionSnapshot(
+      "https://example.com/beta",
+      nodes,
+      first,
+      "Beta",
+    );
+
+    const selected = selectSubscriptionNode(second, nodes[0].id);
+
+    expect(activeSubscription(selected)?.name).toBe("Beta");
+    expect(selected.selectedNodeId).toBe(nodes[0].id);
   });
 });
 
@@ -1009,6 +1162,122 @@ describe("loadSubscriptionSnapshot", () => {
         id: "uuid",
         encryption: "none",
       });
+    } finally {
+      if (previous) {
+        Object.defineProperty(globalThis, "localStorage", previous);
+      } else {
+        Reflect.deleteProperty(globalThis, "localStorage");
+      }
+    }
+  });
+
+  it("preserves the complete imported Xray config through snapshot storage", () => {
+    const nodes = parseSubscription(xrayFullConfigJsonFixture);
+    const snapshot = createSubscriptionSnapshot("https://example.com/full-xray", nodes);
+    const source = JSON.parse(xrayFullConfigJsonFixture) as Record<string, unknown>;
+    const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    const store = new Map<string, string>();
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => store.get(key) ?? null,
+        removeItem: (key: string) => store.delete(key),
+        setItem: (key: string, value: string) => store.set(key, value),
+      },
+    });
+
+    try {
+      saveSubscriptionSnapshot(snapshot);
+      const persisted = JSON.parse(
+        store.get("tachyon.prism.subscription.v1") ?? "{}",
+      ) as Record<string, unknown>;
+      const persistedProfiles = persisted.subscriptions as Array<Record<string, unknown>>;
+      const persistedProfile = persistedProfiles[0];
+      const persistedNodes = persistedProfile.nodes as Array<Record<string, unknown>>;
+      const persistedTemplates = persistedProfile.xrayConfigTemplates as Record<
+        string,
+        unknown
+      >;
+
+      expect(persisted.nodes).toBeUndefined();
+      expect(persistedNodes).toHaveLength(2);
+      expect(persistedNodes.every((item) => !("xrayConfig" in item))).toBe(true);
+      expect(persistedNodes.every((item) => !("outbound" in item))).toBe(true);
+      expect(persistedNodes.map((item) => item.xrayOutboundIndex)).toEqual([0, 1]);
+      expect(new Set(persistedNodes.map((item) => item.xrayConfigId))).toHaveProperty(
+        "size",
+        1,
+      );
+      expect(Object.values(persistedTemplates)).toEqual([source]);
+      expect((JSON.stringify(persisted).match(/xray-trojan-secret/g) ?? [])).toHaveLength(1);
+
+      const loaded = loadSubscriptionSnapshot();
+      const loadedTemplate = xrayConfigTemplateForNode(loaded.nodes[1]);
+      expect(loaded.nodes[0].xrayConfigId).toBe(loaded.nodes[1].xrayConfigId);
+      expect(loaded.nodes[0]).not.toHaveProperty("xrayConfig");
+      expect(activeSubscription(loaded)?.xrayConfigTemplates).toEqual(persistedTemplates);
+      expect(loadedTemplate).toEqual(source);
+      expect(loadedTemplate).toMatchObject({
+        routing: expect.objectContaining({ userRoutingField: { retained: true } }),
+        policy: expect.objectContaining({ userPolicyField: "keep-policy" }),
+        stats: { userStatsField: ["keep", "stats"] },
+        api: expect.objectContaining({ userApiField: { retained: true } }),
+        fakedns: [{ ipPool: "198.18.0.0/15", poolSize: 1024 }],
+        observatory: expect.objectContaining({ enableConcurrency: true }),
+        burstObservatory: expect.objectContaining({
+          pingConfig: expect.objectContaining({ sampling: 3 }),
+        }),
+        userTopLevelField: { nested: ["preserve", { exactly: true }] },
+      });
+    } finally {
+      if (previous) {
+        Object.defineProperty(globalThis, "localStorage", previous);
+      } else {
+        Reflect.deleteProperty(globalThis, "localStorage");
+      }
+    }
+  });
+
+  it("migrates node-level imported config copies into one profile template", () => {
+    const nodes = parseSubscription(xrayFullConfigJsonFixture);
+    const source = JSON.parse(xrayFullConfigJsonFixture) as Record<string, unknown>;
+    const rawSnapshot = {
+      selectedNodeId: nodes[1].id,
+      selectedSubscriptionId: "legacy-full-xray",
+      subscriptions: [
+        {
+          id: "legacy-full-xray",
+          name: "Legacy full Xray",
+          sourceUrl: "https://example.com/legacy-full-xray",
+          updatedAt: "2026-07-11T00:00:00.000Z",
+          nodes: nodes.map((node) => ({
+            ...node,
+            xrayConfigId: undefined,
+            xrayConfig: source,
+          })),
+        },
+      ],
+    };
+    const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: () => JSON.stringify(rawSnapshot),
+        removeItem: () => undefined,
+        setItem: () => undefined,
+      },
+    });
+
+    try {
+      const loaded = loadSubscriptionSnapshot();
+      const profile = activeSubscription(loaded);
+
+      expect(Object.keys(profile?.xrayConfigTemplates ?? {})).toHaveLength(1);
+      expect(loaded.nodes.every((node) => !("xrayConfig" in node))).toBe(true);
+      expect(loaded.nodes.every((node) => !("outbound" in node))).toBe(true);
+      expect(loaded.nodes[0].xrayConfigId).toBe(loaded.nodes[1].xrayConfigId);
+      expect(loaded.nodes.map((node) => node.xrayOutboundIndex)).toEqual([0, 1]);
+      expect(xrayConfigTemplateForNode(loaded.nodes[1])).toEqual(source);
     } finally {
       if (previous) {
         Object.defineProperty(globalThis, "localStorage", previous);

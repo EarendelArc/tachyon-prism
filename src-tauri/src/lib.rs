@@ -6,10 +6,12 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
+
+mod system_proxy;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,6 +200,10 @@ struct ProcessStatus {
     config_path: Option<String>,
     started_at: Option<u64>,
     last_error: Option<String>,
+    exit_code: Option<i32>,
+    stdout_tail: String,
+    stderr_tail: String,
+    stop_method: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -205,6 +211,22 @@ struct ProcessStatus {
 struct RuntimeStatus {
     tachyon_core: ProcessStatus,
     xray: ProcessStatus,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartAllResult {
+    runtime: RuntimeStatus,
+    confirmation: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StopAllResult {
+    runtime: RuntimeStatus,
+    proxy_restored: bool,
+    proxy_restore_status: String,
+    errors: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -290,23 +312,16 @@ struct TachyonCorePreflightCheck {
     raw: Value,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SystemProxyState {
-    supported: bool,
-    enabled: bool,
-    matches_prism: bool,
-    proxy_server: String,
-    expected_proxy_server: String,
-    bypass: String,
-    error: Option<String>,
-}
-
 const WINTUN_VERSION: &str = "0.14.1";
 const WINTUN_ARCHIVE_NAME: &str = "wintun-0.14.1.zip";
 const WINTUN_DOWNLOAD_URL: &str = "https://www.wintun.net/builds/wintun-0.14.1.zip";
 const WINTUN_SHA256: &str = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51";
 const PREFLIGHT_OUTPUT_LIMIT_BYTES: usize = 8 * 1024;
+const PROCESS_LOG_TAIL_BYTES: usize = 32 * 1024;
+const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(3);
+const STARTUP_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
+const STARTUP_READINESS_INTERVAL: Duration = Duration::from_millis(100);
+const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -494,6 +509,21 @@ struct ManagedProcess {
     config_path: Option<String>,
     started_at: Option<u64>,
     last_error: Option<String>,
+    exit_code: Option<i32>,
+    stdout_tail: Arc<Mutex<String>>,
+    stderr_tail: Arc<Mutex<String>>,
+    stdout_reader: Option<thread::JoinHandle<()>>,
+    stderr_reader: Option<thread::JoinHandle<()>>,
+    stop_method: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessLogs {
+    kind: String,
+    stdout_tail: String,
+    stderr_tail: String,
+    capacity_bytes_per_stream: usize,
 }
 
 #[tauri::command]
@@ -505,8 +535,15 @@ fn core_status(app: tauri::AppHandle) -> String {
 }
 
 fn core_health_check(settings: &RuntimeSettings) -> Result<String, String> {
+    core_health_check_with_timeout(settings, Duration::from_secs(3))
+}
+
+fn core_health_check_with_timeout(
+    settings: &RuntimeSettings,
+    timeout: Duration,
+) -> Result<String, String> {
     let url = core_health_url(settings);
-    let mut response = health_agent()
+    let mut response = health_agent_with_timeout(timeout)
         .get(&url)
         .header("User-Agent", "Tachyon-Prism/0.1")
         .call()
@@ -716,12 +753,34 @@ fn fetch_subscription_text(source_url: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn runtime_status(state: tauri::State<RuntimeState>) -> Result<RuntimeStatus, String> {
-    let mut processes = state
+fn runtime_status(
+    app: tauri::AppHandle,
+    state: tauri::State<RuntimeState>,
+    proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
+) -> Result<RuntimeStatus, String> {
+    let status = {
+        let mut processes = state
+            .processes
+            .lock()
+            .map_err(|err| format!("lock runtime state: {err}"))?;
+        processes.status()
+    };
+    if status.xray.state != "running" {
+        let _ = system_proxy::restore_if_pending(&app, &proxy_state);
+    }
+    Ok(status)
+}
+
+#[tauri::command]
+fn runtime_process_logs(
+    state: tauri::State<RuntimeState>,
+    kind: String,
+) -> Result<ProcessLogs, String> {
+    let processes = state
         .processes
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
-    Ok(processes.status())
+    processes.logs(&kind)
 }
 
 #[tauri::command]
@@ -904,23 +963,58 @@ fn tachyon_core_preflight(
 }
 
 #[tauri::command]
-fn system_proxy_status(app: tauri::AppHandle) -> Result<SystemProxyState, String> {
-    let settings = load_runtime_settings(&app)?;
-    Ok(platform_system_proxy_status(&settings))
+fn system_proxy_capability() -> system_proxy::SystemProxyCapability {
+    system_proxy::capability()
 }
 
 #[tauri::command]
-fn enable_system_proxy(app: tauri::AppHandle) -> Result<SystemProxyState, String> {
-    let settings = load_runtime_settings(&app)?;
-    platform_enable_system_proxy(&settings)?;
-    Ok(platform_system_proxy_status(&settings))
+fn system_proxy_query(
+    app: tauri::AppHandle,
+    state: tauri::State<system_proxy::SystemProxyRuntime>,
+) -> Result<system_proxy::SystemProxyQuery, String> {
+    system_proxy::query(&app, &state)
 }
 
 #[tauri::command]
-fn disable_system_proxy(app: tauri::AppHandle) -> Result<SystemProxyState, String> {
-    let settings = load_runtime_settings(&app)?;
-    platform_disable_system_proxy(&settings)?;
-    Ok(platform_system_proxy_status(&settings))
+fn system_proxy_apply(
+    app: tauri::AppHandle,
+    state: tauri::State<system_proxy::SystemProxyRuntime>,
+    enabled: bool,
+) -> Result<system_proxy::SystemProxyTransactionResult, String> {
+    system_proxy::apply(&app, &state, enabled)
+}
+
+#[tauri::command]
+fn system_proxy_restore(
+    app: tauri::AppHandle,
+    state: tauri::State<system_proxy::SystemProxyRuntime>,
+    transaction_id: Option<String>,
+) -> Result<system_proxy::SystemProxyTransactionResult, String> {
+    system_proxy::restore(&app, &state, transaction_id.as_deref())
+}
+
+#[tauri::command]
+fn system_proxy_status(
+    app: tauri::AppHandle,
+    state: tauri::State<system_proxy::SystemProxyRuntime>,
+) -> Result<system_proxy::SystemProxyState, String> {
+    Ok(system_proxy::query(&app, &state)?.current)
+}
+
+#[tauri::command]
+fn enable_system_proxy(
+    app: tauri::AppHandle,
+    state: tauri::State<system_proxy::SystemProxyRuntime>,
+) -> Result<system_proxy::SystemProxyState, String> {
+    Ok(system_proxy::apply(&app, &state, true)?.current)
+}
+
+#[tauri::command]
+fn disable_system_proxy(
+    app: tauri::AppHandle,
+    state: tauri::State<system_proxy::SystemProxyRuntime>,
+) -> Result<system_proxy::SystemProxyState, String> {
+    system_proxy::disable_legacy(&app, &state)
 }
 
 #[tauri::command]
@@ -938,12 +1032,17 @@ fn start_xray(
         ManagedBinaryKind::Xray,
         binary_path,
         config_path.clone(),
-        &["run", "-config", &config_path],
+        &["run", "-config"],
     )
 }
 
 #[tauri::command]
-fn stop_xray(state: tauri::State<RuntimeState>) -> Result<ProcessStatus, String> {
+fn stop_xray(
+    app: tauri::AppHandle,
+    state: tauri::State<RuntimeState>,
+    proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
+) -> Result<ProcessStatus, String> {
+    system_proxy::restore_if_pending(&app, &proxy_state)?;
     let mut processes = state
         .processes
         .lock()
@@ -966,7 +1065,7 @@ fn start_tachyon_core(
         ManagedBinaryKind::TachyonCore,
         binary_path,
         config_path.clone(),
-        &["run", "--config", &config_path],
+        &["run", "--config"],
     )
 }
 
@@ -977,6 +1076,65 @@ fn stop_tachyon_core(state: tauri::State<RuntimeState>) -> Result<ProcessStatus,
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
     processes.tachyon_core.stop("tachyon-core")
+}
+
+#[tauri::command]
+fn start_all(
+    app: tauri::AppHandle,
+    state: tauri::State<RuntimeState>,
+    xray_binary_path: String,
+    xray_config_path: String,
+    tachyon_core_binary_path: String,
+    tachyon_core_config_path: String,
+) -> Result<StartAllResult, String> {
+    let settings = load_runtime_settings(&app)?;
+    let mut processes = state
+        .processes
+        .lock()
+        .map_err(|err| format!("lock runtime state: {err}"))?;
+    processes.start_all(
+        &settings,
+        xray_binary_path,
+        xray_config_path,
+        tachyon_core_binary_path,
+        tachyon_core_config_path,
+    )?;
+    Ok(StartAllResult {
+        runtime: processes.status(),
+        confirmation: "readinessVerified".to_string(),
+    })
+}
+
+#[tauri::command]
+fn stop_all(
+    app: tauri::AppHandle,
+    state: tauri::State<RuntimeState>,
+    proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
+) -> Result<StopAllResult, String> {
+    let mut errors = Vec::new();
+    let (proxy_restored, proxy_restore_status) =
+        match system_proxy::restore_if_pending(&app, &proxy_state) {
+            Ok(true) => (true, "restored".to_string()),
+            Ok(false) => (false, "notPending".to_string()),
+            Err(error) => {
+                errors.push(format!("restore system proxy: {error}"));
+                (false, "failed".to_string())
+            }
+        };
+    let runtime = {
+        let mut processes = state
+            .processes
+            .lock()
+            .map_err(|err| format!("lock runtime state: {err}"))?;
+        errors.extend(processes.stop_all_checked());
+        processes.status()
+    };
+    Ok(StopAllResult {
+        runtime,
+        proxy_restored,
+        proxy_restore_status,
+        errors,
+    })
 }
 
 fn validate_xray_config_file(
@@ -1517,6 +1675,14 @@ fn validation_details(stdout: &str, stderr: &str) -> String {
 }
 
 fn run_xray_stats_query(binary: &Path, server: &str) -> Result<String, String> {
+    run_xray_stats_query_with_timeout(binary, server, Duration::from_secs(2))
+}
+
+fn run_xray_stats_query_with_timeout(
+    binary: &Path,
+    server: &str,
+    timeout: Duration,
+) -> Result<String, String> {
     let mut command = Command::new(binary);
     command.args([
         "api",
@@ -1527,7 +1693,7 @@ fn run_xray_stats_query(binary: &Path, server: &str) -> Result<String, String> {
         "",
         "-reset=false",
     ]);
-    let output = command_output_with_timeout(command, Duration::from_secs(2))?;
+    let output = command_output_with_timeout(command, timeout)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1862,6 +2028,7 @@ fn default_system_proxy_bypass() -> String {
     "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*;<local>".to_string()
 }
 
+#[cfg(not(target_os = "windows"))]
 fn system_proxy_state(
     settings: &RuntimeSettings,
     supported: bool,
@@ -1869,11 +2036,11 @@ fn system_proxy_state(
     proxy_server: String,
     bypass: String,
     error: Option<String>,
-) -> SystemProxyState {
+) -> system_proxy::SystemProxyState {
     let expected = expected_system_proxy_server(settings);
     let matches_prism =
         enabled && normalize_proxy_server(&proxy_server) == normalize_proxy_server(&expected);
-    SystemProxyState {
+    system_proxy::SystemProxyState {
         supported,
         enabled,
         matches_prism,
@@ -1894,149 +2061,8 @@ fn normalize_proxy_server(value: &str) -> String {
         .join(";")
 }
 
-#[cfg(target_os = "windows")]
-fn platform_system_proxy_status(settings: &RuntimeSettings) -> SystemProxyState {
-    match windows_reg_query_internet_settings() {
-        Ok(raw) => {
-            let parsed = parse_windows_proxy_settings(&raw);
-            system_proxy_state(
-                settings,
-                true,
-                parsed.proxy_enable,
-                parsed.proxy_server,
-                parsed.proxy_override,
-                None,
-            )
-        }
-        Err(err) => system_proxy_state(
-            settings,
-            true,
-            false,
-            String::new(),
-            String::new(),
-            Some(err),
-        ),
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn platform_enable_system_proxy(settings: &RuntimeSettings) -> Result<(), String> {
-    let server = expected_system_proxy_server(settings);
-    run_command(
-        "reg",
-        &[
-            "add",
-            WINDOWS_INTERNET_SETTINGS_KEY,
-            "/v",
-            "ProxyEnable",
-            "/t",
-            "REG_DWORD",
-            "/d",
-            "1",
-            "/f",
-        ],
-    )?;
-    run_command(
-        "reg",
-        &[
-            "add",
-            WINDOWS_INTERNET_SETTINGS_KEY,
-            "/v",
-            "ProxyServer",
-            "/t",
-            "REG_SZ",
-            "/d",
-            &server,
-            "/f",
-        ],
-    )?;
-    run_command(
-        "reg",
-        &[
-            "add",
-            WINDOWS_INTERNET_SETTINGS_KEY,
-            "/v",
-            "ProxyOverride",
-            "/t",
-            "REG_SZ",
-            "/d",
-            &settings.system_proxy_bypass,
-            "/f",
-        ],
-    )?;
-    notify_windows_proxy_changed();
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn platform_disable_system_proxy(_settings: &RuntimeSettings) -> Result<(), String> {
-    run_command(
-        "reg",
-        &[
-            "add",
-            WINDOWS_INTERNET_SETTINGS_KEY,
-            "/v",
-            "ProxyEnable",
-            "/t",
-            "REG_DWORD",
-            "/d",
-            "0",
-            "/f",
-        ],
-    )?;
-    notify_windows_proxy_changed();
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-const WINDOWS_INTERNET_SETTINGS_KEY: &str =
-    r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
-
-#[cfg(target_os = "windows")]
-fn windows_reg_query_internet_settings() -> Result<String, String> {
-    run_command("reg", &["query", WINDOWS_INTERNET_SETTINGS_KEY])
-}
-
-#[derive(Default)]
-struct WindowsProxySettings {
-    proxy_enable: bool,
-    proxy_server: String,
-    proxy_override: String,
-}
-
-fn parse_windows_proxy_settings(raw: &str) -> WindowsProxySettings {
-    let mut settings = WindowsProxySettings::default();
-    for line in raw.lines() {
-        let parts: Vec<_> = line.split_whitespace().collect();
-        if parts.len() < 3 {
-            continue;
-        }
-        match parts[0] {
-            "ProxyEnable" => {
-                settings.proxy_enable = parts[2] == "0x1" || parts[2] == "1";
-            }
-            "ProxyServer" => {
-                settings.proxy_server = parts[2..].join(" ");
-            }
-            "ProxyOverride" => {
-                settings.proxy_override = parts[2..].join(" ");
-            }
-            _ => {}
-        }
-    }
-    settings
-}
-
-#[cfg(target_os = "windows")]
-fn notify_windows_proxy_changed() {
-    let _ = run_command(
-        "rundll32.exe",
-        &["user32.dll,UpdatePerUserSystemParameters"],
-    );
-}
-
 #[cfg(target_os = "macos")]
-fn platform_system_proxy_status(settings: &RuntimeSettings) -> SystemProxyState {
+fn platform_system_proxy_status(settings: &RuntimeSettings) -> system_proxy::SystemProxyState {
     match macos_first_network_service() {
         Ok(service) => match run_command("networksetup", &["-getwebproxy", &service]) {
             Ok(raw) => {
@@ -2157,7 +2183,7 @@ fn macos_network_services() -> Result<Vec<String>, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn platform_system_proxy_status(settings: &RuntimeSettings) -> SystemProxyState {
+fn platform_system_proxy_status(settings: &RuntimeSettings) -> system_proxy::SystemProxyState {
     match run_command("gsettings", &["get", "org.gnome.system.proxy", "mode"]) {
         Ok(mode) => {
             let enabled = mode.contains("manual");
@@ -2275,7 +2301,7 @@ fn linux_ignore_hosts(bypass: &str) -> String {
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-fn platform_system_proxy_status(settings: &RuntimeSettings) -> SystemProxyState {
+fn platform_system_proxy_status(settings: &RuntimeSettings) -> system_proxy::SystemProxyState {
     system_proxy_state(
         settings,
         false,
@@ -3777,9 +3803,9 @@ fn download_to_file(url: &str, path: &Path) -> Result<(), String> {
     fs::rename(&temp_path, path).map_err(|err| format!("move {}: {err}", path.display()))
 }
 
-fn health_agent() -> ureq::Agent {
+fn health_agent_with_timeout(timeout: Duration) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(3)))
+        .timeout_global(Some(timeout))
         .build();
     config.into()
 }
@@ -4103,9 +4129,294 @@ impl RuntimeProcesses {
             xray: self.xray.status(),
         }
     }
+
+    fn logs(&self, kind: &str) -> Result<ProcessLogs, String> {
+        let (kind, process) = match kind.trim().to_ascii_lowercase().as_str() {
+            "xray" | "xray-core" => ("xray", &self.xray),
+            "core" | "tachyoncore" | "tachyon-core" => ("tachyonCore", &self.tachyon_core),
+            other => return Err(format!("unknown runtime process kind: {other}")),
+        };
+        Ok(ProcessLogs {
+            kind: kind.to_string(),
+            stdout_tail: log_tail_snapshot(&process.stdout_tail),
+            stderr_tail: log_tail_snapshot(&process.stderr_tail),
+            capacity_bytes_per_stream: PROCESS_LOG_TAIL_BYTES,
+        })
+    }
+
+    fn stop_all(&mut self) {
+        let _ = self.tachyon_core.stop("tachyon-core");
+        let _ = self.xray.stop("xray");
+    }
+
+    fn stop_all_checked(&mut self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if let Err(error) = self.tachyon_core.stop("tachyon-core") {
+            errors.push(error);
+        }
+        if let Err(error) = self.xray.stop("xray") {
+            errors.push(error);
+        }
+        errors
+    }
+
+    fn start_all(
+        &mut self,
+        settings: &RuntimeSettings,
+        xray_binary_path: String,
+        xray_config_path: String,
+        tachyon_core_binary_path: String,
+        tachyon_core_config_path: String,
+    ) -> Result<(), String> {
+        let current = self.status();
+        if current.xray.state == "running" || current.tachyon_core.state == "running" {
+            return Err("start_all requires both managed cores to be stopped".to_string());
+        }
+
+        let mut transaction = RuntimeStartAllTransaction {
+            processes: self,
+            settings,
+            xray_binary_path,
+            xray_config_path,
+            tachyon_core_binary_path,
+            tachyon_core_config_path,
+        };
+        execute_start_all(&mut transaction)
+    }
+}
+
+trait StartAllTransaction {
+    fn start_xray(&mut self) -> Result<(), String>;
+    fn wait_xray_ready(&mut self) -> Result<(), String>;
+    fn start_tachyon_core(&mut self) -> Result<(), String>;
+    fn wait_tachyon_core_ready(&mut self) -> Result<(), String>;
+    fn rollback(&mut self) -> Vec<String>;
+}
+
+fn execute_start_all(transaction: &mut impl StartAllTransaction) -> Result<(), String> {
+    transaction.start_xray()?;
+    if let Err(error) = transaction.wait_xray_ready() {
+        return Err(start_all_rollback_error(error, transaction.rollback()));
+    }
+    if let Err(error) = transaction.start_tachyon_core() {
+        return Err(start_all_rollback_error(error, transaction.rollback()));
+    }
+    if let Err(error) = transaction.wait_tachyon_core_ready() {
+        return Err(start_all_rollback_error(error, transaction.rollback()));
+    }
+    Ok(())
+}
+
+struct RuntimeStartAllTransaction<'a> {
+    processes: &'a mut RuntimeProcesses,
+    settings: &'a RuntimeSettings,
+    xray_binary_path: String,
+    xray_config_path: String,
+    tachyon_core_binary_path: String,
+    tachyon_core_config_path: String,
+}
+
+impl StartAllTransaction for RuntimeStartAllTransaction<'_> {
+    fn start_xray(&mut self) -> Result<(), String> {
+        self.processes
+            .xray
+            .start(
+                "xray",
+                ManagedBinaryKind::Xray,
+                self.xray_binary_path.clone(),
+                self.xray_config_path.clone(),
+                &["run", "-config"],
+            )
+            .map(|_| ())
+    }
+
+    fn wait_xray_ready(&mut self) -> Result<(), String> {
+        wait_for_readiness(
+            "Xray",
+            STARTUP_READINESS_TIMEOUT,
+            STARTUP_READINESS_INTERVAL,
+            |remaining| {
+                self.processes.xray.confirm_running("xray")?;
+                let binary_path = clean_path_input(&self.xray_binary_path);
+                verify_xray_readiness(
+                    self.settings,
+                    Path::new(&binary_path),
+                    remaining.min(STARTUP_PROBE_TIMEOUT),
+                )
+            },
+        )
+    }
+
+    fn start_tachyon_core(&mut self) -> Result<(), String> {
+        self.processes
+            .tachyon_core
+            .start(
+                "tachyon-core",
+                ManagedBinaryKind::TachyonCore,
+                self.tachyon_core_binary_path.clone(),
+                self.tachyon_core_config_path.clone(),
+                &["run", "--config"],
+            )
+            .map(|_| ())
+    }
+
+    fn wait_tachyon_core_ready(&mut self) -> Result<(), String> {
+        wait_for_readiness(
+            "Tachyon Core",
+            STARTUP_READINESS_TIMEOUT,
+            STARTUP_READINESS_INTERVAL,
+            |remaining| {
+                self.processes
+                    .tachyon_core
+                    .confirm_running("tachyon-core")?;
+                local_probe_host(&self.settings.tachyon_ipc_listen)
+                    .map_err(|error| format!("Tachyon Core IPC readiness: {error}"))?;
+                let status = core_health_check_with_timeout(
+                    self.settings,
+                    remaining.min(STARTUP_PROBE_TIMEOUT),
+                )?;
+                if status == "ok" {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{} returned status {status:?}",
+                        core_health_url(self.settings)
+                    ))
+                }
+            },
+        )
+    }
+
+    fn rollback(&mut self) -> Vec<String> {
+        self.processes.stop_all_checked()
+    }
+}
+
+fn wait_for_readiness(
+    label: &str,
+    timeout: Duration,
+    interval: Duration,
+    mut probe: impl FnMut(Duration) -> Result<(), String>,
+) -> Result<(), String> {
+    let started = Instant::now();
+    loop {
+        let remaining = timeout.saturating_sub(started.elapsed());
+        let last_error = match probe(remaining) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            return Err(format!(
+                "{label} readiness timed out after {}ms: {last_error}",
+                timeout.as_millis()
+            ));
+        }
+        thread::sleep(interval.min(timeout - elapsed));
+    }
+}
+
+fn verify_xray_readiness(
+    settings: &RuntimeSettings,
+    binary: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    if settings.xray_stats_enabled {
+        let host = local_probe_host(&settings.xray_stats_listen)?;
+        let server = format!("{}:{}", socket_host(&host), settings.xray_stats_port);
+        run_xray_stats_query_with_timeout(binary, &server, timeout)
+            .map(|_| ())
+            .map_err(|error| format!("Xray stats API {server} is not ready: {error}"))
+    } else {
+        probe_local_listener(
+            "Xray HTTP inbound",
+            &settings.xray_http_listen,
+            settings.xray_http_port,
+            timeout,
+        )?;
+        probe_local_listener(
+            "Xray SOCKS inbound",
+            &settings.xray_socks_listen,
+            settings.xray_socks_port,
+            timeout,
+        )
+    }
+}
+
+fn probe_local_listener(
+    label: &str,
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> Result<(), String> {
+    let host = local_probe_host(host)?;
+    let endpoint = format!("{}:{port}", socket_host(&host));
+    let addresses = endpoint
+        .to_socket_addrs()
+        .map_err(|error| format!("resolve {label} {endpoint}: {error}"))?;
+    let mut last_error = "no addresses resolved".to_string();
+    for address in addresses {
+        match TcpStream::connect_timeout(&address, timeout) {
+            Ok(stream) => {
+                let _ = stream.shutdown(Shutdown::Both);
+                return Ok(());
+            }
+            Err(error) => last_error = error.to_string(),
+        }
+    }
+    Err(format!(
+        "{label} {endpoint} is not accepting connections: {last_error}"
+    ))
+}
+
+fn local_probe_host(host: &str) -> Result<String, String> {
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    match host {
+        "0.0.0.0" => return Ok("127.0.0.1".to_string()),
+        "::" => return Ok("::1".to_string()),
+        value if value.eq_ignore_ascii_case("localhost") => return Ok("localhost".to_string()),
+        _ => {}
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(address) if address.is_loopback() => Ok(address.to_string()),
+        _ => Err(format!(
+            "readiness probe refuses non-local listen address {host:?}"
+        )),
+    }
+}
+
+fn socket_host(host: &str) -> String {
+    if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+fn start_all_rollback_error(start_error: String, rollback_errors: Vec<String>) -> String {
+    if rollback_errors.is_empty() {
+        format!("start_all failed: {start_error}; started cores were rolled back")
+    } else {
+        format!(
+            "start_all failed: {start_error}; rollback failed: {}",
+            rollback_errors.join("; ")
+        )
+    }
 }
 
 impl ManagedProcess {
+    fn confirm_running(&mut self, label: &str) -> Result<(), String> {
+        self.refresh(label)?;
+        if self.child.is_some() {
+            Ok(())
+        } else {
+            Err(self
+                .last_error
+                .clone()
+                .unwrap_or_else(|| format!("{label} did not remain running")))
+        }
+    }
+
     fn start(
         &mut self,
         label: &str,
@@ -4131,22 +4442,35 @@ impl ManagedProcess {
 
         let mut command = Command::new(&binary);
         command.args(args);
+        command.arg(&config);
         command.stdin(Stdio::null());
-        command.stdout(Stdio::null());
-        command.stderr(Stdio::null());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
         if let Some(work_dir) = config.parent().or_else(|| binary.parent()) {
             command.current_dir(work_dir);
         }
         hide_command_window(&mut command);
 
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|err| format!("start {label}: {err}"))?;
+        self.stdout_tail = Arc::new(Mutex::new(String::new()));
+        self.stderr_tail = Arc::new(Mutex::new(String::new()));
+        self.stdout_reader = child
+            .stdout
+            .take()
+            .map(|stdout| spawn_log_reader(stdout, Arc::clone(&self.stdout_tail)));
+        self.stderr_reader = child
+            .stderr
+            .take()
+            .map(|stderr| spawn_log_reader(stderr, Arc::clone(&self.stderr_tail)));
         self.child = Some(child);
         self.binary_path = Some(path_string(&binary));
         self.config_path = Some(path_string(&config));
         self.started_at = Some(now_epoch_seconds());
         self.last_error = None;
+        self.exit_code = None;
+        self.stop_method = None;
         std::thread::sleep(Duration::from_millis(150));
         self.refresh(label)?;
         if self.child.is_none() {
@@ -4163,10 +4487,38 @@ impl ManagedProcess {
         let Some(mut child) = self.child.take() else {
             return Ok(self.snapshot());
         };
-        child.kill().map_err(|err| format!("stop {label}: {err}"))?;
-        let _ = child.wait();
+        let graceful_request = request_graceful_stop(&child);
+        let deadline = Instant::now() + GRACEFUL_STOP_TIMEOUT;
+        let mut forced = false;
+        loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|err| format!("poll {label} while stopping: {err}"))?
+            {
+                self.exit_code = status.code();
+                break;
+            }
+            if Instant::now() >= deadline {
+                child
+                    .kill()
+                    .map_err(|err| format!("force stop {label}: {err}"))?;
+                let status = child
+                    .wait()
+                    .map_err(|err| format!("wait for {label} after force stop: {err}"))?;
+                self.exit_code = status.code();
+                forced = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        self.finish_log_readers();
         self.started_at = None;
-        self.last_error = None;
+        self.last_error = graceful_request.err().filter(|_| forced);
+        self.stop_method = Some(if forced {
+            "forcedAfterTimeout".to_string()
+        } else {
+            "graceful".to_string()
+        });
         Ok(self.snapshot())
     }
 
@@ -4189,10 +4541,23 @@ impl ManagedProcess {
         if let Some(status) = exit_status {
             self.child = None;
             self.started_at = None;
+            self.exit_code = status.code();
+            self.finish_log_readers();
             self.last_error = if status.success() {
                 None
             } else {
-                Some(format!("{label} exited with {status}"))
+                let stderr = log_tail_snapshot(&self.stderr_tail);
+                let detail = stderr
+                    .lines()
+                    .rev()
+                    .find(|line| !line.trim().is_empty())
+                    .map(str::trim)
+                    .unwrap_or_default();
+                Some(if detail.is_empty() {
+                    format!("{label} exited with {status}")
+                } else {
+                    format!("{label} exited with {status}: {detail}")
+                })
             };
         }
         Ok(())
@@ -4212,8 +4577,83 @@ impl ManagedProcess {
             config_path: self.config_path.clone(),
             started_at: self.started_at,
             last_error: self.last_error.clone(),
+            exit_code: self.exit_code,
+            stdout_tail: log_tail_snapshot(&self.stdout_tail),
+            stderr_tail: log_tail_snapshot(&self.stderr_tail),
+            stop_method: self.stop_method.clone(),
         }
     }
+
+    fn finish_log_readers(&mut self) {
+        if let Some(reader) = self.stdout_reader.take() {
+            let _ = reader.join();
+        }
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+fn spawn_log_reader<R>(reader: R, tail: Arc<Mutex<String>>) -> thread::JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut reader = reader;
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => append_log_tail(&tail, &String::from_utf8_lossy(&buffer[..read])),
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn append_log_tail(tail: &Mutex<String>, value: &str) {
+    let Ok(mut tail) = tail.lock() else {
+        return;
+    };
+    tail.push_str(value);
+    if tail.len() <= PROCESS_LOG_TAIL_BYTES {
+        return;
+    }
+    let mut remove_bytes = tail.len() - PROCESS_LOG_TAIL_BYTES;
+    while !tail.is_char_boundary(remove_bytes) {
+        remove_bytes += 1;
+    }
+    tail.drain(..remove_bytes);
+}
+
+fn log_tail_snapshot(tail: &Mutex<String>) -> String {
+    tail.lock().map(|value| value.clone()).unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+fn request_graceful_stop(child: &Child) -> Result<(), String> {
+    let mut command = Command::new("taskkill");
+    command.args(["/PID", &child.id().to_string(), "/T"]);
+    let output = command_output_with_timeout(command, Duration::from_secs(2))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "request graceful process stop: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn request_graceful_stop(child: &Child) -> Result<(), String> {
+    let pid = child.id().to_string();
+    run_command("kill", &["-TERM", &pid]).map(|_| ())
+}
+
+#[cfg(not(any(target_os = "windows", unix)))]
+fn request_graceful_stop(_child: &Child) -> Result<(), String> {
+    Err("graceful process stop is unsupported on this platform".to_string())
 }
 
 fn validate_process_start_inputs(
@@ -4247,6 +4687,16 @@ fn epoch_seconds(time: SystemTime) -> Option<u64> {
     time.duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .ok()
+}
+
+fn cleanup_runtime(handle: &tauri::AppHandle) {
+    let proxy_runtime = handle.state::<system_proxy::SystemProxyRuntime>();
+    let _ = system_proxy::restore_if_pending(handle, &proxy_runtime);
+
+    let runtime = handle.state::<RuntimeState>();
+    if let Ok(mut processes) = runtime.processes.lock() {
+        processes.stop_all();
+    };
 }
 
 #[tauri::command]
@@ -4328,6 +4778,130 @@ fn window_start_dragging(window: tauri::Window) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FakeStartAllTransaction {
+        events: Vec<&'static str>,
+        xray_readiness: Result<(), String>,
+        core_start: Result<(), String>,
+        core_readiness: Result<(), String>,
+        rollback_errors: Vec<String>,
+    }
+
+    impl Default for FakeStartAllTransaction {
+        fn default() -> Self {
+            Self {
+                events: Vec::new(),
+                xray_readiness: Ok(()),
+                core_start: Ok(()),
+                core_readiness: Ok(()),
+                rollback_errors: Vec::new(),
+            }
+        }
+    }
+
+    impl StartAllTransaction for FakeStartAllTransaction {
+        fn start_xray(&mut self) -> Result<(), String> {
+            self.events.push("startXray");
+            Ok(())
+        }
+
+        fn wait_xray_ready(&mut self) -> Result<(), String> {
+            self.events.push("waitXray");
+            self.xray_readiness.clone()
+        }
+
+        fn start_tachyon_core(&mut self) -> Result<(), String> {
+            self.events.push("startCore");
+            self.core_start.clone()
+        }
+
+        fn wait_tachyon_core_ready(&mut self) -> Result<(), String> {
+            self.events.push("waitCore");
+            self.core_readiness.clone()
+        }
+
+        fn rollback(&mut self) -> Vec<String> {
+            self.events.push("rollback");
+            self.rollback_errors.clone()
+        }
+    }
+
+    #[test]
+    fn start_all_transaction_requires_both_readiness_checks() {
+        let mut transaction = FakeStartAllTransaction::default();
+
+        execute_start_all(&mut transaction).expect("both cores are ready");
+
+        assert_eq!(
+            transaction.events,
+            ["startXray", "waitXray", "startCore", "waitCore"]
+        );
+    }
+
+    #[test]
+    fn readiness_timeout_is_bounded_and_rolls_back_started_xray() {
+        let timeout = wait_for_readiness("Xray", Duration::ZERO, Duration::ZERO, |_| {
+            Err("connection refused".to_string())
+        })
+        .expect_err("failed probe must time out");
+        let mut transaction = FakeStartAllTransaction {
+            xray_readiness: Err(timeout),
+            ..FakeStartAllTransaction::default()
+        };
+
+        let error = execute_start_all(&mut transaction).expect_err("readiness must fail startup");
+
+        assert!(error.contains("Xray readiness timed out after 0ms"));
+        assert!(error.contains("started cores were rolled back"));
+        assert_eq!(transaction.events, ["startXray", "waitXray", "rollback"]);
+    }
+
+    #[test]
+    fn core_readiness_failure_preserves_rollback_errors() {
+        let mut transaction = FakeStartAllTransaction {
+            core_readiness: Err("Tachyon Core health returned status \"degraded\"".to_string()),
+            rollback_errors: vec![
+                "stop tachyon-core: access denied".to_string(),
+                "stop xray: access denied".to_string(),
+            ],
+            ..FakeStartAllTransaction::default()
+        };
+
+        let error = execute_start_all(&mut transaction).expect_err("core readiness must fail");
+
+        assert!(error.contains("status \"degraded\""));
+        assert!(error.contains("stop tachyon-core: access denied"));
+        assert!(error.contains("stop xray: access denied"));
+        assert_eq!(
+            transaction.events,
+            ["startXray", "waitXray", "startCore", "waitCore", "rollback"]
+        );
+    }
+
+    #[test]
+    fn readiness_probes_reject_non_local_addresses() {
+        assert_eq!(local_probe_host("0.0.0.0").unwrap(), "127.0.0.1");
+        assert_eq!(local_probe_host("[::]").unwrap(), "::1");
+        assert!(local_probe_host("198.51.100.10").is_err());
+        assert!(local_probe_host("example.com").is_err());
+    }
+
+    #[test]
+    fn process_log_tail_is_utf8_safe_and_bounded() {
+        let tail = Mutex::new(String::new());
+        append_log_tail(&tail, &"日志".repeat(PROCESS_LOG_TAIL_BYTES));
+        let snapshot = log_tail_snapshot(&tail);
+
+        assert!(snapshot.len() <= PROCESS_LOG_TAIL_BYTES);
+        assert!(snapshot.is_char_boundary(0));
+        assert!(snapshot.ends_with("日志"));
+    }
+
+    #[test]
+    fn process_logs_query_rejects_unknown_kind() {
+        let processes = RuntimeProcesses::default();
+        assert!(processes.logs("not-a-core").is_err());
+    }
 
     #[test]
     fn selects_tachyon_core_asset_for_current_platform() {
@@ -5871,43 +6445,6 @@ stat: <
         );
     }
 
-    #[test]
-    fn parses_windows_proxy_registry_output() {
-        let raw = r#"
-HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
-    ProxyEnable    REG_DWORD    0x1
-    ProxyServer    REG_SZ    http=127.0.0.1:10809;https=127.0.0.1:10809;socks=127.0.0.1:10808
-    ProxyOverride    REG_SZ    localhost;127.*;<local>
-"#;
-        let parsed = parse_windows_proxy_settings(raw);
-        assert!(parsed.proxy_enable);
-        assert_eq!(
-            parsed.proxy_server,
-            "http=127.0.0.1:10809;https=127.0.0.1:10809;socks=127.0.0.1:10808"
-        );
-        assert_eq!(parsed.proxy_override, "localhost;127.*;<local>");
-    }
-
-    #[test]
-    fn system_proxy_state_detects_prism_match() {
-        let settings = RuntimeSettings {
-            xray_http_listen: "127.0.0.1".to_string(),
-            xray_http_port: 10809,
-            xray_socks_listen: "127.0.0.1".to_string(),
-            xray_socks_port: 10808,
-            ..RuntimeSettings::default()
-        };
-        let state = system_proxy_state(
-            &settings,
-            true,
-            true,
-            "HTTP=127.0.0.1:10809;HTTPS=127.0.0.1:10809;SOCKS=127.0.0.1:10808".to_string(),
-            default_system_proxy_bypass(),
-            None,
-        );
-        assert!(state.matches_prism);
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_ignore_hosts_formats_gsettings_array() {
@@ -5995,6 +6532,7 @@ pub fn run() {
             Ok(())
         })
         .manage(RuntimeState::default())
+        .manage(system_proxy::SystemProxyRuntime::default())
         .invoke_handler(tauri::generate_handler![
             core_status,
             list_game_profiles,
@@ -6017,6 +6555,7 @@ pub fn run() {
             install_wintun_sidecar,
             fetch_subscription_text,
             runtime_status,
+            runtime_process_logs,
             runtime_privilege_status,
             xray_traffic_stats,
             test_tcp_latency,
@@ -6025,6 +6564,10 @@ pub fn run() {
             validate_xray_config,
             validate_tachyon_core_config,
             tachyon_core_preflight,
+            system_proxy_capability,
+            system_proxy_query,
+            system_proxy_apply,
+            system_proxy_restore,
             system_proxy_status,
             enable_system_proxy,
             disable_system_proxy,
@@ -6032,6 +6575,8 @@ pub fn run() {
             stop_xray,
             start_tachyon_core,
             stop_tachyon_core,
+            start_all,
+            stop_all,
             window_minimize,
             window_toggle_maximize,
             window_set_maximized,
@@ -6043,6 +6588,8 @@ pub fn run() {
         .expect("failed to build Tachyon Prism")
         .run(|handle, event| {
             if matches!(event, tauri::RunEvent::Ready) {
+                let proxy_runtime = handle.state::<system_proxy::SystemProxyRuntime>();
+                let _ = system_proxy::restore_if_pending(handle, &proxy_runtime);
                 for (_, window) in handle.webview_windows() {
                     let default_size = tauri::Size::Logical(tauri::LogicalSize {
                         width: 800.0,
@@ -6054,6 +6601,12 @@ pub fn run() {
                     let _ = window.show();
                     let _ = window.set_focus();
                 }
+            }
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                cleanup_runtime(handle);
             }
         });
 }

@@ -9,11 +9,17 @@ import {
   stringifyDraft,
 } from "../configDrafts";
 import type { GameProfile, LauncherSettings } from "../gameProfiles";
-import { parseSubscription } from "../subscriptions";
+import {
+  buildXrayOutboundDraft,
+  createSubscriptionSnapshot,
+  parseSubscription,
+  selectSubscriptionNode,
+} from "../subscriptions";
 import type { ProxyNode } from "../subscriptions";
 import {
   singBoxTuicJsonFixture,
   subscriptionCompatibilityFixtures,
+  xrayFullConfigJsonFixture,
 } from "./subscriptionFixtures";
 
 const mockVMessNode: ProxyNode = {
@@ -171,6 +177,141 @@ describe("buildXrayClientConfigDraft", () => {
     });
   });
 
+  it("uses a full imported Xray config as the lossless source for any selected node", () => {
+    const nodes = parseSubscription(xrayFullConfigJsonFixture);
+    const snapshot = createSubscriptionSnapshot("https://example.com/full-xray", nodes);
+    const selected = selectSubscriptionNode(snapshot, nodes[1].id);
+    const node = selected.nodes.find((item) => item.id === selected.selectedNodeId)!;
+    const config = buildXrayClientConfigDraft(node, { routingMode: "global" });
+    const source = JSON.parse(xrayFullConfigJsonFixture) as Record<string, unknown>;
+    const generatedInbounds = config.inbounds as Array<Record<string, unknown>>;
+    const generatedOutbounds = config.outbounds as Array<Record<string, unknown>>;
+
+    expect(nodes).toHaveLength(2);
+    expect(node.xrayConfigId).toMatch(/^xray-config-/);
+    expect(node).not.toHaveProperty("xrayConfig");
+    expect(config.log).toEqual(source.log);
+    expect(config.dns).toEqual(source.dns);
+    expect(config.policy).toEqual(source.policy);
+    expect(config.stats).toEqual(source.stats);
+    expect(config.api).toEqual(source.api);
+    expect(config.fakedns).toEqual(source.fakedns);
+    expect(config.observatory).toEqual(source.observatory);
+    expect(config.burstObservatory).toEqual(source.burstObservatory);
+    expect(config.userTopLevelField).toEqual(source.userTopLevelField);
+    expect(config.inbounds).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tag: "tachyon-socks",
+          userInboundField: "keep-inbound",
+        }),
+        expect.objectContaining({
+          tag: "tachyon-socks-2",
+          protocol: "socks",
+        }),
+        expect.objectContaining({
+          tag: "tachyon-http",
+          protocol: "http",
+        }),
+      ]),
+    );
+    expect(config.outbounds).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tag: "tachyon-proxy",
+          protocol: "vmess",
+          streamSettings: expect.objectContaining({
+            network: "xhttp",
+            xhttpSettings: {
+              path: "/xhttp",
+              mode: "auto",
+              extra: { xPaddingBytes: "100-1000" },
+            },
+          }),
+        }),
+        expect.objectContaining({
+          tag: "Xray Full Trojan TLS",
+          userOutboundField: { retained: true },
+        }),
+        expect.objectContaining({
+          tag: "tachyon-proxy",
+        }),
+      ]),
+    );
+    expect(config.routing).toMatchObject({
+      domainStrategy: "IPOnDemand",
+      domainMatcher: "hybrid",
+      userRoutingField: { retained: true },
+      rules: expect.arrayContaining([
+        expect.objectContaining({
+          domain: ["full:user.example.com"],
+          outboundTag: "tachyon-proxy",
+        }),
+        expect.objectContaining({
+          inboundTag: ["tachyon-socks-2", "tachyon-http"],
+          outboundTag: "tachyon-proxy",
+        }),
+      ]),
+    });
+    const inboundTags = new Set(generatedInbounds.map((item) => item.tag));
+    const outboundTags = new Set(generatedOutbounds.map((item) => item.tag));
+    const rules = (config.routing as Record<string, unknown>).rules as Array<
+      Record<string, unknown>
+    >;
+    for (const rule of rules) {
+      for (const inboundTag of (rule.inboundTag as string[] | undefined) ?? []) {
+        expect(inboundTags.has(inboundTag)).toBe(true);
+      }
+      if (typeof rule.outboundTag === "string") {
+        expect(outboundTags.has(rule.outboundTag)).toBe(true);
+      }
+    }
+  });
+
+  it("merges Prism stats wiring into imported api, policy, stats, and routing", () => {
+    const [node] = parseSubscription(xrayFullConfigJsonFixture);
+    const config = buildXrayClientConfigDraft(node, { enableStats: true });
+    const api = config.api as Record<string, unknown>;
+    const policy = config.policy as Record<string, unknown>;
+    const system = policy.system as Record<string, unknown>;
+    const routing = config.routing as Record<string, unknown>;
+    const rules = routing.rules as Array<Record<string, unknown>>;
+
+    expect(api).toMatchObject({
+      tag: "user-api",
+      services: ["HandlerService", "StatsService"],
+      userApiField: { retained: true },
+    });
+    expect(policy).toMatchObject({
+      levels: {
+        "0": {
+          handshake: 7,
+          userUplink: true,
+        },
+      },
+      userPolicyField: "keep-policy",
+    });
+    expect(system).toMatchObject({
+      statsUserUplink: true,
+      statsInboundDownlink: true,
+      statsOutboundUplink: true,
+    });
+    expect(config.stats).toEqual({ userStatsField: ["keep", "stats"] });
+    expect(rules).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          inboundTag: ["tachyon-xray-api-in"],
+          outboundTag: "user-api",
+        }),
+      ]),
+    );
+    expect(
+      (config.outbounds as Array<Record<string, unknown>>).some(
+        (outbound) => outbound.tag === "user-api",
+      ),
+    ).toBe(false);
+  });
+
   it("uses 127.0.0.1:10808 as default socks inbound", () => {
     const config = buildXrayClientConfigDraft(mockTrojanNode);
     const inbounds = config.inbounds as Array<Record<string, unknown>>;
@@ -293,13 +434,16 @@ describe("buildXrayClientConfigDraft", () => {
 
       const config = buildXrayClientConfigDraft(node);
       const outbounds = config.outbounds as Array<Record<string, unknown>>;
+      const selectedTag = node.xrayConfigId
+        ? buildXrayOutboundDraft(node).tag
+        : "tachyon-proxy";
       const proxy = outbounds.find(
-        (outbound) => outbound.tag === "tachyon-proxy",
+        (outbound) => outbound.tag === selectedTag,
       ) as Record<string, unknown> | undefined;
 
       expect(proxy).toMatchObject({
         ...outboundMatch,
-        tag: "tachyon-proxy",
+        tag: selectedTag,
       });
       expect(outbounds).toEqual(
         expect.arrayContaining([
