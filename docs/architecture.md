@@ -68,17 +68,24 @@ paths when starting cores.
 Start All:
   1. Write config drafts (client.json + xray-client.json)
   2. Save runtime settings
-  3. Preflight checks (binary paths, sidecars, node, config drafts)
-  4. Start Xray with xray-client.json
-  5. Start Tachyon Core with client.json
-  6. Poll Core /v1/health (3s timeout) for status
+  3. Validate configs and run preflight checks
+  4. Start Xray and wait for local Xray readiness
+  5. Start Tachyon Core and wait for local Core /v1/health readiness
+  6. Roll back every core started by this transaction on any failure
 ```
 
 The Runtime panel shows live process state for both cores and supports
 individual start/stop controls.
 
-Current alpha builds keep OS system proxy and TUN takeover disabled by default.
-Generated Core configs force `client.tun.auto_route=false` and
+Windows system proxy control is an implemented alpha transaction over the
+current-user WinINet registry settings. It snapshots prior state, verifies the
+applied values, restores the snapshot when control is released, and journals
+recovery for the next launch after a crash. Real Windows host-registry
+acceptance testing has not yet been performed, so this is not production-ready.
+macOS and Linux system proxy control are unsupported.
+
+TUN one-click takeover remains disabled and is a stable-release gate. Generated
+Core configs force `client.tun.auto_route=false` and
 `client.tun.dns_hijack=false`; the local HTTP/SOCKS probe only validates Prism's
 generated Xray inbounds and does not change host network state.
 

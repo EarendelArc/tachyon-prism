@@ -68,9 +68,11 @@ Use the Overview quick actions or **Settings > Core** runtime buttons:
 1. Prism writes the latest config files.
 2. Prism validates `xray-client.json` with Xray's native test mode.
 3. Prism validates `client.json` with Tachyon Core's validator.
-4. Prism starts Xray Core with `xray-client.json`.
-5. Prism starts Tachyon Core with `client.json`.
-6. The dashboard shows live status for both cores.
+4. Prism starts Xray Core and waits for local Xray readiness.
+5. Prism starts Tachyon Core only after Xray is ready, then waits for the local
+   Core `/v1/health` readiness endpoint.
+6. Any start or readiness failure rolls back the cores started by **Start All**.
+7. The dashboard shows live status for both cores.
 
 Game UDP traffic matching your profiles will be accelerated through TGP. Other proxy traffic flows through Xray.
 
@@ -80,5 +82,7 @@ Game UDP traffic matching your profiles will be accelerated through TGP. Other p
 - The **Readiness** panel flags missing nodes, binaries, configs, and sidecars.
 - The **TUN Privilege** row is read-only in alpha and is not a startup gate.
 - The local HTTP/SOCKS proxy probe validates Xray through the generated local inbounds without changing system proxy or enabling TUN.
-- System proxy and TUN takeover stay disabled in alpha. TUN one-click takeover is a stable gate, not part of this release loop.
+- Windows system proxy control is implemented in the UI as an alpha WinINet transaction with snapshot, verification, restore, and crash recovery. It has not completed real-host registry acceptance testing and is not production-ready.
+- macOS and Linux system proxy control are unsupported.
+- TUN one-click takeover remains disabled and is a stable gate, not part of this release loop.
 - Real VPS, real client, and real game UDP acceleration paths still need field testing.

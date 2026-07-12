@@ -67,9 +67,10 @@ Windows 上 Prism 还会检查 Tachyon Core 所需的 `wintun.dll` sidecar。Pri
 1. Prism 写入最新配置文件。
 2. Prism 使用 Xray 原生测试模式验证 `xray-client.json`。
 3. Prism 使用 Tachyon Core 验证器验证 `client.json`。
-4. Prism 用 `xray-client.json` 启动 Xray Core。
-5. Prism 用 `client.json` 启动 Tachyon Core。
-6. 概览页显示两个核心的实时状态。
+4. Prism 启动 Xray Core，并等待本地 Xray readiness。
+5. 只有 Xray 就绪后才启动 Tachyon Core，然后等待本地 Core `/v1/health` readiness。
+6. 任一启动或 readiness 失败都会回滚 **Start All** 本次已经启动的核心。
+7. 概览页显示两个核心的实时状态。
 
 匹配游戏配置的 UDP 流量可以通过 TGP 加速。其他代理流量正常走 Xray。
 
@@ -79,5 +80,7 @@ Windows 上 Prism 还会检查 Tachyon Core 所需的 `wintun.dll` sidecar。Pri
 - **就绪检查** 会提示缺失的节点、二进制、配置或 sidecar。
 - **TUN Privilege** 行在当前 alpha 中只是只读提示，不是启动门槛。
 - 本地 HTTP/SOCKS 代理探针会通过生成的 Xray 本地入站验证代理链路，不会修改系统代理，也不会启用 TUN。
-- 系统代理和 TUN 一键接管在当前 alpha 保持禁用；TUN 一键接管是 stable 门禁，不是本轮强制开启内容。
+- Windows 系统代理控制已经在 UI 中实现为 alpha WinINet 事务，包含快照、验证、恢复和崩溃恢复；尚未完成真实宿主注册表验收，因此还不能视为生产可用。
+- macOS 和 Linux 系统代理不受支持。
+- TUN 一键接管仍保持禁用，并且是 stable 门禁，不是本轮强制开启内容。
 - 真实 VPS、真实客户端和真实游戏 UDP 加速链路仍需实测。

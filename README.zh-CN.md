@@ -6,7 +6,7 @@ Tachyon Prism 是 Tachyon 的图形化控制面。
 
 Prism 设计目标是成为支持 Tachyon Core 的 Xray GUI 客户端，但当前仍处于 alpha 阶段。它负责交互、可视化、订阅、节点选择、Xray 生命周期、Xray JSON 生成、路由 UI、规则 UI、游戏进程检测和双核心编排。普通代理流量走 Xray，游戏 UDP 流量可以交给 Tachyon Core 做低延迟加速。
 
-stable 线目标是逐步成为较完整的 Xray GUI，并提供可选 Tachyon 游戏加速，但当前 alpha 还不能宣称完整或稳定。当前 alpha 中系统代理和 TUN 一键接管保持禁用；本地 HTTP/SOCKS 探针允许保留，因为它只验证 Prism 生成的本地 Xray 入站，不修改宿主系统网络状态。
+stable 线目标是逐步成为较完整的 Xray GUI，并提供可选 Tachyon 游戏加速，但当前 alpha 还不能宣称完整或稳定。Windows 系统代理控制已经实现并接入 UI，但仍是 alpha 功能，尚未针对真实 Windows 宿主注册表完成验收；macOS 和 Linux 系统代理仍不支持。TUN 一键接管仍保持禁用，并且是 stable 发布门禁。
 
 ## 当前功能
 
@@ -25,7 +25,8 @@ stable 线目标是逐步成为较完整的 Xray GUI，并提供可选 Tachyon �
 - 持久化 Xray Core 和 Tachyon Core 的运行二进制路径。
 - 运行时网络设置，包含 Xray SOCKS、Xray HTTP 探测入站、Xray StatsService、Tachyon IPC、Tachyon gRPC、TUN 地址/MTU 和遥测间隔。
 - 通过生成的 Xray HTTP/SOCKS 入站进行本地代理探测，不修改系统代理，也不启用 TUN。
-- 系统代理和 TUN 一键接管在当前 alpha 中禁用；停止全部运行时时仅会尝试清理历史上由 Prism 持有的系统代理状态。
+- Windows 系统代理使用事务式 WinINet 流程，包含快照、应用后验证、恢复和启动时崩溃恢复。该功能尚未达到生产可用，仍需真实宿主注册表验收。
+- macOS 和 Linux 系统代理不受支持。Tachyon TUN 一键接管仍禁用，并且是 stable 发布门禁。
 - 把本地二进制安装到 Prism 应用配置目录下的托管 `bin` 目录。
 - 从 GitHub release channel 发现、下载、SHA-256 校验并托管安装最新版 Xray Core 和 Tachyon Core。
 - 只读 Core release diagnostics，用于排查发布通道、tag、资产、checksum、安装路径、
@@ -81,13 +82,13 @@ Binaries 面板可以把本地 `xray` 或 `tachyon-core` 可执行文件复制�
 写设置或生成配置，不会启动任一核心，不会执行已安装二进制，也不会启用系统代理或
 Tachyon TUN。
 
-Runtime 面板会把二进制路径保存到 `runtime-settings.json`。`Start All` 会先写入最新生成的配置文件，再用 `xray-client.json` 启动 Xray，并用 `client.json` 启动 Tachyon Core。每次启动前都会先验证刚写入的配置：Xray 使用原生 `run -test -config` 模式，Tachyon Core 使用 `validate --config`。Config Drafts 区域也提供手动验证按钮，并会保留最近一次验证结果。同一个 Runtime 面板也会保存本地监听端口与核心传输设置：Xray SOCKS、Xray HTTP 探测入站、Xray StatsService、Tachyon HTTP IPC、Tachyon gRPC、TUN 地址/MTU 和遥测间隔。Alpha 配置生成始终写入 `client.tun.auto_route=false` 和 `client.tun.dns_hijack=false`，即使调用方传入 true。在 Windows 上，Tachyon Core 还要求 `wintun.dll` 与配置的 `tachyon-core.exe` 位于同一目录；Prism 会在 Runtime readiness 中提示，并在缺少必需 sidecar 时阻止启动 Core。Prism 也会检查当前进程是否具备管理 TUN 设备的权限，但这个检查只读，不是当前 alpha 的启动门槛，也不会自行启用 TUN。
+Runtime 面板会把二进制路径保存到 `runtime-settings.json`。`Start All` 会先写入并验证最新生成的配置文件：Xray 使用原生 `run -test -config` 模式，Tachyon Core 使用 `validate --config`。随后 Prism 启动 Xray 并等待其本地 readiness，通过后才启动 Tachyon Core 并等待本地 Core `/v1/health`；任一启动或 readiness 失败都会回滚本次事务已经启动的核心。Config Drafts 区域也提供手动验证按钮，并会保留最近一次验证结果。同一个 Runtime 面板还会保存本地监听端口与核心传输设置：Xray SOCKS、Xray HTTP 探测入站、Xray StatsService、Tachyon HTTP IPC、Tachyon gRPC、TUN 地址/MTU 和遥测间隔。Alpha 配置生成始终写入 `client.tun.auto_route=false` 和 `client.tun.dns_hijack=false`，即使调用方传入 true。在 Windows 上，Tachyon Core 还要求 `wintun.dll` 与配置的 `tachyon-core.exe` 位于同一目录；Prism 会在 Runtime readiness 中提示，并在缺少必需 sidecar 时阻止启动 Core。Prism 也会检查当前进程是否具备管理 TUN 设备的权限，但这个检查只读，不是当前 alpha 的启动门槛，也不会自行启用 TUN。
 
 概览页快捷操作里提供本地 HTTP/SOCKS 代理探测。它会检查配置的本地 Xray HTTP inbound 和 SOCKS inbound，并分别显示状态码、耗时和错误。这个测试只验证当前选中 Xray outbound 的代理链路，不会修改系统代理，也不会触发 Tachyon TUN 模式。
 
 设置 > 核心 中提供客户端诊断导出，用于 alpha 支持包回传。它会生成脱敏 JSON，包含 Prism 版本/平台、当前 release channel、Core/Xray 路径、release diagnostics 摘要、订阅组和节点数量、协议统计、当前选中节点摘要、最近错误，以及最近一次本地代理探针结果。导出是只读、no-spawn、no-proxy、no-TUN 操作：不会写 runtime settings，不会生成配置，不会启动或执行核心，不会启用系统代理，也不会启用 Tachyon TUN。发送前请检查文件，不要额外附上完整订阅 URL、分享链接、密码、PSK 或私钥。
 
-系统代理快捷操作在当前 alpha UI 中有意禁用。绕过列表仍可在 设置 > 核心 中编辑，供后续版本使用；自动化测试只覆盖本地代理探测，不会切换宿主系统代理。
+在 Windows 上，系统代理 UI 操作会管理当前用户的 WinINet 注册表设置。Prism 会快照原值、验证应用结果、在释放接管时恢复快照，并通过恢复日志处理崩溃后的启动恢复。这是已经实现的 alpha 功能，不代表生产可用；真实 Windows 注册表现场验收尚未执行。macOS 和 Linux 不支持该操作。TUN 一键接管仍保持禁用。
 
 概览页流量图刻意使用两个遥测来源：Tachyon 曲线来自 Tachyon Core 的 SSE 遥测流；Xray 曲线由 Prism 通过生成配置暴露的 Xray `StatsService` 轮询获得。Core 不读取订阅、不管理 Xray，也不采集 Xray 统计。
 
@@ -111,9 +112,9 @@ CI 会在每次推送时运行 typecheck、前端测试、Rust check 和 Rust te
 
 ## Release 构建
 
-GitHub Actions 会在 release tag 或手动 workflow dispatch 时构建 Prism。Release 工作流会产出 Windows x64、Windows ARM64、macOS Intel、macOS Apple Silicon、Linux x64 和 Linux ARM64 包，并随包发布 `SHA256SUMS.txt`。
+GitHub Actions 会从严格校验的 stable 或 prerelease 标签构建 Prism。Release 工作流会产出可下载的 Windows x64/ARM64、macOS x64/ARM64 和 Linux x64/ARM64 安装包，并随包发布 `SHA256SUMS.txt`；CI 会检查相同的六目标矩阵。
 
-当前产物还没有代码签名。加入 Authenticode 签名和 Apple notarization 之前，Windows SmartScreen 与 macOS Gatekeeper 可能会提示风险。
+stable 发布严格要求完整的 Windows Authenticode 与 Apple Developer ID 签名/公证凭据。prerelease 只有在某平台整组凭据全部缺失时才允许明确发布 unsigned 产物；半套凭据会直接失败。标签规则、包格式、凭据名称、签名门禁和本地校验方式见[发布流程](docs/releasing.zh-CN.md)。
 真实 VPS、真实客户端和真实游戏 UDP 加速链路仍需实测；当前 alpha 不能宣称 stable 或完整。
 
 ## 文档
@@ -123,3 +124,4 @@ GitHub Actions 会在 release tag 或手动 workflow dispatch 时构建 Prism。
 - [架构](docs/architecture.zh-CN.md) / [Architecture](docs/architecture.md)
 - [IPC 设计](docs/ipc.zh-CN.md) / [IPC Design](docs/ipc.md)
 - [开发](docs/development.zh-CN.md) / [Development](docs/development.md)
+- [发布流程](docs/releasing.zh-CN.md) / [Release Process](docs/releasing.md)

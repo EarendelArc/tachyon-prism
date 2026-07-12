@@ -7,25 +7,62 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, for example v0.1.0-alpha.1"
+        description: "Existing tag, for example v0.1.0-alpha.1 or v0.1.0"
         required: true
         type: string
-      prerelease:
-        description: "Mark the GitHub release as a prerelease"
+      channel:
+        description: "Must agree with the tag: stable has no suffix; prerelease has an approved suffix"
         required: true
-        default: true
-        type: boolean
+        default: prerelease
+        type: choice
+        options:
+          - prerelease
+          - stable
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: prism-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: Validate release request
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.validate.outputs.tag }}
+      channel: ${{ steps.validate.outputs.channel }}
+      prerelease: ${{ steps.validate.outputs.prerelease }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6.0.3
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Validate tag, version, and workflow contract
+        id: validate
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          RELEASE_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'auto' }}
+        run: |
+          set -euo pipefail
+          python scripts/validate_release.py --check-workflows
+          python scripts/validate_release.py \
+            --tag "${RELEASE_TAG}" \
+            --channel "${RELEASE_CHANNEL}" \
+            --github-output "${GITHUB_OUTPUT}"
+
   test:
-    name: Test
+    name: Test release tag
+    needs: prepare
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout release tag
         uses: actions/checkout@v6.0.3
+        with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
 
       - name: Use crates.io on GitHub Actions
         shell: bash
@@ -56,7 +93,7 @@ jobs:
       - name: Install system deps (Linux)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
       - name: Install frontend dependencies
         run: npm ci
@@ -77,7 +114,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.asset_name }}
-    needs: test
+    needs: [prepare, test]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -87,29 +124,47 @@ jobs:
             os: windows-latest
             rust_target: x86_64-pc-windows-msvc
             bundle_args: "--bundles nsis,msi"
+            signing_kind: windows
           - asset_name: windows-arm64
             os: windows-11-arm
             rust_target: aarch64-pc-windows-msvc
-            bundle_args: "--no-bundle"
+            bundle_args: "--bundles nsis"
+            signing_kind: windows
           - asset_name: macos-x64
             os: macos-15-intel
             rust_target: x86_64-apple-darwin
             bundle_args: "--bundles dmg"
+            signing_kind: macos
           - asset_name: macos-arm64
             os: macos-15
             rust_target: aarch64-apple-darwin
             bundle_args: "--bundles dmg"
+            signing_kind: macos
           - asset_name: linux-x64
             os: ubuntu-22.04
             rust_target: x86_64-unknown-linux-gnu
             bundle_args: "--bundles deb"
+            signing_kind: none
           - asset_name: linux-arm64
             os: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-gnu
             bundle_args: "--bundles deb"
+            signing_kind: none
+    env:
+      RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
     steps:
-      - name: Checkout
+      - name: Checkout release tag
         uses: actions/checkout@v6.0.3
+        with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
 
       - name: Use crates.io on GitHub Actions
         shell: bash
@@ -148,8 +203,137 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build Tauri bundle
+      - name: Validate signing credential policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/validate_release.py \
+            --signing-kind ${{ matrix.signing_kind }} \
+            --release-channel "${RELEASE_CHANNEL}" \
+            --github-env "${GITHUB_ENV}"
+
+      - name: Import Windows Authenticode certificate
+        if: runner.os == 'Windows' && env.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP "tachyon-prism-signing.pfx"
+          [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          if (-not $certificate.HasPrivateKey) { throw "Imported Windows certificate has no private key" }
+          $config = @{
+            bundle = @{
+              windows = @{
+                certificateThumbprint = $certificate.Thumbprint
+                digestAlgorithm = "sha256"
+                timestampUrl = $env:WINDOWS_TIMESTAMP_URL
+                tsp = $true
+              }
+            }
+          } | ConvertTo-Json -Depth 5 -Compress
+          $configPath = Join-Path $env:RUNNER_TEMP "tauri-windows-signing.json"
+          Set-Content -LiteralPath $configPath -Value $config -Encoding utf8
+          "TAURI_SIGNING_CONFIG=$configPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Import Apple certificate and notarization key
+        if: runner.os == 'macOS' && env.SIGNING_ENABLED == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          certificate_path="${RUNNER_TEMP}/tachyon-prism-signing.p12"
+          key_path="${RUNNER_TEMP}/AuthKey_${APPLE_API_KEY}.p8"
+          keychain_path="${RUNNER_TEMP}/tachyon-prism.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          echo "::add-mask::${keychain_password}"
+
+          printf '%s' "${APPLE_CERTIFICATE}" | base64 --decode > "${certificate_path}"
+          printf '%s' "${APPLE_API_PRIVATE_KEY}" > "${key_path}"
+          chmod 600 "${certificate_path}" "${key_path}"
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security default-keychain -s "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -t 3600 -u "${keychain_path}"
+          security import "${certificate_path}" -k "${keychain_path}" -P "${APPLE_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${keychain_password}" "${keychain_path}"
+          signing_identity="$(security find-identity -v -p codesigning "${keychain_path}" | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
+          [[ -n "${signing_identity}" ]] || { echo "Developer ID Application identity not found" >&2; exit 1; }
+          {
+            echo "APPLE_SIGNING_IDENTITY=${signing_identity}"
+            echo "APPLE_API_KEY_PATH=${key_path}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Build Tauri bundle (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $arguments = @("run", "build", "--", "--target", "${{ matrix.rust_target }}")
+          $arguments += "${{ matrix.bundle_args }}" -split " "
+          if ($env:SIGNING_ENABLED -eq "true") {
+            $arguments += @("--config", $env:TAURI_SIGNING_CONFIG)
+          }
+          & npm @arguments
+          if ($LASTEXITCODE -ne 0) { throw "Tauri build failed with exit code $LASTEXITCODE" }
+
+      - name: Build Tauri bundle (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
         run: npm run build -- --target ${{ matrix.rust_target }} ${{ matrix.bundle_args }}
+
+      - name: Verify Windows Authenticode signatures
+        if: runner.os == 'Windows' && env.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        run: |
+          $root = "src-tauri/target/${{ matrix.rust_target }}/release"
+          $files = Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object { $_.Extension -in ".exe", ".msi" }
+          if (-not $files) { throw "No Windows files found for signature verification" }
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($signature.Status -ne "Valid") { throw "Invalid Authenticode signature on $($file.FullName): $($signature.Status)" }
+          }
+
+      - name: Verify macOS signature and notarization
+        if: runner.os == 'macOS' && env.SIGNING_ENABLED == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_root="src-tauri/target/${{ matrix.rust_target }}/release/bundle"
+          app="$(find "${bundle_root}/macos" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          dmg="$(find "${bundle_root}/dmg" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          [[ -n "${app}" && -n "${dmg}" ]] || { echo "macOS app or DMG missing" >&2; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "${app}"
+          xcrun stapler validate "${dmg}"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "${dmg}"
+
+      - name: Verify bundle payload exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="src-tauri/target/${{ matrix.rust_target }}/release/bundle"
+          case "${{ matrix.asset_name }}" in
+            windows-x64)
+              compgen -G "${root}/nsis/*.exe" >/dev/null
+              compgen -G "${root}/msi/*.msi" >/dev/null
+              ;;
+            windows-arm64)
+              compgen -G "${root}/nsis/*.exe" >/dev/null
+              ;;
+            macos-*)
+              compgen -G "${root}/dmg/*.dmg" >/dev/null
+              ;;
+            linux-*)
+              compgen -G "${root}/deb/*.deb" >/dev/null
+              ;;
+            *)
+              echo "unknown release target: ${{ matrix.asset_name }}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Record artifact signing status
+        shell: bash
+        run: |
+          mkdir -p release-status
+          printf '%s\n' "${SIGNING_STATUS}" > "release-status/${{ matrix.asset_name }}.txt"
 
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v7.0.1
@@ -159,107 +343,129 @@ jobs:
             src-tauri/target/${{ matrix.rust_target }}/release/bundle/nsis/*.exe
             src-tauri/target/${{ matrix.rust_target }}/release/bundle/msi/*.msi
             src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg/*.dmg
-            src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/*.app.tar.gz
-            src-tauri/target/${{ matrix.rust_target }}/release/bundle/appimage/*.AppImage
             src-tauri/target/${{ matrix.rust_target }}/release/bundle/deb/*.deb
-            src-tauri/target/${{ matrix.rust_target }}/release/bundle/rpm/*.rpm
-            src-tauri/target/${{ matrix.rust_target }}/release/tachyon-prism.exe
-            src-tauri/target/${{ matrix.rust_target }}/release/tachyon-prism
+            release-status/${{ matrix.asset_name }}.txt
           if-no-files-found: error
 
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Checkout
+      - name: Checkout release tag
         uses: actions/checkout@v6.0.3
+        with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
 
       - name: Download artifacts
         uses: actions/download-artifact@v7.0.0
         with:
+          pattern: tachyon-prism-*
           path: artifacts
 
       - name: Prepare release assets
-        id: meta
         shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.tag }}
+          CHANNEL: ${{ needs.prepare.outputs.channel }}
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            version="${{ inputs.tag }}"
-            prerelease="${{ inputs.prerelease }}"
-          else
-            version="${GITHUB_REF_NAME}"
-            prerelease="false"
-            if [[ "${version}" =~ (alpha|beta|rc|pre|preview) ]]; then
-              prerelease="true"
-            fi
-          fi
-
+          expected=(windows-x64 windows-arm64 macos-x64 macos-arm64 linux-x64 linux-arm64)
           mkdir -p release
-          find artifacts -type f | sort | while read -r file; do
-            artifact="$(echo "${file}" | cut -d/ -f2)"
-            base="$(basename "${file}")"
-            release_base="$(printf '%s' "${base}" | tr ' \t' '..')"
-            cp "${file}" "release/${artifact}_${release_base}"
+          for target in "${expected[@]}"; do
+            artifact="artifacts/tachyon-prism-${target}"
+            [[ -d "${artifact}" ]] || { echo "missing artifact directory for ${target}" >&2; exit 1; }
+            status_file="${artifact}/release-status/${target}.txt"
+            [[ -s "${status_file}" ]] || { echo "missing signing status for ${target}" >&2; exit 1; }
+            payload_count=0
+            while IFS= read -r -d '' file; do
+              base="$(basename "${file}")"
+              release_base="$(printf '%s' "${base}" | tr ' \t' '..')"
+              cp "${file}" "release/tachyon-prism-${target}_${release_base}"
+              payload_count=$((payload_count + 1))
+            done < <(find "${artifact}" -type f ! -path '*/release-status/*' -print0)
+            [[ ${payload_count} -gt 0 ]] || { echo "no downloadable payload for ${target}" >&2; exit 1; }
           done
+
           if find release -maxdepth 1 -type f -name '*[[:space:]]*' | grep -q .; then
-            echo "release assets must not contain whitespace; use Tachyon.Prism-style names" >&2
-            find release -maxdepth 1 -type f -name '*[[:space:]]*' -print >&2
+            echo "release assets must not contain whitespace" >&2
             exit 1
           fi
+
+          unsigned_desktop=false
+          for target in windows-x64 windows-arm64 macos-x64 macos-arm64; do
+            status="$(<"artifacts/tachyon-prism-${target}/release-status/${target}.txt")"
+            [[ "${status}" == "unsigned-no-credentials" ]] && unsigned_desktop=true
+          done
+
           {
-            echo "Tachyon Prism ${version}"
+            echo "# Tachyon Prism ${VERSION}"
             echo
-            echo "This is an alpha Tachyon Prism desktop release."
-            echo "It is not stable or complete yet."
-            echo "Prism manages Xray Core and Tachyon Core as external binaries and can select stable or preview release channels for each core."
+            echo "Channel: ${CHANNEL}"
             echo
-            echo "Alpha limitations:"
-            echo "- System proxy one-click takeover is disabled by default."
-            echo "- Tachyon TUN one-click takeover is disabled by default."
-            echo "- Real VPS, real client, and real game UDP acceleration paths still need field testing."
-            echo "- Bundles are unsigned and not notarized: Windows builds are not Authenticode-signed and macOS builds are not Apple-notarized."
+            if [[ "${VERSION}" == *-alpha* ]]; then
+              echo "This is an alpha Tachyon Prism desktop release."
+              echo "It is not stable or complete yet."
+              echo
+              echo "Alpha limitations:"
+              echo "- System proxy one-click takeover is disabled by default."
+              echo "- Tachyon TUN one-click takeover is disabled by default."
+              echo "- Real VPS, real client, and real game UDP acceleration paths still need field testing."
+            elif [[ "${CHANNEL}" == "prerelease" ]]; then
+              echo "This is a prerelease build and may be incomplete or unstable."
+            else
+              echo "This is a stable-channel release."
+            fi
             echo
-            echo "Artifacts:"
+            echo "## Signing status"
+            for target in "${expected[@]}"; do
+              status="$(<"artifacts/tachyon-prism-${target}/release-status/${target}.txt")"
+              echo "- ${target}: ${status}"
+            done
+            echo
+            if [[ "${unsigned_desktop}" == "true" ]]; then
+              echo "Bundles are unsigned and not notarized; Windows SmartScreen or macOS Gatekeeper may warn."
+            fi
+            echo "Linux packages are not GPG-signed; verify every download with SHA256SUMS.txt."
+            echo
+            echo "## Artifacts"
             for file in release/*; do
-              name="$(basename "${file}")"
-              if [[ "${name}" == "RELEASE_NOTES.md" || "${name}" == "SHA256SUMS.txt" ]]; then
-                continue
-              fi
-              echo "- ${name}"
+              echo "- $(basename "${file}")"
             done
             echo
             echo "Verify downloads with SHA256SUMS.txt."
           } > release/RELEASE_NOTES.md
           (cd release && sha256sum * > SHA256SUMS.txt && sha256sum --check SHA256SUMS.txt)
 
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
-
       - name: Publish release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+          VERSION: ${{ needs.prepare.outputs.tag }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
           set -euo pipefail
-          prerelease_flag=()
           if [[ "${PRERELEASE}" == "true" ]]; then
-            prerelease_flag=(--prerelease)
+            LATEST="false"
+          else
+            LATEST="true"
           fi
 
           if gh release view "${VERSION}" >/dev/null 2>&1; then
             gh release edit "${VERSION}" \
               --title "Tachyon Prism ${VERSION}" \
               --notes-file release/RELEASE_NOTES.md \
-              "${prerelease_flag[@]}"
+              --prerelease="${PRERELEASE}" \
+              --latest="${LATEST}" \
+              --verify-tag
           else
             gh release create "${VERSION}" \
-              --target "${GITHUB_SHA}" \
               --title "Tachyon Prism ${VERSION}" \
               --notes-file release/RELEASE_NOTES.md \
-              "${prerelease_flag[@]}"
+              --prerelease="${PRERELEASE}" \
+              --latest="${LATEST}" \
+              --verify-tag
           fi
           gh release upload "${VERSION}" release/* --clobber

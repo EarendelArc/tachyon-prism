@@ -10,8 +10,10 @@ Use this plan to install Prism, verify the downloaded artifact, import an Xray
 subscription, probe local Xray HTTP/SOCKS inbounds, configure a Tachyon server
 profile, and collect redacted logs/screenshots/diagnostics.
 
-The current alpha intentionally does not test system proxy takeover or TUN
-one-click takeover.
+Windows system proxy control is implemented and connected to the UI as an alpha
+WinINet transaction, but real-host registry acceptance has not been performed
+and is outside this test loop. macOS and Linux system proxy control are
+unsupported. TUN one-click takeover remains disabled and is a stable gate.
 
 ## Download and Verify `alpha.15`
 
@@ -43,8 +45,8 @@ warn until signing/notarization is added.
 2. Launch Prism.
 3. Record the Prism version/build shown by the release artifact or UI.
 4. Open the Overview and Settings/Core views.
-5. Confirm the alpha boundary: system proxy and TUN takeover controls are not
-   part of this test loop.
+5. Confirm the alpha boundary: Windows system proxy host acceptance and TUN
+   takeover are not part of this test loop.
 
 ## Import Subscription and Select Node
 
@@ -64,6 +66,10 @@ and visible import errors.
 3. Start Xray, or use **Start All** if Tachyon Core is also configured.
 4. Run the local proxy probe from Overview.
 5. Record both HTTP and SOCKS probe results: status, latency, and error text.
+
+When using **Start All**, Prism requires local Xray readiness before starting
+Tachyon Core, then requires Core `/v1/health` readiness. Any start or readiness
+failure rolls back the cores already started by that transaction.
 
 The probe uses Prism-generated local Xray inbounds only. It does not enable the
 OS system proxy and does not enable Tachyon TUN.
@@ -144,7 +150,9 @@ For this alpha client loop:
 - Do test subscription import, node selection, Xray config generation, local
   HTTP/SOCKS probe, Core release diagnostics, Tachyon server profile, config
   validation, launch/stop behavior, and game/manual rule matching.
-- Do not enable OS system proxy takeover.
+- Do not treat the implemented Windows system proxy UI as host-accepted or
+  production-ready; this loop does not toggle the host registry.
+- Treat macOS and Linux system proxy control as unsupported.
 - Do not enable Tachyon TUN one-click takeover.
 - Do not claim stable, production-ready, or complete game acceleration.
 

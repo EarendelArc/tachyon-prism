@@ -9,7 +9,7 @@
 本计划用于安装 Prism、校验下载产物、导入 Xray 订阅、探测本地 Xray HTTP/SOCKS
 入站、配置 Tachyon server profile，并收集脱敏日志、截图和诊断文本。
 
-当前 alpha 有意不测试系统代理接管，也不测试 TUN 一键接管。
+Windows 系统代理控制已经实现并接入 UI，是 alpha WinINet 事务，但尚未执行真实宿主注册表验收，且不属于本轮测试。macOS 和 Linux 系统代理不受支持。TUN 一键接管仍保持禁用，并且是 stable 门禁。
 
 ## 下载并校验 `alpha.15`
 
@@ -40,7 +40,7 @@ Windows SmartScreen 和 macOS Gatekeeper 可能提示风险。
 2. 启动 Prism。
 3. 记录 release 产物或 UI 显示的 Prism 版本/build。
 4. 打开 Overview 和 Settings/Core 页面。
-5. 确认 alpha 边界：系统代理和 TUN 接管不属于本轮测试内容。
+5. 确认 alpha 边界：Windows 系统代理宿主验收和 TUN 接管不属于本轮测试内容。
 
 ## 导入订阅并选择节点
 
@@ -59,6 +59,8 @@ Windows SmartScreen 和 macOS Gatekeeper 可能提示风险。
 3. 启动 Xray；如果 Tachyon Core 也已配置，可以使用 **Start All**。
 4. 从 Overview 运行本地代理探针。
 5. 记录 HTTP 和 SOCKS 两个探针结果：状态、延迟和错误文本。
+
+使用 **Start All** 时，Prism 会先等待本地 Xray readiness，再启动 Tachyon Core 并等待 Core `/v1/health` readiness。任一启动或 readiness 失败都会回滚本次事务已经启动的核心。
 
 探针只使用 Prism 生成的本地 Xray 入站。它不会启用 OS 系统代理，也不会启用
 Tachyon TUN。
@@ -122,7 +124,8 @@ JSON 支持包包含 Prism 版本/平台、当前 release channel 设置、Core/
 
 - 测试订阅导入、节点选择、Xray 配置生成、本地 HTTP/SOCKS 探针、Core release
   diagnostics、Tachyon server profile、配置验证、启动/停止行为，以及游戏/手动规则匹配。
-- 不启用 OS 系统代理接管。
+- 不把已经实现的 Windows 系统代理 UI 视为已通过宿主验收或生产可用；本轮不切换宿主注册表。
+- macOS 和 Linux 系统代理按不支持处理。
 - 不启用 Tachyon TUN 一键接管。
 - 不宣称游戏加速已 stable、生产可用或完整。
 

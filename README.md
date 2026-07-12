@@ -5,10 +5,11 @@
 Tachyon Prism is the graphical control plane for Tachyon.
 
 The stable-line goal is for Prism to become a broad Xray GUI with optional
-Tachyon game acceleration, but the current build is still alpha-stage. System
-proxy and TUN one-click takeover remain disabled in the current alpha; the
-local HTTP/SOCKS probe is allowed because it only checks Prism's generated
-local Xray inbounds and does not modify host network state.
+Tachyon game acceleration, but the current build is still alpha-stage. Windows
+system proxy control is implemented and wired into the UI as an alpha feature,
+but has not yet completed acceptance testing against a real Windows host
+registry. macOS and Linux system proxy control remain unsupported. TUN
+one-click takeover remains disabled and is a stable-release gate.
 
 Prism is designed as an alpha-stage Xray GUI client with Tachyon Core support.
 It owns interaction, visualization, subscriptions, node selection, Xray
@@ -39,8 +40,11 @@ traffic can be sent through Tachyon Core for low-latency acceleration.
   interval.
 - Local Xray proxy probe through the generated HTTP and SOCKS inbounds, without
   changing system proxy or enabling TUN.
-- Alpha builds keep system proxy and Tachyon TUN routing disabled so Prism does
-  not unexpectedly alter OS routing while someone is playing.
+- Alpha Windows system proxy control using a transactional WinINet flow with
+  snapshot, apply verification, restore, and startup crash recovery. It is not
+  production-ready and still needs real-host registry acceptance testing.
+- macOS and Linux system proxy control are unsupported. Tachyon TUN one-click
+  takeover remains disabled and is a stable-release gate.
 - Managed local binary installation into Prism's app config `bin` directory.
 - Online Xray Core and Tachyon Core latest-release discovery, download,
   SHA-256 verification, and managed install from GitHub release channels.
@@ -142,11 +146,13 @@ settings or generated configs, start either core, execute the installed binary,
 or enable system proxy or Tachyon TUN.
 
 The Runtime panel stores binary paths in `runtime-settings.json`. `Start All`
-first writes the latest generated config files, then launches Xray with
-`xray-client.json` and Tachyon Core with `client.json`. Each launch validates
-the just-written config first: Xray uses its native `run -test -config` mode,
-while Tachyon Core uses `validate --config`. The Config Drafts section also
-offers a manual validation action and keeps the latest result visible.
+first writes and validates the latest generated config files: Xray uses its
+native `run -test -config` mode, while Tachyon Core uses `validate --config`.
+It then starts Xray and waits for local Xray readiness before starting Tachyon
+Core and waiting for the local Core `/v1/health` endpoint. A start or readiness
+failure rolls back the cores already started by the transaction. The Config
+Drafts section also offers a manual validation action and keeps the latest
+result visible.
 The same Runtime panel stores local listen ports and Core transport settings:
 Xray SOCKS, Xray HTTP probe inbound, Xray StatsService, Tachyon HTTP IPC,
 Tachyon gRPC, TUN address/MTU, and telemetry interval.
@@ -175,9 +181,12 @@ enable system proxy, or enable Tachyon TUN. Review the file before sending it
 back, and do not add full subscription URLs, share links, passwords, PSKs, or
 private keys to support reports.
 
-The System Proxy quick action is intentionally disabled in the alpha UI. The
-bypass list is still editable in Settings > Core for future use, but automated
-tests only cover local proxy probing and never toggle the host system proxy.
+On Windows, the System Proxy UI action uses the current-user WinINet registry
+settings. Prism snapshots the prior values, verifies the applied state, restores
+the snapshot when releasing control, and uses a recovery journal after a crash.
+This is implemented alpha functionality, not a production-readiness claim: real
+Windows registry acceptance testing has not yet been performed. The action is
+unsupported on macOS and Linux. TUN one-click takeover remains disabled.
 
 The Overview traffic chart intentionally has two telemetry sources. Tachyon
 series come from Tachyon Core's SSE telemetry stream. Xray series are polled by
@@ -208,13 +217,16 @@ Cargo dependencies are fetched through the project-local mirror configuration in
 
 ## Release Builds
 
-GitHub Actions builds Prism on release tags and manual workflow dispatches. The
-release workflow produces Windows x64, Windows ARM64, macOS Intel, macOS Apple
-Silicon, Linux x64, and Linux ARM64 bundles, then publishes them with
-`SHA256SUMS.txt`.
+GitHub Actions builds Prism from strict stable or prerelease tags. The release
+workflow produces downloadable Windows x64/ARM64, macOS x64/ARM64, and Linux
+x64/ARM64 packages, then publishes them with `SHA256SUMS.txt`. CI checks the
+same six-target matrix.
 
-Current release artifacts are unsigned. Windows SmartScreen and macOS Gatekeeper
-may warn until Authenticode signing and Apple notarization are added.
+Stable releases require complete Windows Authenticode and Apple Developer ID
+signing/notarization credentials. Prereleases may be explicitly unsigned only
+when a platform's entire credential set is absent; partial credentials fail.
+See the [release process](docs/releasing.md) for tag rules, package formats,
+credential names, signing gates, and local validation.
 Real VPS, real client, and real game UDP acceleration paths still need field
 testing before any stable or complete claim.
 
@@ -225,3 +237,4 @@ testing before any stable or complete claim.
 - [Architecture](docs/architecture.md) / [架构](docs/architecture.zh-CN.md)
 - [IPC Design](docs/ipc.md) / [IPC 设计](docs/ipc.zh-CN.md)
 - [Development](docs/development.md) / [开发](docs/development.zh-CN.md)
+- [Release Process](docs/releasing.md) / [发布流程](docs/releasing.zh-CN.md)

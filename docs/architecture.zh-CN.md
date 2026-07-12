@@ -57,15 +57,17 @@ Binaries 面板管理 Xray Core 和 Tachyon Core 可执行文件：
 全部启动：
   1. 写入配置草稿（client.json + xray-client.json）
   2. 保存运行时设置
-  3. 预检查（二进制路径、sidecar、节点、配置草稿）
-  4. 用 xray-client.json 启动 Xray
-  5. 用 client.json 启动 Tachyon Core
-  6. 轮询 Core /v1/health（3 秒超时）获取状态
+  3. 验证配置并执行预检查
+  4. 启动 Xray 并等待本地 Xray readiness
+  5. 启动 Tachyon Core 并等待本地 Core /v1/health readiness
+  6. 任一步失败时回滚本次事务已经启动的全部核心
 ```
 
 Runtime 面板实时显示两个核心的进程状态，并支持单独启动/停止控制。
 
-当前 alpha 默认禁用 OS 系统代理和 TUN 一键接管。生成的 Core 配置会强制 `client.tun.auto_route=false` 与 `client.tun.dns_hijack=false`；本地 HTTP/SOCKS 探针只验证 Prism 生成的 Xray 入站，不修改宿主网络状态。
+Windows 系统代理控制是已经实现的 alpha 事务，管理当前用户的 WinINet 注册表设置。它会快照原状态、验证应用值、在释放接管时恢复快照，并写入恢复日志以便崩溃后下次启动时恢复。真实 Windows 宿主注册表验收尚未执行，因此该功能还不能视为生产可用。macOS 和 Linux 系统代理不受支持。
+
+TUN 一键接管仍保持禁用，并且是 stable 发布门禁。生成的 Core 配置会强制 `client.tun.auto_route=false` 与 `client.tun.dns_hijack=false`；本地 HTTP/SOCKS 探针只验证 Prism 生成的 Xray 入站，不修改宿主网络状态。
 
 ## 测试覆盖
 
