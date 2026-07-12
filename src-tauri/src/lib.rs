@@ -746,10 +746,7 @@ fn fetch_subscription_text(source_url: String) -> Result<String, String> {
     if url.is_empty() {
         return Err("subscription URL is required".to_string());
     }
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err("subscription URL must start with http:// or https://".to_string());
-    }
-    http_get_text(&url)
+    fetch_subscription_url(&url)
 }
 
 #[tauri::command]
@@ -3779,6 +3776,548 @@ fn http_get_text(url: &str) -> Result<String, String> {
         .map_err(|err| format!("read {url}: {err}"))
 }
 
+const SUBSCRIPTION_MAX_REDIRECTS: usize = 5;
+const SUBSCRIPTION_MAX_HEADER_BYTES: usize = 64 * 1024;
+const SUBSCRIPTION_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+const SUBSCRIPTION_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const SUBSCRIPTION_IO_TIMEOUT: Duration = Duration::from_secs(15);
+const SUBSCRIPTION_TOTAL_TIMEOUT: Duration = Duration::from_secs(45);
+
+#[derive(Clone, Debug)]
+struct SubscriptionUrl {
+    scheme: String,
+    host: String,
+    authority: String,
+    path_and_query: String,
+    port: u16,
+}
+
+impl SubscriptionUrl {
+    fn parse(input: &str) -> Result<Self, String> {
+        let (scheme, rest) = input
+            .split_once("://")
+            .ok_or_else(|| "subscription URL must start with http:// or https://".to_string())?;
+        let scheme = scheme.to_ascii_lowercase();
+        if scheme != "http" && scheme != "https" {
+            return Err("subscription URL must start with http:// or https://".to_string());
+        }
+        if rest.chars().any(|ch| ch.is_control() || ch == ' ') {
+            return Err("subscription URL is invalid".to_string());
+        }
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let authority = &rest[..authority_end];
+        if authority.is_empty() {
+            return Err("subscription URL host is required".to_string());
+        }
+        if authority.contains('@') {
+            return Err("subscription URL credentials are not allowed".to_string());
+        }
+        let default_port = if scheme == "http" { 80 } else { 443 };
+        let (host, port) = parse_subscription_authority(authority, default_port)?;
+        let suffix = &rest[authority_end..];
+        let suffix = suffix.split_once('#').map_or(suffix, |(before, _)| before);
+        let path_and_query = if suffix.is_empty() {
+            "/".to_string()
+        } else if suffix.starts_with('?') {
+            format!("/{suffix}")
+        } else {
+            suffix.to_string()
+        };
+        let parsed = Self {
+            scheme,
+            host,
+            authority: authority.to_string(),
+            path_and_query,
+            port,
+        };
+        parsed
+            .to_string()
+            .parse::<ureq::http::Uri>()
+            .map_err(|_| "subscription URL is invalid".to_string())?;
+        Ok(parsed)
+    }
+
+    fn resolve(&self, location: &str) -> Result<Self, String> {
+        let location = location.trim();
+        if location.is_empty() || location.chars().any(char::is_control) {
+            return Err("subscription redirect location is invalid".to_string());
+        }
+        let has_absolute_scheme = location.split_once(':').is_some_and(|(scheme, _)| {
+            !scheme.is_empty()
+                && scheme.bytes().enumerate().all(|(index, byte)| {
+                    byte.is_ascii_alphabetic()
+                        || (index > 0
+                            && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
+                })
+        });
+        if has_absolute_scheme {
+            return Self::parse(location);
+        }
+        if let Some(authority_relative) = location.strip_prefix("//") {
+            return Self::parse(&format!("{}://{authority_relative}", self.scheme));
+        }
+
+        let location = location
+            .split_once('#')
+            .map_or(location, |(before, _)| before);
+        let next_path = if location.is_empty() {
+            self.path_and_query.clone()
+        } else if location.starts_with('/') {
+            location.to_string()
+        } else if location.starts_with('?') {
+            format!("{}{}", self.path_only(), location)
+        } else {
+            let base = self.path_only();
+            let directory = base.rsplit_once('/').map_or("/", |(dir, _)| dir);
+            normalize_subscription_path(&format!("{directory}/{location}"))
+        };
+        Self::parse(&format!(
+            "{}://{}{}",
+            self.scheme, self.authority, next_path
+        ))
+    }
+
+    fn path_only(&self) -> &str {
+        self.path_and_query
+            .split_once('?')
+            .map_or(&self.path_and_query, |(path, _)| path)
+    }
+}
+
+impl std::fmt::Display for SubscriptionUrl {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}://{}{}",
+            self.scheme, self.authority, self.path_and_query
+        )
+    }
+}
+
+fn parse_subscription_authority(
+    authority: &str,
+    default_port: u16,
+) -> Result<(String, u16), String> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, suffix) = rest
+            .split_once(']')
+            .ok_or_else(|| "subscription URL IPv6 host is invalid".to_string())?;
+        if host.is_empty() {
+            return Err("subscription URL host is required".to_string());
+        }
+        let port = if suffix.is_empty() {
+            default_port
+        } else {
+            parse_subscription_port(
+                suffix
+                    .strip_prefix(':')
+                    .ok_or_else(|| "subscription URL port is invalid".to_string())?,
+            )?
+        };
+        return Ok((host.to_string(), port));
+    }
+    if authority.matches(':').count() > 1 {
+        return Err("subscription URL IPv6 host must use brackets".to_string());
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host, parse_subscription_port(port)?),
+        None => (authority, default_port),
+    };
+    if host.is_empty() {
+        return Err("subscription URL host is required".to_string());
+    }
+    Ok((host.to_string(), port))
+}
+
+fn parse_subscription_port(value: &str) -> Result<u16, String> {
+    let port = value
+        .parse::<u16>()
+        .map_err(|_| "subscription URL port is invalid".to_string())?;
+    if port == 0 {
+        return Err("subscription URL port is invalid".to_string());
+    }
+    Ok(port)
+}
+
+fn normalize_subscription_path(path_and_query: &str) -> String {
+    let (path, query) = path_and_query
+        .split_once('?')
+        .map_or((path_and_query, None), |(path, query)| (path, Some(query)));
+    let mut segments = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            _ => segments.push(segment),
+        }
+    }
+    let mut normalized = format!("/{}", segments.join("/"));
+    if let Some(query) = query {
+        normalized.push('?');
+        normalized.push_str(query);
+    }
+    normalized
+}
+
+struct SubscriptionResponse {
+    status: u16,
+    location: Option<String>,
+    body: Vec<u8>,
+}
+
+fn fetch_subscription_url(input: &str) -> Result<String, String> {
+    let mut url = SubscriptionUrl::parse(input)?;
+    let started = Instant::now();
+    let mut lenient_http = false;
+
+    for redirect_count in 0..=SUBSCRIPTION_MAX_REDIRECTS {
+        if started.elapsed() >= SUBSCRIPTION_TOTAL_TIMEOUT {
+            return Err("subscription request timed out".to_string());
+        }
+        let response = if lenient_http && url.scheme == "http" {
+            raw_subscription_request(&url, started)?
+        } else {
+            let remaining = SUBSCRIPTION_TOTAL_TIMEOUT.saturating_sub(started.elapsed());
+            match strict_subscription_request(&url, remaining) {
+                Ok(response) => response,
+                Err(ureq::Error::Protocol(_)) if url.scheme == "http" => {
+                    lenient_http = true;
+                    raw_subscription_request(&url, started)?
+                }
+                Err(error) => return Err(format!("subscription request failed: {error}")),
+            }
+        };
+
+        if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+            if redirect_count == SUBSCRIPTION_MAX_REDIRECTS {
+                return Err("subscription redirect limit exceeded".to_string());
+            }
+            let location = response
+                .location
+                .ok_or_else(|| "subscription redirect is missing Location".to_string())?;
+            let next_url = url.resolve(&location)?;
+            validate_subscription_redirect(&url, &next_url)?;
+            url = next_url;
+            continue;
+        }
+        if !(200..300).contains(&response.status) {
+            return Err(format!(
+                "subscription server returned HTTP {}",
+                response.status
+            ));
+        }
+        return String::from_utf8(response.body)
+            .map_err(|_| "subscription response is not valid UTF-8".to_string());
+    }
+    Err("subscription redirect limit exceeded".to_string())
+}
+
+fn validate_subscription_redirect(
+    current: &SubscriptionUrl,
+    next: &SubscriptionUrl,
+) -> Result<(), String> {
+    if current.scheme == "https" && next.scheme == "http" {
+        return Err("subscription redirect cannot downgrade HTTPS to HTTP".to_string());
+    }
+    Ok(())
+}
+
+fn strict_subscription_request(
+    url: &SubscriptionUrl,
+    timeout: Duration,
+) -> Result<SubscriptionResponse, ureq::Error> {
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout.max(Duration::from_millis(1))))
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .build();
+    let agent: ureq::Agent = config.into();
+    let mut response = agent
+        .get(url.to_string())
+        .header("User-Agent", "Tachyon-Prism/0.1")
+        .header(
+            "Accept",
+            "text/plain, application/json, application/octet-stream, */*",
+        )
+        .call()?;
+    let status = response.status().as_u16();
+    let location = response
+        .headers()
+        .get("location")
+        .map(|value| value.to_str().map(str::to_string))
+        .transpose()
+        .map_err(|_| {
+            ureq::Error::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid redirect location",
+            ))
+        })?;
+    let mut body = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take((SUBSCRIPTION_MAX_BODY_BYTES + 1) as u64)
+        .read_to_end(&mut body)
+        .map_err(ureq::Error::Io)?;
+    if body.len() > SUBSCRIPTION_MAX_BODY_BYTES {
+        return Err(ureq::Error::BodyExceedsLimit(
+            SUBSCRIPTION_MAX_BODY_BYTES as u64,
+        ));
+    }
+    Ok(SubscriptionResponse {
+        status,
+        location,
+        body,
+    })
+}
+
+fn raw_subscription_request(
+    url: &SubscriptionUrl,
+    started: Instant,
+) -> Result<SubscriptionResponse, String> {
+    if url.scheme != "http" {
+        return Err("internal error: raw subscription transport requires HTTP".to_string());
+    }
+    let addresses = (url.host.as_str(), url.port)
+        .to_socket_addrs()
+        .map_err(|_| "subscription host could not be resolved".to_string())?;
+    let mut last_error = None;
+    let mut stream = None;
+    for address in addresses {
+        let remaining = SUBSCRIPTION_TOTAL_TIMEOUT.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        match TcpStream::connect_timeout(&address, SUBSCRIPTION_CONNECT_TIMEOUT.min(remaining)) {
+            Ok(connected) => {
+                stream = Some(connected);
+                break;
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let mut stream = stream.ok_or_else(|| {
+        if last_error.is_some() {
+            "subscription connection failed".to_string()
+        } else {
+            "subscription request timed out".to_string()
+        }
+    })?;
+    let io_timeout = SUBSCRIPTION_IO_TIMEOUT.min(
+        SUBSCRIPTION_TOTAL_TIMEOUT
+            .saturating_sub(started.elapsed())
+            .max(Duration::from_millis(1)),
+    );
+    stream
+        .set_read_timeout(Some(io_timeout))
+        .map_err(|_| "configure subscription read timeout failed".to_string())?;
+    stream
+        .set_write_timeout(Some(io_timeout))
+        .map_err(|_| "configure subscription write timeout failed".to_string())?;
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Tachyon-Prism/0.1\r\nAccept: text/plain, application/json, application/octet-stream, */*\r\nConnection: close\r\n\r\n",
+        url.path_and_query, url.authority
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|_| "write subscription request failed".to_string())?;
+    read_raw_subscription_response(stream)
+}
+
+fn read_raw_subscription_response(mut stream: TcpStream) -> Result<SubscriptionResponse, String> {
+    let mut received = Vec::new();
+    let header_end = loop {
+        if let Some(position) = received.windows(4).position(|window| window == b"\r\n\r\n") {
+            break position + 4;
+        }
+        if received.len() >= SUBSCRIPTION_MAX_HEADER_BYTES {
+            return Err("subscription response headers are too large".to_string());
+        }
+        let mut buffer = [0_u8; 4096];
+        let count = stream
+            .read(&mut buffer)
+            .map_err(|_| "read subscription response failed".to_string())?;
+        if count == 0 {
+            return Err("subscription response ended before headers".to_string());
+        }
+        received.extend_from_slice(&buffer[..count]);
+        if received.len() > SUBSCRIPTION_MAX_HEADER_BYTES + SUBSCRIPTION_MAX_BODY_BYTES {
+            return Err("subscription response is too large".to_string());
+        }
+    };
+    if header_end > SUBSCRIPTION_MAX_HEADER_BYTES {
+        return Err("subscription response headers are too large".to_string());
+    }
+    let headers = std::str::from_utf8(&received[..header_end])
+        .map_err(|_| "subscription response headers are invalid".to_string())?;
+    let mut lines = headers[..headers.len() - 4].split("\r\n");
+    let status_line = lines
+        .by_ref()
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| "subscription response status is missing".to_string())?;
+    let status = parse_lenient_subscription_status(status_line)?;
+    let mut content_length = None;
+    let mut chunked = false;
+    let mut location = None;
+    for line in lines {
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| "subscription response header is invalid".to_string())?;
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+        {
+            return Err("subscription response header name is invalid".to_string());
+        }
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("content-length") {
+            let length = value
+                .parse::<usize>()
+                .map_err(|_| "subscription Content-Length is invalid".to_string())?;
+            if content_length.replace(length).is_some() {
+                return Err("subscription response has duplicate Content-Length".to_string());
+            }
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            if chunked {
+                return Err("subscription response has duplicate Transfer-Encoding".to_string());
+            }
+            if !value.eq_ignore_ascii_case("chunked") {
+                return Err("subscription transfer encoding is unsupported".to_string());
+            }
+            chunked = true;
+        } else if name.eq_ignore_ascii_case("location") {
+            if location.replace(value.to_string()).is_some() {
+                return Err("subscription response has duplicate Location".to_string());
+            }
+        }
+    }
+    if chunked && content_length.is_some() {
+        return Err("subscription response framing is ambiguous".to_string());
+    }
+    if content_length.is_some_and(|length| length > SUBSCRIPTION_MAX_BODY_BYTES) {
+        return Err("subscription response is too large".to_string());
+    }
+
+    let buffered_body = received.split_off(header_end);
+    let chained = io::Cursor::new(buffered_body).chain(stream);
+    let mut reader = io::BufReader::new(chained);
+    let body = if chunked {
+        read_chunked_subscription_body(&mut reader)?
+    } else if let Some(length) = content_length {
+        let mut body = vec![0; length];
+        reader
+            .read_exact(&mut body)
+            .map_err(|_| "subscription response body ended early".to_string())?;
+        body
+    } else {
+        let mut body = Vec::new();
+        reader
+            .take((SUBSCRIPTION_MAX_BODY_BYTES + 1) as u64)
+            .read_to_end(&mut body)
+            .map_err(|_| "read subscription response body failed".to_string())?;
+        if body.len() > SUBSCRIPTION_MAX_BODY_BYTES {
+            return Err("subscription response is too large".to_string());
+        }
+        body
+    };
+    Ok(SubscriptionResponse {
+        status,
+        location,
+        body,
+    })
+}
+
+fn parse_lenient_subscription_status(line: &str) -> Result<u16, String> {
+    let mut parts = line.split_whitespace();
+    let first = parts
+        .next()
+        .ok_or_else(|| "subscription response status is empty".to_string())?;
+    let code = if matches!(first, "HTTP/1.0" | "HTTP/1.1" | "HTTP/0.0" | "HTTP/") {
+        parts.next()
+    } else if first.starts_with("HTTP/") {
+        let version = &first[5..];
+        if !version.is_empty()
+            && version
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        {
+            return Err(format!(
+                "subscription response HTTP version {version} is unsupported"
+            ));
+        }
+        return Err(format!(
+            "subscription response HTTP version token has invalid length {}",
+            version.len()
+        ));
+    } else {
+        Some(first)
+    }
+    .ok_or_else(|| "subscription response status code is missing".to_string())?;
+    if code.len() != 3 {
+        return Err(format!(
+            "subscription response status token has invalid length {}",
+            code.len()
+        ));
+    }
+    if !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("subscription response status code is not numeric".to_string());
+    }
+    let status = code
+        .parse::<u16>()
+        .map_err(|_| "subscription response status code is invalid".to_string())?;
+    if !(100..=599).contains(&status) {
+        return Err("subscription response status code is out of range".to_string());
+    }
+    Ok(status)
+}
+
+fn read_chunked_subscription_body<R: io::BufRead>(reader: &mut R) -> Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    loop {
+        let line = read_bounded_crlf_line(reader, 1024)?;
+        let size_text = line.split_once(';').map_or(line.as_str(), |(size, _)| size);
+        let size = usize::from_str_radix(size_text.trim(), 16)
+            .map_err(|_| "subscription chunk size is invalid".to_string())?;
+        if size == 0 {
+            loop {
+                if read_bounded_crlf_line(reader, SUBSCRIPTION_MAX_HEADER_BYTES)?.is_empty() {
+                    return Ok(body);
+                }
+            }
+        }
+        if size > SUBSCRIPTION_MAX_BODY_BYTES - body.len() {
+            return Err("subscription response is too large".to_string());
+        }
+        let start = body.len();
+        body.resize(start + size, 0);
+        reader
+            .read_exact(&mut body[start..])
+            .map_err(|_| "subscription chunk ended early".to_string())?;
+        let mut ending = [0_u8; 2];
+        reader
+            .read_exact(&mut ending)
+            .map_err(|_| "subscription chunk ended early".to_string())?;
+        if ending != *b"\r\n" {
+            return Err("subscription chunk terminator is invalid".to_string());
+        }
+    }
+}
+
+fn read_bounded_crlf_line<R: io::BufRead>(reader: &mut R, limit: usize) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    let mut limited = reader.take((limit + 1) as u64);
+    io::BufRead::read_until(&mut limited, b'\n', &mut bytes)
+        .map_err(|_| "read subscription chunk metadata failed".to_string())?;
+    if bytes.len() > limit || !bytes.ends_with(b"\r\n") {
+        return Err("subscription chunk metadata is invalid".to_string());
+    }
+    bytes.truncate(bytes.len() - 2);
+    String::from_utf8(bytes).map_err(|_| "subscription chunk metadata is invalid".to_string())
+}
+
 fn download_to_file(url: &str, path: &Path) -> Result<(), String> {
     let parent = path
         .parent()
@@ -5868,6 +6407,131 @@ mod tests {
         let error = fetch_subscription_text("file:///tmp/sub.txt".to_string())
             .expect_err("non-http subscription should fail before network");
         assert!(error.contains("http:// or https://"));
+    }
+
+    fn spawn_subscription_server(
+        listener: std::net::TcpListener,
+        responses: Vec<Vec<u8>>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = [0_u8; 2048];
+                let _ = stream.read(&mut request).unwrap();
+                stream.write_all(&response).unwrap();
+            }
+        })
+    }
+
+    #[test]
+    fn subscription_fallback_follows_malformed_307_and_decodes_chunked_body() {
+        let target_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let target_port = target_listener.local_addr().unwrap().port();
+        let target_response =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
+                .to_vec();
+        let target_handle = spawn_subscription_server(target_listener, vec![target_response]);
+
+        let source_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let source_port = source_listener.local_addr().unwrap().port();
+        let malformed_redirect = format!(
+            "HTTP/0.0 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{target_port}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes();
+        let source_handle = spawn_subscription_server(
+            source_listener,
+            vec![malformed_redirect.clone(), malformed_redirect],
+        );
+
+        let text = fetch_subscription_text(format!("http://127.0.0.1:{source_port}/start"))
+            .expect("malformed redirect should use bounded HTTP fallback");
+        assert_eq!(text, "hello world");
+        source_handle.join().unwrap();
+        target_handle.join().unwrap();
+    }
+
+    #[test]
+    fn subscription_fallback_rejects_oversized_content_length() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let response = format!(
+            " 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            SUBSCRIPTION_MAX_BODY_BYTES + 1
+        )
+        .into_bytes();
+        let handle = spawn_subscription_server(listener, vec![response.clone(), response]);
+
+        let error = fetch_subscription_text(format!("http://127.0.0.1:{port}/large"))
+            .expect_err("oversized subscription must fail");
+        assert!(error.contains("too large"));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn subscription_fallback_rejects_redirect_loop() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let response = b" 307 Temporary Redirect\r\nLocation: /loop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
+        let handle = spawn_subscription_server(listener, vec![response; 7]);
+
+        let error = fetch_subscription_text(format!("http://127.0.0.1:{port}/loop"))
+            .expect_err("redirect loop must fail");
+        assert!(error.contains("redirect limit"));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn subscription_fallback_rejects_invalid_response() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let response = b"definitely not HTTP\r\nContent-Length: 0\r\n\r\n".to_vec();
+        let handle = spawn_subscription_server(listener, vec![response.clone(), response]);
+
+        let error = fetch_subscription_text(format!("http://127.0.0.1:{port}/invalid"))
+            .expect_err("invalid response must fail");
+        assert!(error.contains("status"));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn subscription_url_credentials_are_rejected_without_echoing_them() {
+        let secret = "private-token";
+        let error =
+            fetch_subscription_text(format!("http://subscriber:{secret}@127.0.0.1/subscription"))
+                .expect_err("URL credentials must be rejected before network access");
+        assert!(error.contains("credentials are not allowed"));
+        assert!(!error.contains(secret));
+    }
+
+    #[test]
+    fn subscription_redirect_rejects_non_http_scheme_and_https_downgrade() {
+        let http = SubscriptionUrl::parse("http://example.test/sub").unwrap();
+        assert!(http.resolve("file:/tmp/subscription").is_err());
+
+        let https = SubscriptionUrl::parse("https://example.test/sub").unwrap();
+        let downgraded = SubscriptionUrl::parse("http://example.test/sub").unwrap();
+        let error = validate_subscription_redirect(&https, &downgraded)
+            .expect_err("HTTPS redirect downgrade must fail");
+        assert!(error.contains("cannot downgrade"));
+    }
+
+    #[test]
+    #[ignore = "requires TACHYON_LIVE_SUBSCRIPTION_URL and explicit live network access"]
+    fn live_subscription_download_returns_non_empty_text() {
+        let Ok(url) = std::env::var("TACHYON_LIVE_SUBSCRIPTION_URL") else {
+            eprintln!("live subscription test skipped: environment variable is not set");
+            return;
+        };
+
+        let text = fetch_subscription_text(url)
+            .unwrap_or_else(|error| panic!("live subscription download failed: {error}"));
+        assert!(
+            !text.trim().is_empty(),
+            "live subscription download returned empty text"
+        );
     }
 
     #[test]
