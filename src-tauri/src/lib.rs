@@ -1,7 +1,7 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -275,7 +275,7 @@ struct LocalProxyProbeReport {
     socks: ProxyProbeResult,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConfigValidationResult {
     ok: bool,
@@ -909,6 +909,24 @@ fn validate_xray_config(
             .unwrap_or(&paths.xray_config_path),
     ));
     validate_xray_config_file(&binary, &config)
+}
+
+#[tauri::command]
+fn commit_validated_xray_config(
+    app: tauri::AppHandle,
+    contents: String,
+) -> Result<ConfigValidationResult, String> {
+    let settings = load_runtime_settings(&app)?;
+    let paths = draft_paths(&app)?;
+    let binary = PathBuf::from(clean_path_input(&settings.xray_binary_path));
+    let canonical = PathBuf::from(paths.xray_config_path);
+
+    commit_validated_xray_config_file(
+        &canonical,
+        &contents,
+        |candidate| validate_xray_config_file(&binary, candidate),
+        &PlatformAtomicFileReplacer,
+    )
 }
 
 #[tauri::command]
@@ -4636,13 +4654,281 @@ fn ensure_json_object(label: &str, input: &str) -> Result<(), String> {
     }
 }
 
-fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
-    let temp_path = path.with_extension("json.tmp");
-    fs::write(&temp_path, content).map_err(|err| format!("write {}: {err}", path.display()))?;
-    if path.exists() {
-        fs::remove_file(path).map_err(|err| format!("replace {}: {err}", path.display()))?;
+trait AtomicFileReplacer {
+    fn replace(&self, candidate: &Path, canonical: &Path) -> Result<(), String>;
+}
+
+struct PlatformAtomicFileReplacer;
+
+impl AtomicFileReplacer for PlatformAtomicFileReplacer {
+    fn replace(&self, candidate: &Path, canonical: &Path) -> Result<(), String> {
+        platform_atomic_replace(candidate, canonical)
     }
-    fs::rename(&temp_path, path).map_err(|err| format!("move {}: {err}", path.display()))
+}
+
+struct SyncedTempFile {
+    path: PathBuf,
+}
+
+impl SyncedTempFile {
+    fn create(canonical: &Path, content: &str) -> Result<Self, String> {
+        let parent = atomic_parent(canonical);
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "create atomic write directory {}: {error}",
+                parent.display()
+            )
+        })?;
+
+        for attempt in 0..100_u32 {
+            let path = atomic_candidate_path(canonical, attempt)?;
+            let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "create atomic write candidate {}: {error}",
+                        path.display()
+                    ))
+                }
+            };
+            let candidate = Self { path };
+            file.write_all(content.as_bytes()).map_err(|error| {
+                format!(
+                    "write atomic candidate {}: {error}",
+                    candidate.path.display()
+                )
+            })?;
+            file.flush().map_err(|error| {
+                format!(
+                    "flush atomic candidate {}: {error}",
+                    candidate.path.display()
+                )
+            })?;
+            file.sync_all().map_err(|error| {
+                format!(
+                    "sync atomic candidate {}: {error}",
+                    candidate.path.display()
+                )
+            })?;
+            drop(file);
+            return Ok(candidate);
+        }
+
+        Err(format!(
+            "create unique atomic write candidate for {}",
+            canonical.display()
+        ))
+    }
+
+    fn cleanup_after_failure(&self, failure: String) -> String {
+        match fs::remove_file(&self.path) {
+            Ok(()) => failure,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => failure,
+            Err(error) => format!(
+                "{failure}; remove failed atomic candidate {}: {error}",
+                self.path.display()
+            ),
+        }
+    }
+}
+
+impl Drop for SyncedTempFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn atomic_candidate_path(canonical: &Path, attempt: u32) -> Result<PathBuf, String> {
+    let parent = atomic_parent(canonical);
+    let file_name = canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            format!(
+                "atomic write target has no file name: {}",
+                canonical.display()
+            )
+        })?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    Ok(parent.join(format!(
+        ".{file_name}.{}.{}.{}.tmp",
+        std::process::id(),
+        nanos,
+        attempt
+    )))
+}
+
+fn atomic_parent(canonical: &Path) -> &Path {
+    canonical
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn commit_validated_xray_config_file<V, R>(
+    canonical: &Path,
+    contents: &str,
+    validate: V,
+    replacer: &R,
+) -> Result<ConfigValidationResult, String>
+where
+    V: FnOnce(&Path) -> Result<ConfigValidationResult, String>,
+    R: AtomicFileReplacer,
+{
+    let candidate = SyncedTempFile::create(canonical, contents)?;
+    let validation = match validate(&candidate.path) {
+        Ok(validation) => validation,
+        Err(error) => return Err(candidate.cleanup_after_failure(error)),
+    };
+    if !validation.ok {
+        let details = validation
+            .error
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                (!validation.details.trim().is_empty()).then_some(validation.details.as_str())
+            })
+            .unwrap_or("xray run -test rejected the candidate");
+        return Err(
+            candidate.cleanup_after_failure(format!("Xray config validation failed: {details}"))
+        );
+    }
+    if let Err(error) = replacer.replace(&candidate.path, canonical) {
+        return Err(candidate.cleanup_after_failure(error));
+    }
+    Ok(validation)
+}
+
+fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
+    write_atomic_with(path, content, &PlatformAtomicFileReplacer)
+}
+
+fn write_atomic_with<R: AtomicFileReplacer>(
+    path: &Path,
+    content: &str,
+    replacer: &R,
+) -> Result<(), String> {
+    let candidate = SyncedTempFile::create(path, content)?;
+    replacer
+        .replace(&candidate.path, path)
+        .map_err(|error| candidate.cleanup_after_failure(error))
+}
+
+#[cfg(unix)]
+fn platform_atomic_replace(candidate: &Path, canonical: &Path) -> Result<(), String> {
+    fs::rename(candidate, canonical).map_err(|error| {
+        format!(
+            "atomically replace {} with {}: {error}",
+            canonical.display(),
+            candidate.display()
+        )
+    })?;
+    let parent = atomic_parent(canonical);
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync atomic write directory {}: {error}", parent.display()))
+}
+
+#[cfg(target_os = "windows")]
+fn platform_atomic_replace(candidate: &Path, canonical: &Path) -> Result<(), String> {
+    windows_atomic_replace_with(&WindowsAtomicReplaceApi, candidate, canonical)
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn platform_atomic_replace(candidate: &Path, canonical: &Path) -> Result<(), String> {
+    fs::rename(candidate, canonical).map_err(|error| {
+        format!(
+            "atomically replace {} with {}: {error}",
+            canonical.display(),
+            candidate.display()
+        )
+    })
+}
+
+#[cfg(any(target_os = "windows", test))]
+trait WindowsReplaceApi {
+    fn replace_existing(&self, candidate: &Path, canonical: &Path) -> io::Result<()>;
+    fn move_replacing(&self, candidate: &Path, canonical: &Path) -> io::Result<()>;
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_atomic_replace_with<A: WindowsReplaceApi>(
+    api: &A,
+    candidate: &Path,
+    canonical: &Path,
+) -> Result<(), String> {
+    match api.replace_existing(candidate, canonical) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => api
+            .move_replacing(candidate, canonical)
+            .map_err(|move_error| {
+                format!(
+                    "atomically install {} as {}: {move_error}",
+                    candidate.display(),
+                    canonical.display()
+                )
+            }),
+        Err(error) => Err(format!(
+            "atomically replace {} with {}: {error}",
+            canonical.display(),
+            candidate.display()
+        )),
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsAtomicReplaceApi;
+
+#[cfg(target_os = "windows")]
+impl WindowsReplaceApi for WindowsAtomicReplaceApi {
+    fn replace_existing(&self, candidate: &Path, canonical: &Path) -> io::Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{ReplaceFileW, REPLACEFILE_WRITE_THROUGH};
+
+        let candidate: Vec<u16> = candidate.as_os_str().encode_wide().chain(Some(0)).collect();
+        let canonical: Vec<u16> = canonical.as_os_str().encode_wide().chain(Some(0)).collect();
+        let replaced = unsafe {
+            ReplaceFileW(
+                canonical.as_ptr(),
+                candidate.as_ptr(),
+                std::ptr::null(),
+                REPLACEFILE_WRITE_THROUGH,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        if replaced == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn move_replacing(&self, candidate: &Path, canonical: &Path) -> io::Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+
+        let candidate: Vec<u16> = candidate.as_os_str().encode_wide().chain(Some(0)).collect();
+        let canonical: Vec<u16> = canonical.as_os_str().encode_wide().chain(Some(0)).collect();
+        let moved = unsafe {
+            MoveFileExW(
+                candidate.as_ptr(),
+                canonical.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 fn path_string(path: &Path) -> String {
@@ -5322,6 +5608,237 @@ fn window_start_dragging(window: tauri::Window) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FailingAtomicFileReplacer;
+
+    impl AtomicFileReplacer for FailingAtomicFileReplacer {
+        fn replace(&self, candidate: &Path, _canonical: &Path) -> Result<(), String> {
+            assert!(
+                candidate.is_file(),
+                "replacement must receive the synced candidate"
+            );
+            Err("injected atomic replacement failure".to_string())
+        }
+    }
+
+    fn xray_validation(ok: bool) -> ConfigValidationResult {
+        ConfigValidationResult {
+            ok,
+            target: "xray".to_string(),
+            command: "xray run -test -config candidate".to_string(),
+            details: if ok {
+                "Configuration OK.".to_string()
+            } else {
+                "invalid outbound".to_string()
+            },
+            error: (!ok).then(|| "invalid outbound".to_string()),
+        }
+    }
+
+    fn atomic_candidates(directory: &Path, canonical_name: &str) -> Vec<PathBuf> {
+        let prefix = format!(".{canonical_name}.");
+        fs::read_dir(directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".tmp"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn first_invalid_xray_commit_leaves_no_canonical_or_candidate() {
+        let directory = unique_temp_dir("tachyon-test-xray-commit-first-invalid");
+        fs::create_dir_all(&directory).unwrap();
+        let canonical = directory.join("xray-client.json");
+
+        let error = commit_validated_xray_config_file(
+            &canonical,
+            r#"{"invalid":true}"#,
+            |_| Ok(xray_validation(false)),
+            &PlatformAtomicFileReplacer,
+        )
+        .expect_err("invalid first config must not be committed");
+
+        assert!(error.contains("invalid outbound"));
+        assert!(!canonical.exists());
+        assert!(atomic_candidates(&directory, "xray-client.json").is_empty());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn first_valid_xray_commit_installs_canonical_without_leftover_candidate() {
+        let directory = unique_temp_dir("tachyon-test-xray-commit-first-valid");
+        fs::create_dir_all(&directory).unwrap();
+        let canonical = directory.join("xray-client.json");
+
+        commit_validated_xray_config_file(
+            &canonical,
+            "first valid config",
+            |_| Ok(xray_validation(true)),
+            &PlatformAtomicFileReplacer,
+        )
+        .expect("valid first config must be installed");
+
+        assert_eq!(
+            fs::read_to_string(&canonical).unwrap(),
+            "first valid config"
+        );
+        assert!(atomic_candidates(&directory, "xray-client.json").is_empty());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn invalid_xray_commit_preserves_existing_config() {
+        let directory = unique_temp_dir("tachyon-test-xray-commit-existing-invalid");
+        fs::create_dir_all(&directory).unwrap();
+        let canonical = directory.join("xray-client.json");
+        fs::write(&canonical, b"old config").unwrap();
+
+        commit_validated_xray_config_file(
+            &canonical,
+            "invalid candidate",
+            |_| Ok(xray_validation(false)),
+            &PlatformAtomicFileReplacer,
+        )
+        .expect_err("invalid replacement must fail");
+
+        assert_eq!(fs::read_to_string(&canonical).unwrap(), "old config");
+        assert!(atomic_candidates(&directory, "xray-client.json").is_empty());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn xray_commit_replacement_failure_preserves_existing_config() {
+        let directory = unique_temp_dir("tachyon-test-xray-commit-replace-failure");
+        fs::create_dir_all(&directory).unwrap();
+        let canonical = directory.join("xray-client.json");
+        fs::write(&canonical, b"old config").unwrap();
+
+        let error = commit_validated_xray_config_file(
+            &canonical,
+            "valid candidate",
+            |_| Ok(xray_validation(true)),
+            &FailingAtomicFileReplacer,
+        )
+        .expect_err("replacement failure must fail the commit");
+
+        assert!(error.contains("injected atomic replacement failure"));
+        assert_eq!(fs::read_to_string(&canonical).unwrap(), "old config");
+        assert!(atomic_candidates(&directory, "xray-client.json").is_empty());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn valid_xray_commit_atomically_replaces_existing_config() {
+        let directory = unique_temp_dir("tachyon-test-xray-commit-success");
+        fs::create_dir_all(&directory).unwrap();
+        let canonical = directory.join("xray-client.json");
+        fs::write(&canonical, b"old config").unwrap();
+
+        let validation = commit_validated_xray_config_file(
+            &canonical,
+            "new config",
+            |candidate| {
+                assert_eq!(fs::read_to_string(candidate).unwrap(), "new config");
+                Ok(xray_validation(true))
+            },
+            &PlatformAtomicFileReplacer,
+        )
+        .expect("valid candidate must replace the canonical config");
+
+        assert!(validation.ok);
+        assert_eq!(fs::read_to_string(&canonical).unwrap(), "new config");
+        assert!(atomic_candidates(&directory, "xray-client.json").is_empty());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn xray_commit_cleans_candidate_when_validator_errors() {
+        let directory = unique_temp_dir("tachyon-test-xray-commit-validator-error");
+        fs::create_dir_all(&directory).unwrap();
+        let canonical = directory.join("xray-client.json");
+        let mut candidate_path = None;
+
+        commit_validated_xray_config_file(
+            &canonical,
+            "candidate",
+            |candidate| {
+                candidate_path = Some(candidate.to_path_buf());
+                Err("xray binary not found".to_string())
+            },
+            &PlatformAtomicFileReplacer,
+        )
+        .expect_err("validator execution error must fail the commit");
+
+        assert!(!candidate_path.expect("validator saw candidate").exists());
+        assert!(atomic_candidates(&directory, "xray-client.json").is_empty());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[derive(Default)]
+    struct FakeWindowsReplaceApi {
+        calls: Mutex<Vec<&'static str>>,
+        replace_error: Option<io::ErrorKind>,
+        move_error: Option<io::ErrorKind>,
+    }
+
+    impl WindowsReplaceApi for FakeWindowsReplaceApi {
+        fn replace_existing(&self, _candidate: &Path, _canonical: &Path) -> io::Result<()> {
+            self.calls.lock().unwrap().push("replace");
+            match self.replace_error {
+                Some(kind) => Err(io::Error::from(kind)),
+                None => Ok(()),
+            }
+        }
+
+        fn move_replacing(&self, _candidate: &Path, _canonical: &Path) -> io::Result<()> {
+            self.calls.lock().unwrap().push("move");
+            match self.move_error {
+                Some(kind) => Err(io::Error::from(kind)),
+                None => Ok(()),
+            }
+        }
+    }
+
+    #[test]
+    fn windows_replace_uses_move_only_when_destination_is_missing() {
+        let api = FakeWindowsReplaceApi {
+            replace_error: Some(io::ErrorKind::NotFound),
+            ..FakeWindowsReplaceApi::default()
+        };
+
+        windows_atomic_replace_with(
+            &api,
+            Path::new("candidate.tmp"),
+            Path::new("xray-client.json"),
+        )
+        .expect("missing destination must use write-through move");
+
+        assert_eq!(*api.calls.lock().unwrap(), ["replace", "move"]);
+    }
+
+    #[test]
+    fn windows_replace_does_not_move_over_locked_destination() {
+        let api = FakeWindowsReplaceApi {
+            replace_error: Some(io::ErrorKind::PermissionDenied),
+            ..FakeWindowsReplaceApi::default()
+        };
+
+        let error = windows_atomic_replace_with(
+            &api,
+            Path::new("candidate.tmp"),
+            Path::new("xray-client.json"),
+        )
+        .expect_err("locked destination must remain untouched");
+
+        assert!(error.contains("atomically replace"));
+        assert_eq!(*api.calls.lock().unwrap(), ["replace"]);
+    }
 
     struct FakeStartAllTransaction {
         events: Vec<&'static str>,
@@ -7294,6 +7811,7 @@ pub fn run() {
             test_xray_proxy,
             test_xray_local_proxies,
             validate_xray_config,
+            commit_validated_xray_config,
             validate_tachyon_core_config,
             tachyon_core_preflight,
             system_proxy_capability,
