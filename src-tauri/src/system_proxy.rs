@@ -582,12 +582,14 @@ fn parse_windows_proxy_snapshot(raw: &str) -> Result<WindowsProxySnapshot, Strin
     let mut snapshot = WindowsProxySnapshot::default();
     for line in raw.lines() {
         let parts: Vec<_> = line.split_whitespace().collect();
-        if parts.len() < 3 {
+        if parts.len() < 2 {
             continue;
         }
         match parts[0] {
             "ProxyEnable" => {
-                let raw_value = parts[2];
+                let Some(raw_value) = parts.get(2) else {
+                    return Err("Windows ProxyEnable value is missing".to_string());
+                };
                 let value = raw_value
                     .strip_prefix("0x")
                     .map(|hex| u32::from_str_radix(hex, 16))
@@ -595,8 +597,12 @@ fn parse_windows_proxy_snapshot(raw: &str) -> Result<WindowsProxySnapshot, Strin
                     .map_err(|error| format!("parse Windows ProxyEnable value: {error}"))?;
                 snapshot.proxy_enable = Some(value);
             }
-            "ProxyServer" => snapshot.proxy_server = Some(parts[2..].join(" ")),
-            "ProxyOverride" => snapshot.proxy_override = Some(parts[2..].join(" ")),
+            "ProxyServer" if parts[1] == "REG_SZ" => {
+                snapshot.proxy_server = Some(parts[2..].join(" "))
+            }
+            "ProxyOverride" if parts[1] == "REG_SZ" => {
+                snapshot.proxy_override = Some(parts[2..].join(" "))
+            }
             _ => {}
         }
     }
@@ -924,5 +930,19 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
             Some("http=127.0.0.1:10809; socks=127.0.0.1:10808")
         );
         assert_eq!(snapshot.proxy_override, None);
+    }
+
+    #[test]
+    fn parses_present_empty_windows_registry_strings() {
+        let raw = r#"
+HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
+    ProxyEnable    REG_DWORD    0x0
+    ProxyServer    REG_SZ
+    ProxyOverride    REG_SZ
+"#;
+        let snapshot = parse_windows_proxy_snapshot(raw).unwrap();
+        assert_eq!(snapshot.proxy_enable, Some(0));
+        assert_eq!(snapshot.proxy_server.as_deref(), Some(""));
+        assert_eq!(snapshot.proxy_override.as_deref(), Some(""));
     }
 }

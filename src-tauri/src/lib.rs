@@ -542,7 +542,7 @@ fn core_health_check_with_timeout(
     settings: &RuntimeSettings,
     timeout: Duration,
 ) -> Result<String, String> {
-    let url = core_health_url(settings);
+    let url = core_health_url(settings)?;
     let mut response = health_agent_with_timeout(timeout)
         .get(&url)
         .header("User-Agent", "Tachyon-Prism/0.1")
@@ -562,12 +562,13 @@ fn core_health_check_with_timeout(
     Ok(status.to_string())
 }
 
-fn core_health_url(settings: &RuntimeSettings) -> String {
-    format!(
+fn core_health_url(settings: &RuntimeSettings) -> Result<String, String> {
+    let host = local_probe_host(&settings.tachyon_ipc_listen)?;
+    Ok(format!(
         "http://{}:{}/v1/health",
-        http_url_host(&settings.tachyon_ipc_listen),
+        http_url_host(&host),
         settings.tachyon_ipc_port,
-    )
+    ))
 }
 
 #[tauri::command]
@@ -797,10 +798,7 @@ fn xray_traffic_stats(app: tauri::AppHandle) -> Result<XrayTrafficStats, String>
         return Err(format!("xray binary not found: {}", binary.display()));
     }
 
-    let server = format!(
-        "{}:{}",
-        settings.xray_stats_listen, settings.xray_stats_port
-    );
+    let server = xray_stats_server(&settings)?;
     let output = run_xray_stats_query(&binary, &server)?;
     let mut stats = parse_xray_stats_query_output(&output);
     stats.queried_at = epoch_seconds(SystemTime::now());
@@ -4733,7 +4731,9 @@ trait StartAllTransaction {
 }
 
 fn execute_start_all(transaction: &mut impl StartAllTransaction) -> Result<(), String> {
-    transaction.start_xray()?;
+    if let Err(error) = transaction.start_xray() {
+        return Err(start_all_rollback_error(error, transaction.rollback()));
+    }
     if let Err(error) = transaction.wait_xray_ready() {
         return Err(start_all_rollback_error(error, transaction.rollback()));
     }
@@ -4808,7 +4808,7 @@ impl StartAllTransaction for RuntimeStartAllTransaction<'_> {
                 self.processes
                     .tachyon_core
                     .confirm_running("tachyon-core")?;
-                local_probe_host(&self.settings.tachyon_ipc_listen)
+                let health_url = core_health_url(self.settings)
                     .map_err(|error| format!("Tachyon Core IPC readiness: {error}"))?;
                 let status = core_health_check_with_timeout(
                     self.settings,
@@ -4817,10 +4817,7 @@ impl StartAllTransaction for RuntimeStartAllTransaction<'_> {
                 if status == "ok" {
                     Ok(())
                 } else {
-                    Err(format!(
-                        "{} returned status {status:?}",
-                        core_health_url(self.settings)
-                    ))
+                    Err(format!("{health_url} returned status {status:?}"))
                 }
             },
         )
@@ -4861,8 +4858,7 @@ fn verify_xray_readiness(
     timeout: Duration,
 ) -> Result<(), String> {
     if settings.xray_stats_enabled {
-        let host = local_probe_host(&settings.xray_stats_listen)?;
-        let server = format!("{}:{}", socket_host(&host), settings.xray_stats_port);
+        let server = xray_stats_server(settings)?;
         run_xray_stats_query_with_timeout(binary, &server, timeout)
             .map(|_| ())
             .map_err(|error| format!("Xray stats API {server} is not ready: {error}"))
@@ -4880,6 +4876,15 @@ fn verify_xray_readiness(
             timeout,
         )
     }
+}
+
+fn xray_stats_server(settings: &RuntimeSettings) -> Result<String, String> {
+    let host = local_probe_host(&settings.xray_stats_listen)?;
+    Ok(format!(
+        "{}:{}",
+        socket_host(&host),
+        settings.xray_stats_port
+    ))
 }
 
 fn probe_local_listener(
@@ -5320,6 +5325,7 @@ mod tests {
 
     struct FakeStartAllTransaction {
         events: Vec<&'static str>,
+        xray_start: Result<(), String>,
         xray_readiness: Result<(), String>,
         core_start: Result<(), String>,
         core_readiness: Result<(), String>,
@@ -5330,6 +5336,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 events: Vec::new(),
+                xray_start: Ok(()),
                 xray_readiness: Ok(()),
                 core_start: Ok(()),
                 core_readiness: Ok(()),
@@ -5341,7 +5348,7 @@ mod tests {
     impl StartAllTransaction for FakeStartAllTransaction {
         fn start_xray(&mut self) -> Result<(), String> {
             self.events.push("startXray");
-            Ok(())
+            self.xray_start.clone()
         }
 
         fn wait_xray_ready(&mut self) -> Result<(), String> {
@@ -5375,6 +5382,20 @@ mod tests {
             transaction.events,
             ["startXray", "waitXray", "startCore", "waitCore"]
         );
+    }
+
+    #[test]
+    fn xray_start_failure_rolls_back_partial_start() {
+        let mut transaction = FakeStartAllTransaction {
+            xray_start: Err("poll xray after spawn: access denied".to_string()),
+            ..FakeStartAllTransaction::default()
+        };
+
+        let error = execute_start_all(&mut transaction).expect_err("startup must fail");
+
+        assert!(error.contains("poll xray after spawn: access denied"));
+        assert!(error.contains("started cores were rolled back"));
+        assert_eq!(transaction.events, ["startXray", "rollback"]);
     }
 
     #[test]
@@ -5423,6 +5444,30 @@ mod tests {
         assert_eq!(local_probe_host("[::]").unwrap(), "::1");
         assert!(local_probe_host("198.51.100.10").is_err());
         assert!(local_probe_host("example.com").is_err());
+    }
+
+    #[test]
+    fn xray_stats_server_uses_local_connectable_addresses() {
+        let ipv4 = RuntimeSettings {
+            xray_stats_listen: "0.0.0.0".to_string(),
+            xray_stats_port: 10085,
+            ..RuntimeSettings::default()
+        };
+        assert_eq!(xray_stats_server(&ipv4).unwrap(), "127.0.0.1:10085");
+
+        let ipv6 = RuntimeSettings {
+            xray_stats_listen: "::1".to_string(),
+            xray_stats_port: 10086,
+            ..RuntimeSettings::default()
+        };
+        assert_eq!(xray_stats_server(&ipv6).unwrap(), "[::1]:10086");
+
+        let remote = RuntimeSettings {
+            xray_stats_listen: "198.51.100.10".to_string(),
+            xray_stats_port: 10085,
+            ..RuntimeSettings::default()
+        };
+        assert!(xray_stats_server(&remote).is_err());
     }
 
     #[test]
@@ -6666,7 +6711,7 @@ stat: <
             ..RuntimeSettings::default()
         };
         assert_eq!(
-            core_health_url(&settings),
+            core_health_url(&settings).unwrap(),
             "http://127.0.0.6:55124/v1/health"
         );
     }
@@ -6678,7 +6723,30 @@ stat: <
             tachyon_ipc_port: 55123,
             ..RuntimeSettings::default()
         };
-        assert_eq!(core_health_url(&settings), "http://[::1]:55123/v1/health");
+        assert_eq!(
+            core_health_url(&settings).unwrap(),
+            "http://[::1]:55123/v1/health"
+        );
+    }
+
+    #[test]
+    fn core_health_url_uses_local_connectable_addresses() {
+        let wildcard = RuntimeSettings {
+            tachyon_ipc_listen: "::".to_string(),
+            tachyon_ipc_port: 55123,
+            ..RuntimeSettings::default()
+        };
+        assert_eq!(
+            core_health_url(&wildcard).unwrap(),
+            "http://[::1]:55123/v1/health"
+        );
+
+        let remote = RuntimeSettings {
+            tachyon_ipc_listen: "198.51.100.10".to_string(),
+            tachyon_ipc_port: 55123,
+            ..RuntimeSettings::default()
+        };
+        assert!(core_health_url(&remote).is_err());
     }
 
     #[test]
