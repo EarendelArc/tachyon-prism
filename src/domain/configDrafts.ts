@@ -19,6 +19,151 @@ export interface XrayClientDraftOptions {
 
 export type XrayRoutingMode = "direct" | "global" | "rule";
 
+export type XrayConfigLanguage = "en" | "zh-CN";
+
+export type XrayConfigTextErrorCode =
+  | "empty"
+  | "syntax"
+  | "top-level-object"
+  | "field-object"
+  | "field-array"
+  | "array-entry-object"
+  | "tag-string"
+  | "managed-tag-conflict";
+
+export class XrayConfigTextError extends Error {
+  readonly code: XrayConfigTextErrorCode;
+
+  constructor(code: XrayConfigTextErrorCode, message: string) {
+    super(message);
+    this.name = "XrayConfigTextError";
+    this.code = code;
+  }
+}
+
+export interface XrayConfigValidationResult {
+  error?: string | null;
+  ok: boolean;
+}
+
+export interface CommitXrayConfigOptions<TTarget> {
+  candidateText: string;
+  language?: XrayConfigLanguage;
+  previousValidText?: string;
+  validate: (target: TTarget) => Promise<XrayConfigValidationResult>;
+  write: (text: string) => Promise<TTarget>;
+}
+
+export interface CommittedXrayConfig<TTarget> {
+  target: TTarget;
+  validText: string;
+  validation: XrayConfigValidationResult;
+}
+
+const xrayObjectFields = [
+  "api",
+  "burstObservatory",
+  "dns",
+  "log",
+  "metrics",
+  "observatory",
+  "policy",
+  "reverse",
+  "routing",
+  "stats",
+] as const;
+
+const xrayArrayFields = ["fakedns", "inbounds", "outbounds"] as const;
+
+const managedXrayTagOwners = [
+  { owner: "inbounds", tag: "tachyon-xray-api-in" },
+  { owner: "api", tag: "tachyon-xray-api" },
+  { owner: "inbounds", tag: "tachyon-socks" },
+  { owner: "inbounds", tag: "tachyon-http" },
+  { owner: "outbounds", tag: "tachyon-proxy" },
+  { owner: "outbounds", tag: "tachyon-direct" },
+  { owner: "outbounds", tag: "tachyon-block" },
+] as const;
+
+/** Parses a complete Xray config without projecting it through a protocol model. */
+export function parseXrayConfigText(
+  text: string,
+  language: XrayConfigLanguage = "en",
+): Record<string, unknown> {
+  if (!text.trim()) {
+    throw xrayTextError("empty", language);
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch (error) {
+    const position = jsonErrorPosition(error);
+    throw xrayTextError("syntax", language, position === undefined ? undefined : String(position));
+  }
+  if (!isRecord(value)) {
+    throw xrayTextError("top-level-object", language);
+  }
+
+  for (const field of xrayObjectFields) {
+    if (field in value && !isRecord(value[field])) {
+      throw xrayTextError("field-object", language, field);
+    }
+  }
+  for (const field of xrayArrayFields) {
+    const entries = value[field];
+    if (entries === undefined) {
+      continue;
+    }
+    if (!Array.isArray(entries)) {
+      throw xrayTextError("field-array", language, field);
+    }
+    for (const [index, entry] of entries.entries()) {
+      if (!isRecord(entry)) {
+        throw xrayTextError("array-entry-object", language, `${field}[${index}]`);
+      }
+      if ("tag" in entry && typeof entry.tag !== "string") {
+        throw xrayTextError("tag-string", language, `${field}[${index}].tag`);
+      }
+    }
+  }
+
+  validateManagedXrayTags(value, language);
+  return value;
+}
+
+export async function commitValidatedXrayConfig<TTarget>(
+  options: CommitXrayConfigOptions<TTarget>,
+): Promise<CommittedXrayConfig<TTarget>> {
+  const language = options.language ?? "en";
+  parseXrayConfigText(options.candidateText, language);
+
+  let target: TTarget | undefined;
+  try {
+    target = await options.write(options.candidateText);
+    const validation = await options.validate(target);
+    if (!validation.ok) {
+      throw new Error(xrayConfigTestFailure(language, validation.error));
+    }
+    return {
+      target,
+      validText: options.candidateText,
+      validation,
+    };
+  } catch (error) {
+    if (target !== undefined && options.previousValidText) {
+      try {
+        await options.write(options.previousValidText);
+      } catch (rollbackError) {
+        throw new Error(
+          `${errorMessage(error)}; ${xrayRollbackFailure(language)}: ${errorMessage(rollbackError)}`,
+        );
+      }
+    }
+    throw error;
+  }
+}
+
 export interface CoreClientDraftOptions {
   fecAdaptWindow?: number;
   fecDataShards?: number;
@@ -187,6 +332,109 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function validateManagedXrayTags(
+  config: Record<string, unknown>,
+  language: XrayConfigLanguage,
+): void {
+  const seen = new Map<string, string>();
+  const taggedEntries: Array<{ owner: "api" | "inbounds" | "outbounds"; tag: string }> = [];
+  for (const owner of ["inbounds", "outbounds"] as const) {
+    for (const entry of (config[owner] as Array<Record<string, unknown>> | undefined) ?? []) {
+      if (typeof entry.tag === "string") {
+        taggedEntries.push({ owner, tag: entry.tag });
+      }
+    }
+  }
+  const api = isRecord(config.api) ? config.api : undefined;
+  if (typeof api?.tag === "string") {
+    taggedEntries.push({ owner: "api", tag: api.tag });
+  }
+
+  for (const entry of taggedEntries) {
+    const managed = managedXrayTagOwners.find(({ tag }) => managedTagMatches(entry.tag, tag));
+    if (!managed) {
+      continue;
+    }
+    const previousOwner = seen.get(entry.tag);
+    if (managed.owner !== entry.owner || previousOwner !== undefined) {
+      const location = previousOwner ? `${previousOwner}, ${entry.owner}` : entry.owner;
+      throw xrayTextError("managed-tag-conflict", language, `${entry.tag} (${location})`);
+    }
+    seen.set(entry.tag, entry.owner);
+  }
+}
+
+function managedTagMatches(value: string, managedTag: string): boolean {
+  if (value === managedTag) {
+    return true;
+  }
+  const suffix = value.slice(managedTag.length);
+  return suffix.startsWith("-") && /^-[2-9][0-9]*$/.test(suffix);
+}
+
+function jsonErrorPosition(error: unknown): number | undefined {
+  const match = /position\s+(\d+)/i.exec(errorMessage(error));
+  return match ? Number(match[1]) : undefined;
+}
+
+function xrayTextError(
+  code: XrayConfigTextErrorCode,
+  language: XrayConfigLanguage,
+  detail?: string,
+): XrayConfigTextError {
+  const suffix = detail ? `: ${detail}` : "";
+  const messages: Record<XrayConfigTextErrorCode, { en: string; "zh-CN": string }> = {
+    empty: {
+      en: "Xray JSON cannot be empty",
+      "zh-CN": "Xray JSON 不能为空",
+    },
+    syntax: {
+      en: detail ? `Xray JSON syntax error at position ${detail}` : "Xray JSON syntax error",
+      "zh-CN": detail ? `Xray JSON 语法错误（位置 ${detail}）` : "Xray JSON 语法错误",
+    },
+    "top-level-object": {
+      en: "Xray JSON top level must be an object",
+      "zh-CN": "Xray JSON 顶层必须是对象",
+    },
+    "field-object": {
+      en: `Xray JSON field must be an object${suffix}`,
+      "zh-CN": `Xray JSON 字段必须是对象${suffix}`,
+    },
+    "field-array": {
+      en: `Xray JSON field must be an array${suffix}`,
+      "zh-CN": `Xray JSON 字段必须是数组${suffix}`,
+    },
+    "array-entry-object": {
+      en: `Xray JSON array entry must be an object${suffix}`,
+      "zh-CN": `Xray JSON 数组项必须是对象${suffix}`,
+    },
+    "tag-string": {
+      en: `Xray JSON tag must be a string${suffix}`,
+      "zh-CN": `Xray JSON 标签必须是字符串${suffix}`,
+    },
+    "managed-tag-conflict": {
+      en: `Prism managed tag conflict${suffix}`,
+      "zh-CN": `Prism 管理标签冲突${suffix}`,
+    },
+  };
+  return new XrayConfigTextError(code, messages[code][language]);
+}
+
+function xrayConfigTestFailure(language: XrayConfigLanguage, detail?: string | null): string {
+  const prefix = language === "zh-CN" ? "Xray 配置测试失败" : "Xray config test failed";
+  return detail ? `${prefix}: ${detail}` : prefix;
+}
+
+function xrayRollbackFailure(language: XrayConfigLanguage): string {
+  return language === "zh-CN"
+    ? "恢复上次有效 Xray 配置失败"
+    : "Failed to restore the last valid Xray config";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function stringValue(value: unknown): string {

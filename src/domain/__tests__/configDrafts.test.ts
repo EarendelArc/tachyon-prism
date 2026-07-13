@@ -6,6 +6,8 @@ import { join } from "node:path";
 import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
+  commitValidatedXrayConfig,
+  parseXrayConfigText,
   stringifyDraft,
 } from "../configDrafts";
 import type { GameProfile, LauncherSettings } from "../gameProfiles";
@@ -19,6 +21,7 @@ import type { ProxyNode } from "../subscriptions";
 import {
   singBoxTuicJsonFixture,
   subscriptionCompatibilityFixtures,
+  xrayAdvancedRoundTripJsonFixture,
   xrayFullConfigJsonFixture,
 } from "./subscriptionFixtures";
 
@@ -768,5 +771,131 @@ describe("stringifyDraft", () => {
     const parsed = JSON.parse(json);
     expect(parsed.inbounds).toBeDefined();
     expect(parsed.outbounds).toBeDefined();
+  });
+});
+
+describe("complete Xray JSON editing", () => {
+  it("round-trips the complete fixture without dropping known or future fields", () => {
+    const parsed = parseXrayConfigText(xrayAdvancedRoundTripJsonFixture);
+
+    expect(parsed).toEqual(JSON.parse(xrayAdvancedRoundTripJsonFixture));
+    expect((parsed.inbounds as unknown[])).toHaveLength(2);
+    expect((parsed.outbounds as unknown[])).toHaveLength(2);
+    expect(parsed).toMatchObject({
+      api: expect.any(Object),
+      burstObservatory: expect.any(Object),
+      dns: expect.any(Object),
+      fakedns: expect.any(Array),
+      futureXrayField: {
+        enabled: true,
+        nested: [{ untouched: "round-trip" }],
+      },
+      metrics: expect.any(Object),
+      observatory: expect.any(Object),
+      policy: expect.any(Object),
+      reverse: expect.any(Object),
+      routing: expect.any(Object),
+      stats: expect.any(Object),
+    });
+  });
+
+  it("reports invalid JSON and object structure in English and Chinese", () => {
+    expect(() => parseXrayConfigText('{"inbounds": [}', "en")).toThrow(
+      /Xray JSON syntax error/,
+    );
+    expect(() => parseXrayConfigText("[]", "zh-CN")).toThrow(
+      "Xray JSON 顶层必须是对象",
+    );
+    expect(() => parseXrayConfigText('{"outbounds": {}}', "en")).toThrow(
+      "Xray JSON field must be an array: outbounds",
+    );
+  });
+
+  it("reports managed tag conflicts without restricting protocols", () => {
+    const conflict = JSON.stringify({
+      inbounds: [{ tag: "tachyon-proxy", protocol: "future-inbound" }],
+      outbounds: [{ tag: "custom", protocol: "future-outbound" }],
+    });
+    expect(() => parseXrayConfigText(conflict, "en")).toThrow(
+      /Prism managed tag conflict: tachyon-proxy/,
+    );
+    expect(() => parseXrayConfigText(conflict, "zh-CN")).toThrow(
+      /Prism 管理标签冲突: tachyon-proxy/,
+    );
+  });
+
+  it("does not write malformed candidates", async () => {
+    const writes: string[] = [];
+
+    await expect(
+      commitValidatedXrayConfig({
+        candidateText: "not-json",
+        validate: async () => ({ ok: true }),
+        write: async (text) => {
+          writes.push(text);
+          return "xray-client.json";
+        },
+      }),
+    ).rejects.toThrow(/syntax error/);
+    expect(writes).toEqual([]);
+  });
+
+  it("restores the last valid text when the real config test rejects a candidate", async () => {
+    const candidate = xrayAdvancedRoundTripJsonFixture.replace(
+      '"future-protocol"',
+      '"rejected-by-installed-xray"',
+    );
+    const previous = '{\n  "outbounds": []\n}';
+    const writes: string[] = [];
+
+    await expect(
+      commitValidatedXrayConfig({
+        candidateText: candidate,
+        language: "zh-CN",
+        previousValidText: previous,
+        validate: async () => ({ error: "exit status 23", ok: false }),
+        write: async (text) => {
+          writes.push(text);
+          return "xray-client.json";
+        },
+      }),
+    ).rejects.toThrow("Xray 配置测试失败: exit status 23");
+    expect(writes).toEqual([candidate, previous]);
+  });
+
+  it("restores the last valid text when the config-test command throws", async () => {
+    const previous = '{"inbounds":[],"outbounds":[]}';
+    const candidate = '{"inbounds":[],"outbounds":[{"protocol":"freedom"}]}';
+    const writes: string[] = [];
+
+    await expect(
+      commitValidatedXrayConfig({
+        candidateText: candidate,
+        previousValidText: previous,
+        validate: async () => {
+          throw new Error("xray executable unavailable");
+        },
+        write: async (text) => {
+          writes.push(text);
+          return "xray-client.json";
+        },
+      }),
+    ).rejects.toThrow("xray executable unavailable");
+    expect(writes).toEqual([candidate, previous]);
+  });
+
+  it("keeps the exact original text after a successful config test", async () => {
+    const writes: string[] = [];
+    const result = await commitValidatedXrayConfig({
+      candidateText: xrayAdvancedRoundTripJsonFixture,
+      validate: async () => ({ ok: true }),
+      write: async (text) => {
+        writes.push(text);
+        return "xray-client.json";
+      },
+    });
+
+    expect(result.validText).toBe(xrayAdvancedRoundTripJsonFixture);
+    expect(writes).toEqual([xrayAdvancedRoundTripJsonFixture]);
   });
 });

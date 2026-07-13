@@ -3,6 +3,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
+  commitValidatedXrayConfig,
+  parseXrayConfigText,
   stringifyDraft,
   type XrayRoutingMode,
 } from "./domain/configDrafts";
@@ -14,7 +16,6 @@ import {
 import {
   getConfigPaths,
   saveConfigDraft,
-  saveConfigDrafts,
   type ConfigDraftPaths,
 } from "./domain/desktopConfig";
 import type { GameProfile, LauncherSettings } from "./domain/gameProfiles";
@@ -179,8 +180,15 @@ interface XrayProbeStatus {
   state: ProbeState;
 }
 
+interface XrayAdvancedEditorState {
+  enabled: boolean;
+  lastValidText: string;
+  text: string;
+}
+
 const prismViews: PrismView[] = ["overview", "configs", "subscriptions", "plugins", "settings"];
 const routingModeStorageKey = "tachyon.prism.routingMode.v1";
+const xrayAdvancedEditorStorageKey = "tachyon.prism.xrayAdvancedEditor.v1";
 
 interface ReadinessItem {
   detail: string;
@@ -381,6 +389,16 @@ const zh = {
   xray: "Xray",
   aboutDescription: "一个支持 Xray Core 与 Tachyon Core 的跨平台代理 GUI。",
   adminRestart: "以管理员身份运行（重启生效）",
+  advancedXrayConfig: "高级 Xray JSON",
+  advancedXrayDescription: "直接编辑完整配置；未知字段与未来协议保持原样。保存和启动前会运行 Xray 配置测试。",
+  advancedXrayEnable: "使用高级完整配置",
+  advancedXrayExport: "导出 JSON",
+  advancedXrayImport: "导入 JSON",
+  advancedXrayImported: "完整 Xray JSON 已导入",
+  advancedXrayRestored: "已恢复上次有效 Xray 配置",
+  advancedXrayRestore: "恢复有效配置",
+  advancedXrayRestoreGenerated: "恢复生成配置",
+  advancedXrayValidated: "Xray 配置已验证并保存",
   allowPluginNodeAccess: "允许插件读取节点",
   autoUpdatePlugins: "自动更新插件",
   behavior: "行为",
@@ -676,6 +694,16 @@ const en: typeof zh = {
   xray: "Xray",
   aboutDescription: "A cross-platform proxy GUI for Xray Core and Tachyon Core.",
   adminRestart: "Run as administrator (requires restart)",
+  advancedXrayConfig: "Advanced Xray JSON",
+  advancedXrayDescription: "Edit the complete config directly. Unknown fields and future protocols remain untouched. Xray config-test runs before save and start.",
+  advancedXrayEnable: "Use advanced complete config",
+  advancedXrayExport: "Export JSON",
+  advancedXrayImport: "Import JSON",
+  advancedXrayImported: "Complete Xray JSON imported",
+  advancedXrayRestored: "Restored the last valid Xray config",
+  advancedXrayRestore: "Restore Valid",
+  advancedXrayRestoreGenerated: "Restore Generated",
+  advancedXrayValidated: "Xray config validated and saved",
   allowPluginNodeAccess: "Allow plugins to read nodes",
   autoUpdatePlugins: "Auto-update plugins",
   behavior: "Behavior",
@@ -1009,6 +1037,31 @@ function loadRoutingMode(): XrayRoutingMode {
 
 function saveRoutingMode(mode: XrayRoutingMode): void {
   globalThis.localStorage?.setItem(routingModeStorageKey, mode);
+}
+
+function loadXrayAdvancedEditor(): XrayAdvancedEditorState {
+  try {
+    const raw = globalThis.localStorage?.getItem(xrayAdvancedEditorStorageKey);
+    if (!raw) {
+      return { enabled: false, lastValidText: "", text: "" };
+    }
+    const value = JSON.parse(raw) as Partial<XrayAdvancedEditorState>;
+    return {
+      enabled: value.enabled === true,
+      lastValidText: typeof value.lastValidText === "string" ? value.lastValidText : "",
+      text: typeof value.text === "string" ? value.text : "",
+    };
+  } catch {
+    return { enabled: false, lastValidText: "", text: "" };
+  }
+}
+
+function saveXrayAdvancedEditor(value: XrayAdvancedEditorState): void {
+  try {
+    globalThis.localStorage?.setItem(xrayAdvancedEditorStorageKey, JSON.stringify(value));
+  } catch {
+    // Large valid configs remain usable in memory even when browser storage is unavailable.
+  }
 }
 
 function downloadTextFile(fileName: string, text: string, mimeType: string): void {
@@ -1349,6 +1402,8 @@ export function App() {
     loadPluginState(pluginCatalogIds),
   );
   const [routingMode, setRoutingMode] = useState<XrayRoutingMode>(loadRoutingMode);
+  const [xrayAdvancedEditor, setXrayAdvancedEditor] =
+    useState<XrayAdvancedEditorState>(loadXrayAdvancedEditor);
   const [showUnavailableNodes, setShowUnavailableNodes] = useState(false);
   const [sortPolicyNodesByDelay, setSortPolicyNodesByDelay] = useState(true);
   const [expandedPolicyGroupId, setExpandedPolicyGroupId] = useState("node-selector");
@@ -1417,10 +1472,27 @@ export function App() {
     () => runtimeWithTachyonServer(runtimeInputs, currentTachyonServer),
     [currentTachyonServer, runtimeInputs],
   );
-  const drafts = useMemo(
+  const generatedDrafts = useMemo(
     () => draftText(activeNode, profiles, launcherSettings, routingMode, effectiveRuntimeInputs),
     [activeNode, effectiveRuntimeInputs, launcherSettings, profiles, routingMode],
   );
+  const drafts = useMemo(() => {
+    if (!xrayAdvancedEditor.enabled) {
+      return generatedDrafts;
+    }
+    let xrayError = "";
+    try {
+      parseXrayConfigText(xrayAdvancedEditor.text, language);
+    } catch (error) {
+      xrayError = error instanceof Error ? error.message : "Xray JSON validation failed";
+    }
+    return {
+      ...generatedDrafts,
+      error: [xrayError, generatedDrafts.coreError].filter(Boolean).join(" / "),
+      xray: xrayAdvancedEditor.text,
+      xrayError,
+    };
+  }, [generatedDrafts, language, xrayAdvancedEditor.enabled, xrayAdvancedEditor.text]);
   const trafficTotals = useMemo(
     () => trafficTotalsFromSources(telemetry.latestTelemetry, xrayTrafficStats),
     [telemetry.latestTelemetry, xrayTrafficStats],
@@ -1432,7 +1504,13 @@ export function App() {
       ? xrayOutboundCompatibilityForNode(activeNode)
       : null;
     items.push(
-      activeNode
+      xrayAdvancedEditor.enabled && drafts.xray && !drafts.xrayError
+        ? {
+            detail: ui.advancedXrayDescription,
+            label: ui.advancedXrayConfig,
+            state: "ok",
+          }
+        : activeNode
         ? {
             detail:
               activeNodeCompatibility?.status === "supported"
@@ -1635,6 +1713,7 @@ export function App() {
     runtimeInputs.tachyonCoreBinaryPath,
     runtimeInputs.xrayBinaryPath,
     tachyonPreflight,
+    xrayAdvancedEditor.enabled,
   ]);
   const readinessErrors = useMemo(
     () => readinessItems.filter((item) => item.state === "error").length,
@@ -1988,6 +2067,51 @@ export function App() {
     setMessage(templateValue(ui.routingModeSelected, "mode", routingModeLabel(mode, ui)));
   }
 
+  function setAdvancedXrayEnabled(enabled: boolean) {
+    setXrayAdvancedEditor((current) => ({
+      ...current,
+      enabled,
+      text: enabled && !current.text ? current.lastValidText || generatedDrafts.xray : current.text,
+    }));
+  }
+
+  function updateAdvancedXrayText(text: string) {
+    setXrayAdvancedEditor((current) => ({ ...current, enabled: true, text }));
+  }
+
+  async function importAdvancedXray(file: File | undefined) {
+    if (!file) {
+      return;
+    }
+    try {
+      const text = await file.text();
+      parseXrayConfigText(text, language);
+      setXrayAdvancedEditor((current) => ({ ...current, enabled: true, text }));
+      setMessage(ui.advancedXrayImported);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Xray JSON import failed");
+    }
+  }
+
+  function exportAdvancedXray() {
+    try {
+      parseXrayConfigText(drafts.xray, language);
+      downloadTextFile("xray-client.json", drafts.xray, "application/json;charset=utf-8");
+      setMessage(ui.advancedXrayExport);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Xray JSON export failed");
+    }
+  }
+
+  function restoreAdvancedXray(useGenerated: boolean) {
+    const text = useGenerated ? generatedDrafts.xray : xrayAdvancedEditor.lastValidText;
+    if (!text) {
+      return;
+    }
+    setXrayAdvancedEditor((current) => ({ ...current, enabled: true, text }));
+    setMessage(useGenerated ? ui.advancedXrayRestoreGenerated : ui.advancedXrayRestored);
+  }
+
   function persistPluginState(nextState: PluginStateSnapshot, messageText: string) {
     savePluginState(nextState);
     setPluginState(nextState);
@@ -2156,14 +2280,35 @@ export function App() {
     }
   }
 
-  async function writeDrafts(kind: ManagedBinaryKind | "all" = "all"): Promise<ConfigDraftPaths> {
+  async function commitXrayDraft(settings: RuntimeSettings): Promise<ConfigDraftPaths> {
+    if (!drafts.xray) {
+      throw new Error(drafts.xrayError || "No Xray config draft available");
+    }
+    const committed = await commitValidatedXrayConfig<ConfigDraftPaths>({
+      candidateText: drafts.xray,
+      language,
+      previousValidText: xrayAdvancedEditor.lastValidText,
+      validate: async (paths) => {
+        const result = await validateXrayConfig(settings.xrayBinaryPath, paths.xrayConfigPath);
+        setValidationResults((current) => ({ ...current, xray: result }));
+        return result;
+      },
+      write: (text) => saveConfigDraft("xray", text),
+    });
+    setConfigPaths(committed.target);
+    setXrayAdvancedEditor((current) => ({
+      ...current,
+      lastValidText: committed.validText,
+    }));
+    return committed.target;
+  }
+
+  async function writeDrafts(
+    kind: ManagedBinaryKind | "all" = "all",
+    settings: RuntimeSettings = effectiveRuntimeInputs,
+  ): Promise<ConfigDraftPaths> {
     if (kind === "xray") {
-      if (!drafts.xray) {
-        throw new Error(drafts.xrayError || "No Xray config draft available");
-      }
-      const paths = await saveConfigDraft("xray", drafts.xray);
-      setConfigPaths(paths);
-      return paths;
+      return commitXrayDraft(settings);
     }
 
     if (kind === "tachyonCore") {
@@ -2179,24 +2324,21 @@ export function App() {
       throw new Error(drafts.error || ui.noConfigDraftAvailable);
     }
     if (!drafts.core) {
-      const paths = await saveConfigDraft("xray", drafts.xray);
-      setConfigPaths(paths);
-      return paths;
+      return commitXrayDraft(settings);
     }
     if (!drafts.xray) {
       const paths = await saveConfigDraft("core", drafts.core);
       setConfigPaths(paths);
       return paths;
     }
-    const paths = await saveConfigDrafts(drafts.core, drafts.xray);
-    setConfigPaths(paths);
-    return paths;
+    await saveConfigDraft("core", drafts.core);
+    return commitXrayDraft(settings);
   }
 
   async function saveDrafts() {
     try {
-      await writeDrafts();
-      setMessage(ui.configFilesSaved);
+      await writeDrafts("all", effectiveRuntimeInputs);
+      setMessage(drafts.xray ? ui.advancedXrayValidated : ui.configFilesSaved);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Save failed");
     }
@@ -2250,20 +2392,17 @@ export function App() {
 
   async function validateAllConfigs() {
     try {
-      const paths = await writeDrafts("all");
       const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
+      const paths = await writeDrafts("all", settings);
       const results: ConfigValidationResult[] = [];
       let preflightFallback: string | null = null;
-      if (drafts.xray) {
-        results.push(await runConfigValidation("xray", paths, settings, false));
-      }
       if (drafts.core) {
         results.push(await runConfigValidation("tachyonCore", paths, settings, false));
         const preflight = await runTachyonCorePreflight(paths, settings);
         preflightFallback = tachyonCorePreflightReadinessMessage(preflight);
       }
-      const ok = results.length > 0 && results.every((result) => result.ok);
+      const ok = Boolean(drafts.xray || results.length > 0) && results.every((result) => result.ok);
       setMessage(preflightFallback || (ok ? ui.configsValidated : ui.configsValidationErrors));
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Config validation failed");
@@ -2552,11 +2691,11 @@ export function App() {
 
   async function startRuntime(kind: ManagedBinaryKind): Promise<RuntimeStartResult> {
     try {
-      const paths = await writeDrafts(kind);
       const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
-      await runConfigValidation(kind, paths, settings, false);
+      const paths = await writeDrafts(kind, settings);
       if (kind === "tachyonCore") {
+        await runConfigValidation(kind, paths, settings, false);
         const preflight = await assertTachyonCoreStartable(paths, settings);
         setMessage(tachyonCorePreflightReadinessMessage(preflight));
       }
@@ -2641,10 +2780,9 @@ export function App() {
 
   async function startAllRuntime() {
     try {
-      const paths = await writeDrafts();
       const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
-      await runConfigValidation("xray", paths, settings, false);
+      const paths = await writeDrafts("all", settings);
       await runConfigValidation("tachyonCore", paths, settings, false);
       const preflight = await assertTachyonCoreStartable(paths, settings);
       setMessage(tachyonCorePreflightReadinessMessage(preflight));
@@ -2736,6 +2874,19 @@ export function App() {
       globalThis.history?.replaceState(null, "", nextHash);
     }
   }
+
+  useEffect(() => {
+    saveXrayAdvancedEditor(xrayAdvancedEditor);
+  }, [xrayAdvancedEditor]);
+
+  useEffect(() => {
+    if (xrayAdvancedEditor.enabled && !xrayAdvancedEditor.text && generatedDrafts.xray) {
+      setXrayAdvancedEditor((current) => ({
+        ...current,
+        text: current.lastValidText || generatedDrafts.xray,
+      }));
+    }
+  }, [generatedDrafts.xray, xrayAdvancedEditor.enabled, xrayAdvancedEditor.text]);
 
   useEffect(() => {
     const onHashChange = () => setActiveView(viewFromHash(globalThis.location?.hash ?? ""));
@@ -3137,6 +3288,7 @@ export function App() {
             copyDraft={copyDraft}
             currentLanguage={language}
             drafts={drafts}
+            generatedXrayDraft={generatedDrafts.xray}
             formatBytes={formatBytes}
             installBinary={installBinary}
             managedBinaries={managedBinaries}
@@ -3165,6 +3317,11 @@ export function App() {
             onEditTachyonServer={editTachyonServerProfile}
             onDeleteTachyonServer={deleteTachyonServerProfile}
             onExportDiagnostics={() => void exportDiagnostics()}
+            onExportAdvancedXray={exportAdvancedXray}
+            onImportAdvancedXray={(file) => void importAdvancedXray(file)}
+            onRestoreAdvancedXray={restoreAdvancedXray}
+            onSetAdvancedXrayEnabled={setAdvancedXrayEnabled}
+            onUpdateAdvancedXrayText={updateAdvancedXrayText}
             onUseManaged={(kind) => void useManagedBinary(kind)}
             onValidateConfigs={() => void validateAllConfigs()}
             profiles={profiles}
@@ -3184,6 +3341,7 @@ export function App() {
             tachyonServers={tachyonServers}
             ui={ui}
             validationResults={validationResults}
+            xrayAdvancedEditor={xrayAdvancedEditor}
             manualProfile={manualProfile}
             steamRoot={steamRoot}
             systemProxy={systemProxy}
@@ -4134,6 +4292,7 @@ function SettingsView({
   copyDraft,
   currentLanguage,
   drafts,
+  generatedXrayDraft,
   formatBytes: formatBytesFn,
   installBinary,
   launcherSettings,
@@ -4160,6 +4319,11 @@ function SettingsView({
   onEditTachyonServer,
   onDeleteTachyonServer,
   onExportDiagnostics,
+  onExportAdvancedXray,
+  onImportAdvancedXray,
+  onRestoreAdvancedXray,
+  onSetAdvancedXrayEnabled,
+  onUpdateAdvancedXrayText,
   onUseManaged,
   onValidateConfigs,
   profiles,
@@ -4183,6 +4347,7 @@ function SettingsView({
   ui,
   updateSteamLauncherSetting,
   validationResults,
+  xrayAdvancedEditor,
   setTachyonServerDraft,
 }: {
   binaryBusy: boolean;
@@ -4195,6 +4360,7 @@ function SettingsView({
   copyDraft: (label: string, value: string) => Promise<void>;
   currentLanguage: Language;
   drafts: { core: string; error: string; xray: string };
+  generatedXrayDraft: string;
   formatBytes: (value: number | null) => string;
   installBinary: (kind: ManagedBinaryKind) => Promise<void>;
   launcherSettings: LauncherSettings;
@@ -4221,6 +4387,11 @@ function SettingsView({
   onEditTachyonServer: (profile: TachyonServerProfile) => void;
   onDeleteTachyonServer: (id: string) => void;
   onExportDiagnostics: () => void;
+  onExportAdvancedXray: () => void;
+  onImportAdvancedXray: (file: File | undefined) => void;
+  onRestoreAdvancedXray: (useGenerated: boolean) => void;
+  onSetAdvancedXrayEnabled: (enabled: boolean) => void;
+  onUpdateAdvancedXrayText: (text: string) => void;
   onUseManaged: (kind: ManagedBinaryKind) => void;
   onValidateConfigs: () => void;
   profiles: GameProfile[];
@@ -4251,6 +4422,7 @@ function SettingsView({
     value: LauncherSettings["steam"][K],
   ) => void;
   validationResults: ValidationResults;
+  xrayAdvancedEditor: XrayAdvancedEditorState;
   setTachyonServerDraft: React.Dispatch<React.SetStateAction<TachyonServerDraft>>;
 }) {
   const sections: Array<{ id: SettingsSection; label: string }> = [
@@ -4959,8 +5131,65 @@ function SettingsView({
                 </div>
               ) : null}
               <div className="config-grid">
-                <label><span>Xray</span><textarea data-config-draft="xray" readOnly value={drafts.xray} /></label>
-                <label><span>Core</span><textarea data-config-draft="core" readOnly value={drafts.core} /></label>
+                <div className="config-editor-pane xray-config-editor">
+                  <div className="config-editor-heading">
+                    <span>Xray</span>
+                    <label className="mini-check">
+                      <input
+                        checked={xrayAdvancedEditor.enabled}
+                        data-xray-advanced-toggle
+                        type="checkbox"
+                        onChange={(event) => onSetAdvancedXrayEnabled(event.currentTarget.checked)}
+                      />
+                      {ui.advancedXrayEnable}
+                    </label>
+                  </div>
+                  <p className="field-hint">{ui.advancedXrayDescription}</p>
+                  {xrayAdvancedEditor.enabled ? (
+                    <div className="xray-editor-actions row-actions">
+                      <label className="file-action-button">
+                        {ui.advancedXrayImport}
+                        <input
+                          accept=".json,application/json"
+                          data-xray-json-import
+                          type="file"
+                          onChange={(event) => {
+                            onImportAdvancedXray(event.currentTarget.files?.[0]);
+                            event.currentTarget.value = "";
+                          }}
+                        />
+                      </label>
+                      <button type="button" onClick={onExportAdvancedXray}>{ui.advancedXrayExport}</button>
+                      <button
+                        disabled={!xrayAdvancedEditor.lastValidText}
+                        type="button"
+                        onClick={() => onRestoreAdvancedXray(false)}
+                      >
+                        {ui.advancedXrayRestore}
+                      </button>
+                      <button
+                        disabled={!generatedXrayDraft}
+                        type="button"
+                        onClick={() => onRestoreAdvancedXray(true)}
+                      >
+                        {ui.advancedXrayRestoreGenerated}
+                      </button>
+                    </div>
+                  ) : null}
+                  <textarea
+                    aria-label={ui.advancedXrayConfig}
+                    data-config-draft="xray"
+                    data-xray-advanced-editor={xrayAdvancedEditor.enabled ? "enabled" : "disabled"}
+                    readOnly={!xrayAdvancedEditor.enabled}
+                    spellCheck={false}
+                    value={drafts.xray}
+                    onChange={(event) => onUpdateAdvancedXrayText(event.currentTarget.value)}
+                  />
+                </div>
+                <label className="config-editor-pane">
+                  <span>Core</span>
+                  <textarea data-config-draft="core" readOnly value={drafts.core} />
+                </label>
               </div>
             </article>
           </div>

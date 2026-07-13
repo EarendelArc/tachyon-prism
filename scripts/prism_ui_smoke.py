@@ -667,6 +667,98 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
     )
 
 
+def exercise_advanced_xray_editor(cdp: CDP) -> dict[str, Any]:
+    payload = json.dumps(
+        {
+            "dns": {"servers": ["1.1.1.1"]},
+            "inbounds": [
+                {"tag": "custom-in-a", "protocol": "socks", "settings": {}},
+                {"tag": "custom-in-b", "protocol": "http", "settings": {}},
+            ],
+            "outbounds": [
+                {"tag": "custom-out-a", "protocol": "freedom", "settings": {}},
+                {"tag": "custom-out-b", "protocol": "blackhole", "settings": {}},
+            ],
+            "futureSmokeField": {"untouched": [1, 2, 3]},
+        },
+        separators=(",", ":"),
+    )
+    return cdp.evaluate(
+        f"""
+        new Promise((resolve) => {{
+          location.hash = 'settings';
+          setTimeout(() => {{
+            document.querySelectorAll('.settings-sidebar button')[1]?.click();
+            setTimeout(() => {{
+              const toggle = document.querySelector('[data-xray-advanced-toggle]');
+              if (!toggle) throw new Error('advanced Xray toggle missing');
+              if (!toggle.checked) toggle.click();
+              setTimeout(() => {{
+                const editor = document.querySelector('[data-xray-advanced-editor="enabled"]');
+                if (!editor || editor.readOnly) throw new Error('advanced Xray editor is not editable');
+                const descriptor = Object.getOwnPropertyDescriptor(
+                  Object.getPrototypeOf(editor),
+                  'value'
+                );
+                const setEditor = (value) => {{
+                  descriptor.set.call(editor, value);
+                  editor.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                }};
+                setEditor({json.dumps(payload)});
+                setTimeout(() => {{
+                  const panel = editor.closest('.settings-card');
+                  const save = Array.from(panel.querySelectorAll('header button')).find((button) =>
+                    button.textContent.trim() === 'Save'
+                  );
+                  if (!save) throw new Error('config save button missing');
+                  save.click();
+                  setTimeout(() => {{
+                    const restore = Array.from(panel.querySelectorAll('.xray-editor-actions button')).find(
+                      (button) => button.textContent.includes('Restore Valid')
+                    );
+                    const generated = Array.from(panel.querySelectorAll('.xray-editor-actions button')).find(
+                      (button) => button.textContent.includes('Restore Generated')
+                    );
+                    const importInput = panel.querySelector('[data-xray-json-import]');
+                    const exportButton = Array.from(panel.querySelectorAll('.xray-editor-actions button')).find(
+                      (button) => button.textContent.includes('Export JSON')
+                    );
+                    const validSaved = !restore?.disabled && editor.value === {json.dumps(payload)};
+                    setEditor('{{');
+                    setTimeout(() => {{
+                      save.click();
+                      setTimeout(() => {{
+                        const syntaxVisible = document.body.innerText.includes('Xray JSON syntax error');
+                        restore.click();
+                        setTimeout(() => {{
+                          const restoredExact = editor.value === {json.dumps(payload)};
+                          generated.click();
+                          setTimeout(() => {{
+                            let generatedConfig = {{}};
+                            try {{ generatedConfig = JSON.parse(editor.value); }} catch {{}}
+                            resolve({{
+                              exportPresent: Boolean(exportButton),
+                              generatedRestored: Boolean(generatedConfig.routing),
+                              importPresent: Boolean(importInput),
+                              restoredExact,
+                              syntaxVisible,
+                              validSaved,
+                            }});
+                          }}, 300);
+                        }}, 300);
+                      }}, 350);
+                    }}, 250);
+                  }}, 450);
+                }}, 250);
+              }}, 300);
+            }}, 350);
+          }}, 350);
+        }})
+        """,
+        await_promise=True,
+    )
+
+
 def configure_tachyon_server(cdp: CDP, server: str) -> str:
     host, _, port = server.partition(":")
     port = port or "443"
@@ -1145,6 +1237,19 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         )
         cdp.screenshot(output_dir / "settings-binaries-800x540-en.png")
         assert_local_proxy_probe_panel(cdp)
+        advanced_xray = exercise_advanced_xray_editor(cdp)
+        if not all(advanced_xray.values()):
+            raise AssertionError(f"advanced Xray JSON editor workflow failed: {advanced_xray}")
+        cdp.evaluate(
+            """
+            new Promise((resolve) => {
+              document.querySelector('.xray-config-editor')?.scrollIntoView({ block: 'start' });
+              setTimeout(resolve, 250);
+            })
+            """,
+            await_promise=True,
+        )
+        cdp.screenshot(output_dir / "settings-xray-json-editor-800x540-en.png")
         text = configure_tachyon_server(cdp, "game.example.com:443")
         assert_contains(
             text,

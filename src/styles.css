@@ -2070,6 +2070,70 @@ p,
   white-space: pre;
 }
 
+.config-editor-pane {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.config-editor-pane > span,
+.config-editor-heading > span {
+  color: rgba(255, 255, 255, 0.76);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.config-editor-heading {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.config-editor-heading .mini-check {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: normal;
+}
+
+.xray-editor-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.xray-editor-actions button,
+.file-action-button {
+  font-size: 12px;
+  min-height: 30px;
+  padding: 5px 9px;
+}
+
+.file-action-button {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+  display: inline-flex;
+  font-weight: 700;
+}
+
+.file-action-button:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.file-action-button input {
+  height: 1px;
+  opacity: 0;
+  overflow: hidden;
+  position: absolute;
+  width: 1px;
+}
+
 .inline-error {
   background: rgba(255, 88, 72, 0.13);
   border: 1px solid rgba(255, 88, 72, 0.36);

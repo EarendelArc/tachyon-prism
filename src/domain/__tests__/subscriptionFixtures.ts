@@ -196,6 +196,73 @@ export const xrayFullConfigJsonFixture = JSON.stringify({
   },
 });
 
+export const xrayAdvancedRoundTripJsonFixture = JSON.stringify(
+  {
+    log: { loglevel: "warning" },
+    dns: { hosts: { "domain:example.test": "127.0.0.1" }, servers: ["1.1.1.1"] },
+    routing: {
+      domainStrategy: "AsIs",
+      rules: [
+        {
+          type: "field",
+          inboundTag: ["tachyon-socks"],
+          outboundTag: "custom-proxy",
+        },
+      ],
+    },
+    policy: { levels: { "0": { handshake: 4 } }, system: { statsInboundUplink: true } },
+    api: { tag: "tachyon-xray-api", services: ["StatsService"] },
+    stats: { preserveStatsExtension: true },
+    metrics: { tag: "metrics", listen: "127.0.0.1:11111" },
+    reverse: {
+      bridges: [{ tag: "bridge", domain: "reverse.example.test" }],
+    },
+    observatory: {
+      subjectSelector: ["custom-proxy"],
+      probeUrl: "https://example.test/generate_204",
+    },
+    burstObservatory: {
+      subjectSelector: ["custom-proxy"],
+      pingConfig: { destination: "https://example.test/ping", interval: "15s" },
+    },
+    fakedns: [{ ipPool: "198.18.0.0/15", poolSize: 2048 }],
+    inbounds: [
+      {
+        tag: "tachyon-socks",
+        listen: "127.0.0.1",
+        port: 10808,
+        protocol: "socks",
+        settings: { udp: true },
+      },
+      {
+        tag: "custom-inbound",
+        listen: "127.0.0.1",
+        port: 10810,
+        protocol: "dokodemo-door",
+        settings: { address: "example.test", port: 443 },
+      },
+    ],
+    outbounds: [
+      {
+        tag: "custom-proxy",
+        protocol: "future-protocol",
+        settings: { futureCredentialShape: { id: "fixture-only" } },
+      },
+      {
+        tag: "tachyon-direct",
+        protocol: "freedom",
+        settings: { domainStrategy: "UseIP" },
+      },
+    ],
+    futureXrayField: {
+      enabled: true,
+      nested: [{ untouched: "round-trip" }],
+    },
+  },
+  null,
+  2,
+);
+
 export const subscriptionCompatibilityFixtures: SubscriptionCompatibilityFixture[] = [
   {
     id: "vless-reality",
