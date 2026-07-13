@@ -88,7 +88,10 @@ class CDP:
         return result.get("result", {}).get("value")
 
     def screenshot(self, path: Path) -> None:
-        data = self.call("Page.captureScreenshot", {"format": "png", "fromSurface": True})["data"]
+        data = self.call(
+            "Page.captureScreenshot",
+            {"captureBeyondViewport": False, "format": "png", "fromSurface": True},
+        )["data"]
         path.write_bytes(base64.b64decode(data))
         assert_nonblank_png(path)
 
@@ -256,6 +259,12 @@ def assert_contains_any(text: str, *needles: str) -> None:
         raise AssertionError(f"missing any text: {needles}\n--- page text ---\n{text[:1600]}")
 
 
+def assert_not_contains(text: str, *needles: str) -> None:
+    found = [needle for needle in needles if needle in text]
+    if found:
+        raise AssertionError(f"unexpected text: {found}\n--- page text ---\n{text[:1600]}")
+
+
 def assert_no_runtime_error(text: str) -> None:
     forbidden = [
         "Cannot read properties",
@@ -298,6 +307,49 @@ def assert_content_fits_viewport(cdp: CDP) -> None:
     )
     if int(overflow["scroll"]) > int(overflow["client"]) + 2:
         raise AssertionError(f"content vertical overflow detected: {overflow}")
+
+
+def assert_content_scroll_is_contained(cdp: CDP) -> None:
+    scroll = cdp.evaluate(
+        """
+        (() => {
+          const content = document.querySelector('.prism-content');
+          return {
+            body: document.body.scrollHeight,
+            contentClient: content?.clientHeight ?? 0,
+            contentOverflowY: content ? getComputedStyle(content).overflowY : '',
+            window: window.innerHeight
+          };
+        })()
+        """,
+    )
+    if int(scroll["body"]) > int(scroll["window"]) + 2:
+        raise AssertionError(f"page scroll escaped the desktop shell: {scroll}")
+    if int(scroll["contentClient"]) <= 0 or scroll["contentOverflowY"] != "auto":
+        raise AssertionError(f"content scroll container is not configured: {scroll}")
+
+
+def assert_fixed_window_labels_fit(cdp: CDP, page: str) -> None:
+    fit = cdp.evaluate(
+        f"""
+        (() => {{
+          const page = {json.dumps(page)};
+          const clipped = Array.from(
+            document.querySelectorAll('.capability-pill strong, .core-switch strong')
+          ).filter((item) => item.scrollWidth > item.clientWidth + 1)
+            .map((item) => item.textContent.trim());
+          const visibilityRows = page === 'settings'
+            ? Array.from(document.querySelectorAll('.setting-row .segmented.wide button'))
+                .map((item) => Math.round(item.getBoundingClientRect().top))
+            : [];
+          return {{ clipped, visibilityRows }};
+        }})()
+        """,
+    )
+    if fit["clipped"]:
+        raise AssertionError(f"fixed-window quick labels are clipped: {fit}")
+    if page == "settings" and len(set(fit["visibilityRows"])) > 1:
+        raise AssertionError(f"page visibility controls wrapped at 800x540: {fit}")
 
 
 def assert_desktop_viewport(cdp: CDP) -> None:
@@ -396,6 +448,8 @@ def assert_dual_core_chart(cdp: CDP) -> None:
         """,
     )
     labels = " ".join(chart["legend"])
+    if len(chart["legend"]) != 4:
+        raise AssertionError(f"dual-core traffic chart must expose four series: {chart}")
     for label in ["Tachyon ↑", "Tachyon ↓", "Xray ↑", "Xray ↓"]:
         if label not in labels:
             raise AssertionError(f"dual-core traffic legend missing {label}: {chart}")
@@ -678,8 +732,8 @@ def assert_local_proxy_probe_panel(cdp: CDP) -> None:
 
 
 def assert_key_pages_at_viewports(cdp: CDP, output_dir: Path) -> None:
-    viewports = [(800, 540), (1024, 720), (1366, 768)]
-    pages = ["overview", "subscriptions", "settings"]
+    viewports = [(1024, 720), (1366, 768)]
+    pages = ["overview", "subscriptions", "plugins", "settings"]
     for width, height in viewports:
         set_viewport(cdp, width, height)
         for page in pages:
@@ -690,6 +744,35 @@ def assert_key_pages_at_viewports(cdp: CDP, output_dir: Path) -> None:
             assert_no_horizontal_overflow(cdp)
             assert_viewport(cdp, width, height)
             cdp.screenshot(output_dir / f"{page}-{width}x{height}.png")
+
+
+def capture_fixed_window_pages(cdp: CDP, output_dir: Path, language: str) -> None:
+    expected = {
+        "zh-CN": {
+            "overview": "工作模式",
+            "subscriptions": "更新全部",
+            "plugins": "插件中心",
+            "settings": "个性化",
+        },
+        "en": {
+            "overview": "Work Mode",
+            "subscriptions": "Update All",
+            "plugins": "Plugin Center",
+            "settings": "Personalization",
+        },
+    }[language]
+    set_viewport(cdp, 800, 540)
+    for page, page_marker in expected.items():
+        text = navigate_hash(cdp, page)
+        if page == "settings":
+            text = select_settings_section(cdp, 0)
+        assert_contains(text, page_marker)
+        assert_no_runtime_error(text)
+        assert_no_horizontal_overflow(cdp)
+        assert_content_scroll_is_contained(cdp)
+        assert_fixed_window_labels_fit(cdp, page)
+        assert_desktop_viewport(cdp)
+        cdp.screenshot(output_dir / f"{page}-800x540-{language}.png")
 
 
 def core_config_summary(cdp: CDP) -> dict[str, Any]:
@@ -944,6 +1027,8 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         text = open_and_close_node_picker(cdp)
         assert_contains(text, "节点选择", "Clash Smoke SS")
         assert_desktop_viewport(cdp)
+        text = navigate_hash(cdp, "subscriptions")
+        assert_contains(text, "更新全部", "Clash Smoke SS")
         cdp.screenshot(output_dir / "subscriptions-desktop.png")
 
         text = navigate_hash(cdp, "configs")
@@ -985,15 +1070,80 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         assert_contains(text, "已启用", "运行次数: 1", "->")
         assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "plugins-desktop.png")
+        capture_fixed_window_pages(cdp, output_dir, "zh-CN")
 
         text = navigate_hash(cdp, "settings")
         text = select_settings_section(cdp, 0)
         assert_contains(text, "个性化", "主题", "核心")
         assert_no_runtime_error(text)
+        text = select_settings_section(cdp, 1)
+        assert_contains(text, "诊断", "稳定", "预览", "诊断仅使用已保存的运行时设置")
+        assert_not_contains(
+            text,
+            "Channel",
+            "Configured path missing",
+            "Diagnose uses saved runtime settings",
+            "Installed version",
+            "Not installed",
+            "Preview mode / Xray Core",
+            "Resolved tag",
+        )
+        cdp.evaluate(
+            """
+            new Promise((resolve) => {
+              document.querySelector('.binary-row')?.scrollIntoView({ block: 'start' });
+              setTimeout(resolve, 200);
+            })
+            """,
+            await_promise=True,
+        )
+        cdp.screenshot(output_dir / "settings-core-desktop-zh-CN.png")
+        text = select_settings_section(cdp, 0)
         text = switch_to_english(cdp)
         assert_contains(text, "Personalization", "Theme", "Core")
         assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "settings-desktop-en.png")
+        capture_fixed_window_pages(cdp, output_dir, "en")
+        text = navigate_hash(cdp, "settings")
+        text = select_settings_section(cdp, 1)
+        assert_contains(
+            text,
+            "Diagnose",
+            "Stable",
+            "Preview",
+            "Diagnostics use saved runtime settings only",
+        )
+        diagnostics_text = str(
+            cdp.evaluate(
+                """
+                new Promise((resolve) => {
+                  const deadline = Date.now() + 3000;
+                  const read = () => {
+                    const panel = document.querySelector('.release-diagnostics');
+                    const text = panel?.textContent ?? '';
+                    if (text.includes('Installed version') || Date.now() >= deadline) {
+                      resolve(text);
+                      return;
+                    }
+                    setTimeout(read, 100);
+                  };
+                  read();
+                })
+                """,
+                await_promise=True,
+            ),
+        )
+        assert_contains(diagnostics_text, "Installed version", "Resolved tag")
+        cdp.evaluate(
+            """
+            new Promise((resolve) => {
+              document.querySelector('.binary-row')?.scrollIntoView({ block: 'start' });
+              setTimeout(resolve, 200);
+            })
+            """,
+            await_promise=True,
+        )
+        cdp.screenshot(output_dir / "settings-binaries-800x540-en.png")
         assert_local_proxy_probe_panel(cdp)
         text = configure_tachyon_server(cdp, "game.example.com:443")
         assert_contains(

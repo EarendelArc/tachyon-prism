@@ -269,10 +269,17 @@ const zh = {
   autoSelect: "自动选择",
   cardMode: "卡片模式",
   binaries: "核心文件",
+  binaryInventoryUnavailable: "核心清单不可用",
+  checksum: "校验和",
+  checksumMatch: "匹配",
+  checksumMismatch: "不匹配",
+  checksumNotChecked: "未校验",
   checkLatest: "检查更新",
   collapseAll: "收起全部",
   configDrafts: "配置草稿",
   configs: "配置",
+  configuredPathExists: "配置路径存在",
+  configuredPathMissing: "配置路径缺失",
   controller: "控制器",
   coreSettings: "核心",
   coreControl: "核心控制",
@@ -281,15 +288,21 @@ const zh = {
   directMode: "直连",
   directModeDesc: "直接连接所有流量",
   download: "下载",
+  diagnose: "诊断",
+  diagnoseNote: "诊断仅使用已保存的运行时设置；不会写入文件或启动核心。",
+  dependencyMissing: "缺少 {path}",
   enabledProfiles: "启用规则",
   edit: "编辑",
   globalMode: "全局",
   import: "导入",
   install: "安装",
   installed: "已安装",
+  installedPath: "安装路径",
+  installedVersion: "已安装版本",
   installLatest: "安装最新版",
   installWintun: "安装 Wintun",
   language: "语言",
+  latest: "最新",
   launchers: "启动器",
   list: "列表",
   memory: "内存",
@@ -297,6 +310,8 @@ const zh = {
   metricUnknown: "未知",
   nodeSelector: "节点选择",
   nodes: "节点",
+  primaryNavigation: "主导航",
+  previewMode: "预览模式",
   overview: "概览",
   plugins: "插件",
   readiness: "就绪检查",
@@ -383,6 +398,7 @@ const zh = {
   diagnosticsExported: "诊断支持包已导出",
   exportDiagnostics: "导出诊断",
   validateConfigs: "验证配置",
+  validationFailed: "失败",
   custom: "自定义",
   dark: "深色",
   defaultColor: "默认",
@@ -405,6 +421,7 @@ const zh = {
   localProxyProbe: "本地代理验证",
   more: "更多",
   noNodeSelected: "未选择节点",
+  noCompatibleAsset: "没有兼容的发布文件",
   noSubscriptionNodes: "还没有订阅节点",
   noTachyonServerProfiles: "还没有 Tachyon 服务器档案",
   proxyProbeFailed: "本地代理验证失败",
@@ -414,6 +431,8 @@ const zh = {
   proxyProbeOk: "本地代理验证通过",
   proxyProbeRunning: "正在测试本地 HTTP/SOCKS 代理...",
   notConfigured: "未配置",
+  notInstalled: "未安装",
+  notProbed: "未探测；诊断不会执行已安装的核心",
   pageVisibility: "页面可见性",
   personalized: "个性化",
   policyGroups: "策略组",
@@ -455,16 +474,20 @@ const zh = {
   processName: "进程名",
   purple: "紫色",
   quickStart: "快速启动",
-  ready: "Ready",
+  ready: "就绪",
   recentRoutes: "最近路由",
   releaseChannel: "发布通道",
+  releaseAsset: "发布文件",
+  releasePreview: "预览",
+  releaseStable: "稳定",
+  resolvedTag: "解析版本",
   refreshLatency: "刷新延迟",
   runProxyProbe: "测试当前节点",
   routeByRule: "按规则和进程自动选择出口",
   ruleSets: "规则集",
   run: "运行",
   scheduledTasks: "计划任务",
-  selector: "Selector",
+  selector: "选择器",
   settingsAbout: "关于",
   settingsGeneral: "通用",
   source: "源码",
@@ -541,10 +564,17 @@ const en: typeof zh = {
   autoSelect: "Auto Select",
   cardMode: "Card Mode",
   binaries: "Binaries",
+  binaryInventoryUnavailable: "Binary inventory unavailable",
+  checksum: "Checksum",
+  checksumMatch: "Match",
+  checksumMismatch: "Mismatch",
+  checksumNotChecked: "Not checked",
   checkLatest: "Check Latest",
   collapseAll: "Collapse All",
   configDrafts: "Config Drafts",
   configs: "Config",
+  configuredPathExists: "Configured path exists",
+  configuredPathMissing: "Configured path missing",
   controller: "Controller",
   coreSettings: "Core",
   coreControl: "Core Control",
@@ -553,15 +583,21 @@ const en: typeof zh = {
   directMode: "Direct",
   directModeDesc: "Direct all traffic",
   download: "Download",
+  diagnose: "Diagnose",
+  diagnoseNote: "Diagnostics use saved runtime settings only; they do not write files or start cores.",
+  dependencyMissing: "Missing {path}",
   enabledProfiles: "Enabled Rules",
   edit: "Edit",
   globalMode: "Global",
   import: "Import",
   install: "Install",
   installed: "Installed",
+  installedPath: "Installed path",
+  installedVersion: "Installed version",
   installLatest: "Install Latest",
   installWintun: "Install Wintun",
   language: "Language",
+  latest: "Latest",
   launchers: "Launchers",
   list: "List",
   memory: "Memory",
@@ -569,6 +605,8 @@ const en: typeof zh = {
   metricUnknown: "Unknown",
   nodeSelector: "Node Selector",
   nodes: "nodes",
+  primaryNavigation: "Primary navigation",
+  previewMode: "Preview mode",
   overview: "Overview",
   plugins: "Plugins",
   readiness: "Readiness",
@@ -655,6 +693,7 @@ const en: typeof zh = {
   diagnosticsExported: "Diagnostics support package exported",
   exportDiagnostics: "Export diagnostics",
   validateConfigs: "Validate Configs",
+  validationFailed: "Failed",
   custom: "Custom",
   dark: "Dark",
   defaultColor: "Default",
@@ -677,6 +716,7 @@ const en: typeof zh = {
   localProxyProbe: "Local Proxy Probe",
   more: "More",
   noNodeSelected: "No node selected",
+  noCompatibleAsset: "No compatible asset",
   noSubscriptionNodes: "No subscription nodes yet",
   noTachyonServerProfiles: "No Tachyon server profiles yet",
   proxyProbeFailed: "Local proxy probe failed",
@@ -686,6 +726,8 @@ const en: typeof zh = {
   proxyProbeOk: "Local proxy probe passed",
   proxyProbeRunning: "Testing local HTTP/SOCKS proxies...",
   notConfigured: "Not configured",
+  notInstalled: "Not installed",
+  notProbed: "Not probed; diagnostics do not execute installed cores",
   pageVisibility: "Page visibility",
   personalized: "Personalization",
   policyGroups: "Policy Groups",
@@ -730,6 +772,10 @@ const en: typeof zh = {
   ready: "Ready",
   recentRoutes: "Recent routes",
   releaseChannel: "Release channel",
+  releaseAsset: "Asset",
+  releasePreview: "Preview",
+  releaseStable: "Stable",
+  resolvedTag: "Resolved tag",
   refreshLatency: "Refresh Latency",
   runProxyProbe: "Test Node",
   routeByRule: "Route automatically by rules and process",
@@ -931,12 +977,20 @@ function formatRate(value: number): string {
   return `${(value / 1024 / 1024).toFixed(2)} MB/s`;
 }
 
-function managedStatusLabel(binary: ManagedBinaryInfo): string {
-  return binary.managedExists ? `installed, ${formatBytes(binary.managedSizeBytes)}` : "not installed";
+function displayPath(value: string, ui: typeof zh): string {
+  return value.startsWith("Preview mode")
+    ? `${ui.previewMode}${value.slice("Preview mode".length)}`
+    : value;
 }
 
-function configuredStatusLabel(binary: ManagedBinaryInfo): string {
-  return binary.configuredExists ? "configured path exists" : "configured path missing";
+function managedStatusLabel(binary: ManagedBinaryInfo, ui: typeof zh): string {
+  return binary.managedExists
+    ? `${ui.installed}, ${formatBytes(binary.managedSizeBytes)}`
+    : ui.notInstalled;
+}
+
+function configuredStatusLabel(binary: ManagedBinaryInfo, ui: typeof zh): string {
+  return binary.configuredExists ? ui.configuredPathExists : ui.configuredPathMissing;
 }
 
 function viewFromHash(hash: string): PrismView {
@@ -2866,7 +2920,7 @@ export function App() {
         </div>
       </header>
 
-      <nav className="top-nav" aria-label="Primary">
+      <nav className="top-nav" aria-label={ui.primaryNavigation}>
         {navItems.map((item) => (
           <button
             aria-current={item.id === activeView ? "page" : undefined}
@@ -3419,7 +3473,7 @@ function OverviewView({
               <strong>{ui.currentNode}</strong>
               <b>{activeNode?.name ?? ui.noNodeSelected}</b>
               <small>
-                {activeNodeProtocol} :: {activeNodeTransport} · {activeNodeLatency} · {nodeCount} nodes
+                {activeNodeProtocol} :: {activeNodeTransport} · {activeNodeLatency} · {nodeCount} {ui.nodes}
               </small>
             </div>
             <em>⌄</em>
@@ -4137,7 +4191,7 @@ function SettingsView({
   binarySourceInputs: Record<ManagedBinaryKind, string>;
   changeLanguage: (language: Language) => void;
   configPaths: ConfigDraftPaths | null;
-  configuredStatusLabel: (binary: ManagedBinaryInfo) => string;
+  configuredStatusLabel: (binary: ManagedBinaryInfo, ui: typeof zh) => string;
   copyDraft: (label: string, value: string) => Promise<void>;
   currentLanguage: Language;
   drafts: { core: string; error: string; xray: string };
@@ -4145,7 +4199,7 @@ function SettingsView({
   installBinary: (kind: ManagedBinaryKind) => Promise<void>;
   launcherSettings: LauncherSettings;
   managedBinaries: ManagedBinaryInventory | null;
-  managedStatusLabel: (binary: ManagedBinaryInfo) => string;
+  managedStatusLabel: (binary: ManagedBinaryInfo, ui: typeof zh) => string;
   manualProfile: typeof emptyProfile;
   onAddManualProfile: () => void;
   onAddSuggestion: (profile: GameProfile) => void;
@@ -4388,8 +4442,8 @@ function SettingsView({
               </header>
               {runtimePaths ? (
                 <div className="path-list">
-                  <div><span>bin</span><strong>{runtimePaths.binDir}</strong></div>
-                  <div><span>runtime-settings.json</span><strong>{runtimePaths.runtimeSettingsPath}</strong></div>
+                  <div><span>bin</span><strong>{displayPath(runtimePaths.binDir, ui)}</strong></div>
+                  <div><span>runtime-settings.json</span><strong>{displayPath(runtimePaths.runtimeSettingsPath, ui)}</strong></div>
                 </div>
               ) : null}
               <div className="runtime-list-mini">
@@ -4475,16 +4529,16 @@ function SettingsView({
                       <button type="button" onClick={() => onSelectTachyonServer(profile.id)}>
                         <strong>{profile.name}</strong>
                         <span>{tachyonServerEndpoint(profile)}</span>
-                        <small>{profile.remark || "No remark"}</small>
+                        <small>{profile.remark || ui.tachyonServerNoRemark}</small>
                       </button>
                       <div className="row-actions">
-                        <button type="button" onClick={() => onEditTachyonServer(profile)}>Edit</button>
+                        <button type="button" onClick={() => onEditTachyonServer(profile)}>{ui.edit}</button>
                         <button type="button" onClick={() => onDeleteTachyonServer(profile.id)}>{ui.remove}</button>
                       </div>
                     </article>
                   ))}
                   {tachyonServers.profiles.length === 0 ? (
-                    <div className="empty-note">No Tachyon server profiles yet</div>
+                    <div className="empty-note">{ui.noTachyonServerProfiles}</div>
                   ) : null}
                 </div>
               </div>
@@ -4824,19 +4878,21 @@ function SettingsView({
                     <div className="binary-row" key={kind}>
                       <div className="binary-meta">
                         <strong>{binary?.displayName ?? managedBinaryDisplayName(kind)}</strong>
-                        <span>{binary ? managedStatusLabel(binary) : "inventory unavailable"}</span>
-                        {binary ? <span>{configuredStatusLabel(binary)}</span> : null}
-                        {binary ? <span>{binary.targetPath}</span> : null}
+                        <span>{binary ? managedStatusLabel(binary, ui) : ui.binaryInventoryUnavailable}</span>
+                        {binary ? <span>{configuredStatusLabel(binary, ui)}</span> : null}
+                        {binary ? <span>{displayPath(binary.targetPath, ui)}</span> : null}
                         {sidecars.map((dependency) => (
                           <span
                             className={dependency.exists ? "sidecar-status ok" : "sidecar-status missing"}
                             key={`${kind}-${dependency.name}`}
                           >
-                            {dependency.name}: {dependency.exists ? "OK" : `Missing ${dependency.path}`}
+                            {dependency.name}: {dependency.exists
+                              ? "OK"
+                              : templateValue(ui.dependencyMissing, "path", dependency.path)}
                           </span>
                         ))}
                         {release ? (
-                          <span>Latest {release.tagName}: {release.assetName} / {formatBytesFn(release.assetSizeBytes)}</span>
+                          <span>{ui.latest} {release.tagName}: {release.assetName} / {formatBytesFn(release.assetSizeBytes)}</span>
                         ) : null}
                       </div>
                       <ReleaseDiagnosticsPanel
@@ -4844,6 +4900,7 @@ function SettingsView({
                         formatBytes={formatBytesFn}
                         kind={kind}
                         selectedChannel={releaseChannelForKindFn(runtimeInputs, kind)}
+                        ui={ui}
                       />
                       <input
                         placeholder={ui.sourceBinaryPath}
@@ -4862,23 +4919,21 @@ function SettingsView({
                             )
                           }
                         >
-                          <option value="stable">Stable</option>
-                          <option value="preview">Pre</option>
+                          <option value="stable">{ui.releaseStable}</option>
+                          <option value="preview">{ui.releasePreview}</option>
                         </select>
                       </label>
                       <div className="row-actions">
                         <button type="button" onClick={() => void installBinary(kind)}>{ui.install}</button>
                         <button type="button" onClick={() => onUseManaged(kind)}>{ui.useManaged}</button>
                         <button disabled={binaryBusy} type="button" onClick={() => onCheckLatest(kind)}>{ui.checkLatest}</button>
-                        <button disabled={binaryBusy} type="button" onClick={() => onDiagnoseRelease(kind)}>Diagnose</button>
+                        <button disabled={binaryBusy} type="button" onClick={() => onDiagnoseRelease(kind)}>{ui.diagnose}</button>
                         <button disabled={binaryBusy} type="button" onClick={() => onDownloadLatest(kind)}>{ui.installLatest}</button>
                         {kind === "tachyonCore" && missingWintun ? (
                           <button disabled={binaryBusy} type="button" onClick={onInstallWintun}>{ui.installWintun}</button>
                         ) : null}
                       </div>
-                      <p className="diagnose-note">
-                        Diagnose uses saved runtime settings only; it does not write files or start cores.
-                      </p>
+                      <p className="diagnose-note">{ui.diagnoseNote}</p>
                     </div>
                   );
                 })}
@@ -4896,11 +4951,11 @@ function SettingsView({
                 </div>
               </header>
               {drafts.error ? <div className="inline-error">{drafts.error}</div> : null}
-              <ValidationSummary results={validationResults} />
+              <ValidationSummary results={validationResults} ui={ui} />
               {configPaths ? (
                 <div className="path-list">
-                  <div><span>client.json</span><strong>{configPaths.coreConfigPath}</strong></div>
-                  <div><span>xray-client.json</span><strong>{configPaths.xrayConfigPath}</strong></div>
+                  <div><span>client.json</span><strong>{displayPath(configPaths.coreConfigPath, ui)}</strong></div>
+                  <div><span>xray-client.json</span><strong>{displayPath(configPaths.xrayConfigPath, ui)}</strong></div>
                 </div>
               ) : null}
               <div className="config-grid">
@@ -5009,7 +5064,7 @@ function SettingsView({
   );
 }
 
-function ValidationSummary({ results }: { results: ValidationResults }) {
+function ValidationSummary({ results, ui }: { results: ValidationResults; ui: typeof zh }) {
   const rows: Array<{ kind: ManagedBinaryKind; label: string }> = [
     { kind: "xray", label: "Xray" },
     { kind: "tachyonCore", label: "Tachyon Core" },
@@ -5027,7 +5082,7 @@ function ValidationSummary({ results }: { results: ValidationResults }) {
         return (
           <div className={result.ok ? "ok" : "error"} key={kind}>
             <span>{label}</span>
-            <strong>{result.ok ? "OK" : "Failed"}</strong>
+            <strong>{result.ok ? "OK" : ui.validationFailed}</strong>
             <small title={result.command}>{result.error || result.details}</small>
           </div>
         );
@@ -5041,20 +5096,41 @@ function ReleaseDiagnosticsPanel({
   formatBytes: formatBytesFn,
   kind,
   selectedChannel,
+  ui,
 }: {
   diagnostics: CoreReleaseDiagnostics | undefined;
   formatBytes: (value: number | null) => string;
   kind: ManagedBinaryKind;
   selectedChannel: ReleaseChannel;
+  ui: typeof zh;
 }) {
   const snapshot = diagnostics ?? emptyReleaseDiagnostics(kind, selectedChannel);
   const display = buildReleaseDiagnosticsDisplay(snapshot, formatBytesFn);
+  const labels: Record<string, string> = {
+    Asset: ui.releaseAsset,
+    Channel: ui.releaseChannel,
+    Checksum: ui.checksum,
+    "Installed path": ui.installedPath,
+    "Installed version": ui.installedVersion,
+    "Resolved tag": ui.resolvedTag,
+  };
+  const values: Record<string, string> = {
+    Match: ui.checksumMatch,
+    Mismatch: ui.checksumMismatch,
+    "No compatible asset": ui.noCompatibleAsset,
+    "Not checked": ui.checksumNotChecked,
+    "Not installed": ui.notInstalled,
+    "Not probed - diagnostics does not execute installed binaries": ui.notProbed,
+    Pre: ui.releasePreview,
+    Stable: ui.releaseStable,
+    Unknown: ui.metricUnknown,
+  };
   return (
     <div className="release-diagnostics">
       {display.rows.map((row) => (
         <div className={row.wide ? "wide" : undefined} key={row.label}>
-          <span>{row.label}</span>
-          <strong className={row.tone} title={row.title}>{row.value}</strong>
+          <span>{labels[row.label] ?? row.label}</span>
+          <strong className={row.tone} title={row.title}>{values[row.value] ?? row.value}</strong>
         </div>
       ))}
       {display.lastError ? <p className="diagnostic-error">{display.lastError}</p> : null}
@@ -5186,7 +5262,7 @@ function NodeDrawer({
         <header>
           <div>
             <h2>🚀 {ui.nodeSelector}</h2>
-            <p>Selector :: {activeNode?.name ?? "--"}</p>
+            <p>{ui.selector} :: {activeNode?.name ?? "--"}</p>
           </div>
           <button type="button" onClick={onClose}>×</button>
         </header>

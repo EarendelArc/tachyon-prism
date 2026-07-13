@@ -1942,6 +1942,12 @@ p,
   grid-template-columns: minmax(220px, 0.85fr) minmax(0, 1fr);
 }
 
+.binary-meta {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
 .binary-row .row-actions {
   grid-column: 1 / -1;
 }
@@ -2213,6 +2219,30 @@ p,
   padding: 18px;
   position: absolute;
   right: 24px;
+}
+
+@media (max-width: 850px) and (min-width: 761px) {
+  .quick-strip {
+    gap: 6px;
+    grid-template-columns: minmax(156px, 0.9fr) minmax(164px, 0.9fr) minmax(166px, 1fr) auto;
+  }
+
+  .capability-pill:first-child {
+    flex-grow: 1.35;
+  }
+
+  .core-switch {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .core-switch small {
+    display: none;
+  }
+
+  .setting-row .segmented.wide button {
+    font-size: 11px;
+    padding: 5px 4px;
+  }
 }
 
 @media (max-width: 760px) {
