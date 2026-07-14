@@ -1,3 +1,4 @@
+use regex::Regex;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -6,6 +7,7 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,6 +21,13 @@ struct ConfigDraftPaths {
     config_dir: String,
     core_config_path: String,
     xray_config_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CanonicalXrayConfigText {
+    exists: bool,
+    contents: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -317,6 +326,8 @@ const WINTUN_ARCHIVE_NAME: &str = "wintun-0.14.1.zip";
 const WINTUN_DOWNLOAD_URL: &str = "https://www.wintun.net/builds/wintun-0.14.1.zip";
 const WINTUN_SHA256: &str = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51";
 const PREFLIGHT_OUTPUT_LIMIT_BYTES: usize = 8 * 1024;
+const CANONICAL_XRAY_CONFIG_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+const XRAY_DIAGNOSTIC_LIMIT_BYTES: usize = 8 * 1024;
 const PROCESS_LOG_TAIL_BYTES: usize = 32 * 1024;
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(3);
 const STARTUP_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
@@ -515,6 +526,7 @@ struct ManagedProcess {
     stdout_reader: Option<thread::JoinHandle<()>>,
     stderr_reader: Option<thread::JoinHandle<()>>,
     stop_method: Option<String>,
+    sanitize_diagnostics: bool,
 }
 
 #[derive(Serialize)]
@@ -603,6 +615,46 @@ fn scan_steam_library(root: Option<String>) -> Result<SteamScanResult, String> {
 #[tauri::command]
 fn config_paths(app: tauri::AppHandle) -> Result<ConfigDraftPaths, String> {
     draft_paths(&app)
+}
+
+#[tauri::command]
+fn read_canonical_xray_config(app: tauri::AppHandle) -> Result<CanonicalXrayConfigText, String> {
+    let paths = draft_paths(&app)?;
+    read_optional_utf8_file_bounded(
+        Path::new(&paths.xray_config_path),
+        CANONICAL_XRAY_CONFIG_LIMIT_BYTES,
+    )
+}
+
+fn read_optional_utf8_file_bounded(
+    path: &Path,
+    limit_bytes: usize,
+) -> Result<CanonicalXrayConfigText, String> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(CanonicalXrayConfigText {
+                exists: false,
+                contents: None,
+            })
+        }
+        Err(error) => return Err(format!("open canonical Xray config: {error}")),
+    };
+    let mut bytes = Vec::new();
+    file.take(limit_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read canonical Xray config: {error}"))?;
+    if bytes.len() > limit_bytes {
+        return Err(format!(
+            "canonical Xray config exceeds the {limit_bytes}-byte limit"
+        ));
+    }
+    let contents = String::from_utf8(bytes)
+        .map_err(|error| format!("canonical Xray config is not valid UTF-8: {error}"))?;
+    Ok(CanonicalXrayConfigText {
+        exists: true,
+        contents: Some(contents),
+    })
 }
 
 #[tauri::command]
@@ -1037,17 +1089,20 @@ fn start_xray(
     binary_path: String,
     config_path: String,
 ) -> Result<ProcessStatus, String> {
-    let mut processes = state
-        .processes
-        .lock()
-        .map_err(|err| format!("lock runtime state: {err}"))?;
-    processes.xray.start(
-        "xray",
-        ManagedBinaryKind::Xray,
-        binary_path,
-        config_path.clone(),
-        &["run", "-config"],
-    )
+    let result = (|| {
+        let mut processes = state
+            .processes
+            .lock()
+            .map_err(|err| format!("lock runtime state: {err}"))?;
+        processes.xray.start(
+            "xray",
+            ManagedBinaryKind::Xray,
+            binary_path,
+            config_path,
+            &["run", "-config"],
+        )
+    })();
+    result.map_err(sanitize_xray_ui_error)
 }
 
 #[tauri::command]
@@ -1115,13 +1170,15 @@ fn start_all(
         .processes
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
-    processes.start_all(
-        &settings,
-        xray_binary_path,
-        xray_config_path,
-        tachyon_core_binary_path,
-        tachyon_core_config_path,
-    )?;
+    processes
+        .start_all(
+            &settings,
+            xray_binary_path,
+            xray_config_path,
+            tachyon_core_binary_path,
+            tachyon_core_config_path,
+        )
+        .map_err(sanitize_xray_ui_error)?;
     Ok(StartAllResult {
         runtime: processes.status(),
         confirmation: "readinessVerified".to_string(),
@@ -1291,22 +1348,37 @@ fn config_validation_result(
     command: String,
     output: Result<Output, String>,
 ) -> ConfigValidationResult {
+    let sanitize = |value: &str| {
+        if target == "xray" {
+            sanitize_xray_diagnostic(value).text
+        } else {
+            value.to_string()
+        }
+    };
+    let command = sanitize(&command);
     match output {
         Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let details = validation_details(&stdout, &stderr);
+            let stdout = sanitize(String::from_utf8_lossy(&output.stdout).trim());
+            let stderr = sanitize(String::from_utf8_lossy(&output.stderr).trim());
             let ok = output.status.success();
+            let combined = if target == "xray" && !ok {
+                match (stderr.is_empty(), stdout.is_empty()) {
+                    (false, false) => format!("stderr:\n{stderr}\nstdout:\n{stdout}"),
+                    (false, true) => format!("stderr:\n{stderr}"),
+                    (true, false) => format!("stdout:\n{stdout}"),
+                    (true, true) => validation_details(&stdout, &stderr),
+                }
+            } else {
+                validation_details(&stdout, &stderr)
+            };
+            let details = sanitize(&combined);
+            let error = (!ok).then(|| details.clone());
             ConfigValidationResult {
                 ok,
                 target: target.to_string(),
                 command,
                 details,
-                error: if ok {
-                    None
-                } else {
-                    Some(validation_details(&stdout, &stderr))
-                },
+                error,
             }
         }
         Err(error) => ConfigValidationResult {
@@ -1314,8 +1386,66 @@ fn config_validation_result(
             target: target.to_string(),
             command,
             details: String::new(),
-            error: Some(error),
+            error: Some(sanitize(&error)),
         },
+    }
+}
+
+struct SanitizedXrayDiagnostic {
+    text: String,
+}
+
+fn sanitize_xray_ui_error(error: String) -> String {
+    sanitize_xray_diagnostic(&error).text
+}
+
+fn sanitize_xray_diagnostic(value: &str) -> SanitizedXrayDiagnostic {
+    static JSON_SECRET: OnceLock<Regex> = OnceLock::new();
+    static ASSIGNMENT_SECRET: OnceLock<Regex> = OnceLock::new();
+    static URI_USERINFO: OnceLock<Regex> = OnceLock::new();
+    static ESCAPED_URI_USERINFO: OnceLock<Regex> = OnceLock::new();
+
+    let json_secret = JSON_SECRET.get_or_init(|| {
+        Regex::new(
+            r#"(?i)("(?:password|pass|passwd|token|secret|psk|privatekey|id|uuid)"\s*:\s*)("(?:\\.|[^"\\])*"|[^,\s}\]]+)"#,
+        )
+        .expect("valid Xray JSON secret regex")
+    });
+    let assignment_secret = ASSIGNMENT_SECRET.get_or_init(|| {
+        Regex::new(
+            r#"(?im)(\b(?:password|pass|passwd|token|secret|psk|privatekey|id|uuid)\b\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'[^'\r\n]*'|[^\s,}\]]+)"#,
+        )
+        .expect("valid Xray assignment secret regex")
+    });
+    let uri_userinfo = URI_USERINFO.get_or_init(|| {
+        Regex::new(r#"(?i)\b([a-z][a-z0-9+.-]*://)([^/@\s]+)@"#).expect("valid URI userinfo regex")
+    });
+    let escaped_uri_userinfo = ESCAPED_URI_USERINFO.get_or_init(|| {
+        Regex::new(r#"(?i)\b([a-z][a-z0-9+.-]*:\\/\\/)([^@\s]+)@"#)
+            .expect("valid escaped URI userinfo regex")
+    });
+
+    let redacted = json_secret.replace_all(value, r#"$1"<redacted>""#);
+    let redacted = assignment_secret.replace_all(&redacted, "$1<redacted>");
+    let redacted = uri_userinfo.replace_all(&redacted, "${1}<redacted>@");
+    let redacted = escaped_uri_userinfo.replace_all(&redacted, "${1}<redacted>@");
+    let redacted = redact_sensitive_paths(&redacted);
+    truncate_diagnostic(&redacted, XRAY_DIAGNOSTIC_LIMIT_BYTES)
+}
+
+fn truncate_diagnostic(value: &str, limit_bytes: usize) -> SanitizedXrayDiagnostic {
+    const MARKER: &str = "\n...[truncated]";
+    if value.len() <= limit_bytes {
+        return SanitizedXrayDiagnostic {
+            text: value.to_string(),
+        };
+    }
+    let mut end = limit_bytes.saturating_sub(MARKER.len()).min(value.len());
+    while !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    SanitizedXrayDiagnostic {
+        text: format!("{}{}", &value[..end], MARKER),
     }
 }
 
@@ -4978,11 +5108,23 @@ impl RuntimeProcesses {
             "core" | "tachyoncore" | "tachyon-core" => ("tachyonCore", &self.tachyon_core),
             other => return Err(format!("unknown runtime process kind: {other}")),
         };
+        let stdout_tail = log_tail_snapshot(&process.stdout_tail);
+        let stderr_tail = log_tail_snapshot(&process.stderr_tail);
+        let (stdout_tail, stderr_tail, capacity_bytes_per_stream) = if process.sanitize_diagnostics
+        {
+            (
+                sanitize_xray_diagnostic(&stdout_tail).text,
+                sanitize_xray_diagnostic(&stderr_tail).text,
+                XRAY_DIAGNOSTIC_LIMIT_BYTES,
+            )
+        } else {
+            (stdout_tail, stderr_tail, PROCESS_LOG_TAIL_BYTES)
+        };
         Ok(ProcessLogs {
             kind: kind.to_string(),
-            stdout_tail: log_tail_snapshot(&process.stdout_tail),
-            stderr_tail: log_tail_snapshot(&process.stderr_tail),
-            capacity_bytes_per_stream: PROCESS_LOG_TAIL_BYTES,
+            stdout_tail,
+            stderr_tail,
+            capacity_bytes_per_stream,
         })
     }
 
@@ -5288,6 +5430,7 @@ impl ManagedProcess {
             return Err(format!("{label} config not found: {}", config.display()));
         }
         validate_process_start_inputs(label, kind, &binary, &config)?;
+        self.sanitize_diagnostics = kind == ManagedBinaryKind::Xray;
 
         let mut command = Command::new(&binary);
         command.args(args);
@@ -5402,6 +5545,11 @@ impl ManagedProcess {
                     .find(|line| !line.trim().is_empty())
                     .map(str::trim)
                     .unwrap_or_default();
+                let detail = if self.sanitize_diagnostics {
+                    sanitize_xray_diagnostic(detail).text
+                } else {
+                    detail.to_string()
+                };
                 Some(if detail.is_empty() {
                     format!("{label} exited with {status}")
                 } else {
@@ -5413,6 +5561,23 @@ impl ManagedProcess {
     }
 
     fn snapshot(&self) -> ProcessStatus {
+        let stdout_tail = log_tail_snapshot(&self.stdout_tail);
+        let stderr_tail = log_tail_snapshot(&self.stderr_tail);
+        let (stdout_tail, stderr_tail) = if self.sanitize_diagnostics {
+            (
+                sanitize_xray_diagnostic(&stdout_tail).text,
+                sanitize_xray_diagnostic(&stderr_tail).text,
+            )
+        } else {
+            (stdout_tail, stderr_tail)
+        };
+        let last_error = if self.sanitize_diagnostics {
+            self.last_error
+                .as_deref()
+                .map(|error| sanitize_xray_diagnostic(error).text)
+        } else {
+            self.last_error.clone()
+        };
         ProcessStatus {
             state: if self.child.is_some() {
                 "running".to_string()
@@ -5425,10 +5590,10 @@ impl ManagedProcess {
             binary_path: self.binary_path.clone(),
             config_path: self.config_path.clone(),
             started_at: self.started_at,
-            last_error: self.last_error.clone(),
+            last_error,
             exit_code: self.exit_code,
-            stdout_tail: log_tail_snapshot(&self.stdout_tail),
-            stderr_tail: log_tail_snapshot(&self.stderr_tail),
+            stdout_tail,
+            stderr_tail,
             stop_method: self.stop_method.clone(),
         }
     }
@@ -5652,6 +5817,194 @@ mod tests {
             },
             error: (!ok).then(|| "invalid outbound".to_string()),
         }
+    }
+
+    #[test]
+    fn canonical_xray_config_read_returns_exact_utf8_contents() {
+        let directory = unique_temp_dir("tachyon-test-read-canonical-xray");
+        fs::create_dir_all(&directory).unwrap();
+        let canonical = directory.join("xray-client.json");
+        let expected = "{\n  \"outbounds\": []\n}\n";
+        fs::write(&canonical, expected.as_bytes()).unwrap();
+
+        let result = read_optional_utf8_file_bounded(&canonical, 1024).unwrap();
+
+        assert!(result.exists);
+        assert_eq!(result.contents.as_deref(), Some(expected));
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn canonical_xray_config_read_distinguishes_missing_file() {
+        let directory = unique_temp_dir("tachyon-test-read-missing-canonical-xray");
+        fs::create_dir_all(&directory).unwrap();
+        let canonical = directory.join("xray-client.json");
+
+        let result = read_optional_utf8_file_bounded(&canonical, 1024).unwrap();
+
+        assert!(!result.exists);
+        assert!(result.contents.is_none());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn canonical_xray_config_read_distinguishes_empty_existing_file() {
+        let directory = unique_temp_dir("tachyon-test-read-empty-canonical-xray");
+        fs::create_dir_all(&directory).unwrap();
+        let canonical = directory.join("xray-client.json");
+        fs::write(&canonical, []).unwrap();
+
+        let result = read_optional_utf8_file_bounded(&canonical, 1024).unwrap();
+
+        assert!(result.exists);
+        assert_eq!(result.contents.as_deref(), Some(""));
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn canonical_xray_config_read_rejects_oversized_file() {
+        let directory = unique_temp_dir("tachyon-test-read-large-canonical-xray");
+        fs::create_dir_all(&directory).unwrap();
+        let canonical = directory.join("xray-client.json");
+        fs::write(&canonical, b"12345").unwrap();
+
+        let error = read_optional_utf8_file_bounded(&canonical, 4).unwrap_err();
+
+        assert!(error.contains("4-byte limit"));
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn canonical_xray_config_read_rejects_non_utf8_file() {
+        let directory = unique_temp_dir("tachyon-test-read-non-utf8-canonical-xray");
+        fs::create_dir_all(&directory).unwrap();
+        let canonical = directory.join("xray-client.json");
+        fs::write(&canonical, [0xff, 0xfe, 0xfd]).unwrap();
+
+        let error = read_optional_utf8_file_bounded(&canonical, 1024).unwrap_err();
+
+        assert!(error.contains("not valid UTF-8"));
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn xray_diagnostics_redact_sensitive_keys_and_uri_userinfo() {
+        let diagnostic = r#"{
+  "password":"pw-value",
+  "pass":"pass-value",
+  "passwd":"passwd-value",
+  "token":"token-value",
+  "secret":"secret-value",
+  "psk":"psk-value",
+  "privateKey":"private-value",
+  "id":"id-value",
+  "uuid":"uuid-value",
+  "uri":"socks5://alice:uri-password@example.test:1080"
+}
+token=assignment-value
+secret: 'yaml-value'
+escaped=https:\/\/bob:escaped-password@example.test/path"#;
+
+        let sanitized = sanitize_xray_diagnostic(diagnostic);
+
+        for secret in [
+            "pw-value",
+            "pass-value",
+            "passwd-value",
+            "token-value",
+            "secret-value",
+            "psk-value",
+            "private-value",
+            "id-value",
+            "uuid-value",
+            "alice:uri-password",
+            "assignment-value",
+            "yaml-value",
+            "bob:escaped-password",
+        ] {
+            assert!(!sanitized.text.contains(secret), "leaked secret: {secret}");
+        }
+        assert!(sanitized.text.contains("<redacted>"));
+        assert!(sanitized.text.contains("example.test"));
+        assert!(!sanitized.text.contains("...[truncated]"));
+    }
+
+    #[test]
+    fn xray_validation_stdout_and_stderr_are_redacted_and_bounded() {
+        let stdout = format!("password=stdout-secret {}", "A".repeat(20_000));
+        let stderr = format!("token: stderr-secret {}", "B".repeat(20_000));
+        let sanitized_stdout = sanitize_xray_diagnostic(&stdout).text;
+        let sanitized_stderr = sanitize_xray_diagnostic(&stderr).text;
+        let output = test_output(1, stdout.as_bytes(), stderr.as_bytes());
+
+        for (diagnostic, secret) in [
+            (&sanitized_stdout, "stdout-secret"),
+            (&sanitized_stderr, "stderr-secret"),
+        ] {
+            assert!(diagnostic.len() <= XRAY_DIAGNOSTIC_LIMIT_BYTES);
+            assert!(diagnostic.contains("...[truncated]"));
+            assert!(!diagnostic.contains(secret));
+        }
+
+        let result = config_validation_result(
+            "xray",
+            "xray run -test -config xray-client.json".to_string(),
+            Ok(output),
+        );
+
+        assert!(!result.ok);
+        assert!(result.details.len() <= XRAY_DIAGNOSTIC_LIMIT_BYTES);
+        assert!(result.details.contains("...[truncated]"));
+        assert!(result.details.starts_with("stderr:\n"));
+        assert!(!result.details.contains("stdout-secret"));
+        assert!(!result.details.contains("stderr-secret"));
+        assert_eq!(result.error.as_deref(), Some(result.details.as_str()));
+    }
+
+    #[test]
+    fn xray_start_status_and_logs_redact_and_bound_diagnostics() {
+        let raw = format!(
+            "failed config: {{\"privateKey\":\"start-secret\"}} {}",
+            "X".repeat(20_000)
+        );
+        let process = ManagedProcess {
+            sanitize_diagnostics: true,
+            last_error: Some(raw.clone()),
+            ..ManagedProcess::default()
+        };
+        append_log_tail(&process.stdout_tail, &raw);
+        append_log_tail(&process.stderr_tail, &raw);
+
+        let status = process.snapshot();
+        let processes = RuntimeProcesses {
+            xray: process,
+            ..RuntimeProcesses::default()
+        };
+        let logs = processes.logs("xray").unwrap();
+
+        assert!(!status.last_error.unwrap().contains("start-secret"));
+        assert!(status.stderr_tail.len() <= XRAY_DIAGNOSTIC_LIMIT_BYTES);
+        assert!(!status.stderr_tail.contains("start-secret"));
+        assert!(status.stderr_tail.contains("...[truncated]"));
+        assert_eq!(logs.capacity_bytes_per_stream, XRAY_DIAGNOSTIC_LIMIT_BYTES);
+        assert!(!logs.stdout_tail.contains("start-secret"));
+        assert!(logs.stdout_tail.contains("...[truncated]"));
+    }
+
+    #[test]
+    fn xray_start_error_is_redacted_and_bounded_for_ui() {
+        let raw = format!(
+            "start failed: token=start-secret socks5://alice:password@example.test {}",
+            "X".repeat(20_000)
+        );
+
+        let sanitized = sanitize_xray_ui_error(raw);
+
+        assert!(sanitized.len() <= XRAY_DIAGNOSTIC_LIMIT_BYTES);
+        assert!(sanitized.contains("...[truncated]"));
+        assert!(!sanitized.contains("start-secret"));
+        assert!(!sanitized.contains("alice:password"));
+        assert!(sanitized.contains("example.test"));
     }
 
     #[test]
@@ -7861,6 +8214,7 @@ pub fn run() {
             remove_game_profile,
             scan_steam_library,
             config_paths,
+            read_canonical_xray_config,
             save_config_drafts,
             save_config_draft,
             runtime_paths,
