@@ -1,6 +1,6 @@
 use super::{
     default_runtime_settings, expected_system_proxy_server, load_runtime_settings,
-    normalize_proxy_server, now_epoch_seconds, run_command, RuntimeSettings,
+    normalize_proxy_server, now_epoch_seconds, run_command, write_atomic, RuntimeSettings,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -429,17 +429,9 @@ fn journal_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 fn write_journal(path: &Path, journal: &SystemProxyJournal) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "system proxy journal has no parent directory".to_string())?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("create system proxy journal directory: {error}"))?;
-    let content = serde_json::to_vec_pretty(journal)
+    let content = serde_json::to_string_pretty(journal)
         .map_err(|error| format!("encode system proxy journal: {error}"))?;
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, content)
-        .map_err(|error| format!("write system proxy journal: {error}"))?;
-    fs::rename(&temporary, path).map_err(|error| format!("commit system proxy journal: {error}"))
+    write_atomic(path, &content).map_err(|error| format!("commit system proxy journal: {error}"))
 }
 
 fn read_optional_journal(path: &Path) -> Result<Option<SystemProxyJournal>, String> {

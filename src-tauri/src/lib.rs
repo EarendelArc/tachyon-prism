@@ -763,7 +763,7 @@ fn runtime_status(
             .map_err(|err| format!("lock runtime state: {err}"))?;
         processes.status()
     };
-    if status.xray.state != "running" {
+    if should_restore_proxy_for_runtime(&status) {
         let _ = system_proxy::restore_if_pending(&app, &proxy_state);
     }
     Ok(status)
@@ -915,18 +915,19 @@ fn validate_xray_config(
 fn commit_validated_xray_config(
     app: tauri::AppHandle,
     contents: String,
-) -> Result<ConfigValidationResult, String> {
+) -> Result<ConfigDraftPaths, String> {
     let settings = load_runtime_settings(&app)?;
     let paths = draft_paths(&app)?;
     let binary = PathBuf::from(clean_path_input(&settings.xray_binary_path));
-    let canonical = PathBuf::from(paths.xray_config_path);
+    let canonical = PathBuf::from(&paths.xray_config_path);
 
     commit_validated_xray_config_file(
         &canonical,
         &contents,
         |candidate| validate_xray_config_file(&binary, candidate),
         &PlatformAtomicFileReplacer,
-    )
+    )?;
+    Ok(paths)
 }
 
 #[tauri::command]
@@ -1083,12 +1084,21 @@ fn start_tachyon_core(
 }
 
 #[tauri::command]
-fn stop_tachyon_core(state: tauri::State<RuntimeState>) -> Result<ProcessStatus, String> {
+fn stop_tachyon_core(
+    app: tauri::AppHandle,
+    state: tauri::State<RuntimeState>,
+    proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
+) -> Result<ProcessStatus, String> {
+    system_proxy::restore_if_pending(&app, &proxy_state)?;
     let mut processes = state
         .processes
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
     processes.tachyon_core.stop("tachyon-core")
+}
+
+fn should_restore_proxy_for_runtime(status: &RuntimeStatus) -> bool {
+    status.xray.state != "running" || status.tachyon_core.state != "running"
 }
 
 #[tauri::command]
@@ -4693,25 +4703,34 @@ impl SyncedTempFile {
                 }
             };
             let candidate = Self { path };
-            file.write_all(content.as_bytes()).map_err(|error| {
-                format!(
-                    "write atomic candidate {}: {error}",
-                    candidate.path.display()
-                )
-            })?;
-            file.flush().map_err(|error| {
-                format!(
-                    "flush atomic candidate {}: {error}",
-                    candidate.path.display()
-                )
-            })?;
-            file.sync_all().map_err(|error| {
-                format!(
-                    "sync atomic candidate {}: {error}",
-                    candidate.path.display()
-                )
-            })?;
+            let write_result = file
+                .write_all(content.as_bytes())
+                .map_err(|error| {
+                    format!(
+                        "write atomic candidate {}: {error}",
+                        candidate.path.display()
+                    )
+                })
+                .and_then(|()| {
+                    file.flush().map_err(|error| {
+                        format!(
+                            "flush atomic candidate {}: {error}",
+                            candidate.path.display()
+                        )
+                    })
+                })
+                .and_then(|()| {
+                    file.sync_all().map_err(|error| {
+                        format!(
+                            "sync atomic candidate {}: {error}",
+                            candidate.path.display()
+                        )
+                    })
+                });
             drop(file);
+            if let Err(error) = write_result {
+                return Err(candidate.cleanup_after_failure(error));
+            }
             return Ok(candidate);
         }
 
@@ -5635,6 +5654,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn committed_xray_config_paths_match_frontend_success_contract() {
+        let payload = serde_json::to_value(ConfigDraftPaths {
+            config_dir: "C:\\Prism\\config".to_string(),
+            core_config_path: "C:\\Prism\\config\\client.json".to_string(),
+            xray_config_path: "C:\\Prism\\config\\xray-client.json".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(payload["configDir"], "C:\\Prism\\config");
+        assert_eq!(payload["coreConfigPath"], "C:\\Prism\\config\\client.json");
+        assert_eq!(
+            payload["xrayConfigPath"],
+            "C:\\Prism\\config\\xray-client.json"
+        );
+    }
+
+    #[test]
+    fn system_proxy_requires_both_runtime_cores_to_remain_running() {
+        let mut processes = RuntimeProcesses::default();
+        let mut status = processes.status();
+
+        status.xray.state = "running".to_string();
+        status.tachyon_core.state = "running".to_string();
+        assert!(!should_restore_proxy_for_runtime(&status));
+
+        status.tachyon_core.state = "failed".to_string();
+        assert!(should_restore_proxy_for_runtime(&status));
+
+        status.tachyon_core.state = "running".to_string();
+        status.xray.state = "stopped".to_string();
+        assert!(should_restore_proxy_for_runtime(&status));
+    }
+
     fn atomic_candidates(directory: &Path, canonical_name: &str) -> Vec<PathBuf> {
         let prefix = format!(".{canonical_name}.");
         fs::read_dir(directory)
@@ -5688,6 +5741,25 @@ mod tests {
             fs::read_to_string(&canonical).unwrap(),
             "first valid config"
         );
+        assert!(atomic_candidates(&directory, "xray-client.json").is_empty());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn first_xray_replacement_failure_keeps_canonical_absent() {
+        let directory = unique_temp_dir("tachyon-test-xray-commit-first-replace-failure");
+        fs::create_dir_all(&directory).unwrap();
+        let canonical = directory.join("xray-client.json");
+
+        commit_validated_xray_config_file(
+            &canonical,
+            "valid candidate",
+            |_| Ok(xray_validation(true)),
+            &FailingAtomicFileReplacer,
+        )
+        .expect_err("failed first replacement must not create canonical config");
+
+        assert!(!canonical.exists());
         assert!(atomic_candidates(&directory, "xray-client.json").is_empty());
         let _ = fs::remove_dir_all(directory);
     }
