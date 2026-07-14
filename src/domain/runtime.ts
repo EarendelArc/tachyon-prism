@@ -183,6 +183,11 @@ export interface ConfigValidationResult {
   error: string | null;
 }
 
+export interface CanonicalXrayConfigText {
+  exists: boolean;
+  contents: string | null;
+}
+
 export interface TachyonCorePreflightCheck {
   code: string;
   status: string;
@@ -461,6 +466,13 @@ export async function commitValidatedXrayConfig(contents: string): Promise<Confi
     };
   }
   return invokeDesktop<ConfigDraftPaths>("commit_validated_xray_config", { contents });
+}
+
+export async function readCanonicalXrayConfig(): Promise<CanonicalXrayConfigText> {
+  if (!isTauriRuntime()) {
+    return { exists: false, contents: null };
+  }
+  return invokeDesktop<CanonicalXrayConfigText>("read_canonical_xray_config");
 }
 
 export async function validateTachyonCoreConfig(

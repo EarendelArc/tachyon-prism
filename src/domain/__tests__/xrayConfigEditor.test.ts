@@ -75,6 +75,32 @@ describe("advanced Xray JSON UI wiring", () => {
     expect(appSource).toContain('const [canonicalXrayText, setCanonicalXrayText] = useState("")');
   });
 
+  it("hydrates the restart restore source from the controlled canonical command", () => {
+    const hydration = /void readCanonicalXrayConfig\(\)[\s\S]*?\n  }, \[\]\);/.exec(
+      appSource,
+    )?.[0];
+
+    expect(hydration).toContain("canonical.exists && canonical.contents !== null");
+    expect(hydration).toContain("setCanonicalXrayText(canonical.contents)");
+    expect(hydration).toContain("setCanonicalXrayLoaded(true)");
+    expect(hydration).toContain("setCanonicalXrayReadError(true)");
+    expect(hydration).toContain("setMessage(ui.canonicalXrayReadFailed)");
+    expect(hydration).not.toContain("error.message");
+    expect(hydration).not.toContain("setXrayAdvancedEditor");
+    expect(appSource).toContain("canonicalXrayLoaded &&");
+    expect(appSource).toContain("disabled={!canonicalXrayAvailable}");
+    expect(appSource).toContain('className="xray-canonical-error" role="alert"');
+  });
+
+  it("updates canonical text only after disk read or a validated commit", () => {
+    expect(appSource.match(/setCanonicalXrayText\(/g)).toHaveLength(2);
+    expect(appSource).toContain("const paths = await commitValidatedXrayConfig(drafts.xray)");
+    expect(appSource.indexOf("await commitValidatedXrayConfig(drafts.xray)")).toBeLessThan(
+      appSource.indexOf("setCanonicalXrayText(drafts.xray)"),
+    );
+    expect(appSource).toContain("xray: xrayAdvancedEditor.text");
+  });
+
   it("uses i18n fallbacks for every advanced editor error", () => {
     expect(appSource).toContain("ui.xrayJsonValidationFailed");
     expect(appSource).toContain("ui.advancedXrayImportFailed");
@@ -82,11 +108,19 @@ describe("advanced Xray JSON UI wiring", () => {
     expect(appSource).toContain("ui.xrayConfigDraftUnavailable");
     expect(appSource).toContain("ui.configSaveFailed");
     expect(appSource).toContain("ui.configValidationFailed");
+    expect(appSource).toContain("ui.canonicalXrayReadFailed");
     expect(appSource).toContain('advancedXrayImportFailed: "Xray JSON 导入失败"');
     expect(appSource).toContain('advancedXrayImportFailed: "Xray JSON import failed"');
     expect(appSource).toContain('advancedXrayExportFailed: "Xray JSON 导出失败"');
     expect(appSource).toContain('advancedXrayExportFailed: "Xray JSON export failed"');
     expect(appSource).toContain('configSaveFailed: "配置保存失败"');
     expect(appSource).toContain('configSaveFailed: "Config save failed"');
+    expect(appSource).toContain(
+      'canonicalXrayReadFailed: "无法读取上次有效 Xray 配置；当前草稿未更改"',
+    );
+    expect(appSource).toContain(
+      'canonicalXrayReadFailed: "Could not read the last valid Xray config; the current draft was not changed"',
+    );
+    expect(stylesSource).toContain("overflow-wrap: anywhere");
   });
 });

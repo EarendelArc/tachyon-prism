@@ -47,6 +47,7 @@ import {
   installManagedBinary,
   installWintunSidecar,
   preflightTachyonCore,
+  readCanonicalXrayConfig,
   saveRuntimeSettings,
   startTachyonCore,
   startXray,
@@ -399,6 +400,7 @@ const zh = {
   advancedXrayRestore: "恢复有效配置",
   advancedXrayRestoreGenerated: "恢复生成配置",
   advancedXrayValidated: "Xray 配置已验证并保存",
+  canonicalXrayReadFailed: "无法读取上次有效 Xray 配置；当前草稿未更改",
   configSaveFailed: "配置保存失败",
   configValidationFailed: "配置验证失败",
   coreConfigGenerationFailed: "Tachyon Core 配置生成失败",
@@ -714,6 +716,7 @@ const en: typeof zh = {
   advancedXrayRestore: "Restore Valid",
   advancedXrayRestoreGenerated: "Restore Generated",
   advancedXrayValidated: "Xray config validated and saved",
+  canonicalXrayReadFailed: "Could not read the last valid Xray config; the current draft was not changed",
   configSaveFailed: "Config save failed",
   configValidationFailed: "Config validation failed",
   coreConfigGenerationFailed: "Tachyon Core config generation failed",
@@ -1423,6 +1426,8 @@ export function App() {
   const [xrayAdvancedEditor, setXrayAdvancedEditor] =
     useState<XrayAdvancedEditorState>(loadXrayAdvancedEditor);
   const [canonicalXrayText, setCanonicalXrayText] = useState("");
+  const [canonicalXrayLoaded, setCanonicalXrayLoaded] = useState(false);
+  const [canonicalXrayReadError, setCanonicalXrayReadError] = useState(false);
   const [showUnavailableNodes, setShowUnavailableNodes] = useState(false);
   const [sortPolicyNodesByDelay, setSortPolicyNodesByDelay] = useState(true);
   const [expandedPolicyGroupId, setExpandedPolicyGroupId] = useState("node-selector");
@@ -2090,7 +2095,10 @@ export function App() {
     setXrayAdvancedEditor((current) => ({
       ...current,
       enabled,
-      text: enabled && !current.text ? canonicalXrayText || generatedDrafts.xray : current.text,
+      text:
+        enabled && canonicalXrayLoaded && !current.text
+          ? canonicalXrayText || generatedDrafts.xray
+          : current.text,
     }));
   }
 
@@ -2893,13 +2901,50 @@ export function App() {
   }, [xrayAdvancedEditor]);
 
   useEffect(() => {
-    if (xrayAdvancedEditor.enabled && !xrayAdvancedEditor.text && generatedDrafts.xray) {
+    let active = true;
+    void readCanonicalXrayConfig()
+      .then((canonical) => {
+        if (!active) {
+          return;
+        }
+        if (canonical.exists && canonical.contents !== null) {
+          setCanonicalXrayText(canonical.contents);
+        }
+        setCanonicalXrayReadError(false);
+        setCanonicalXrayLoaded(true);
+      })
+      .catch(() => {
+        if (!active) {
+          return;
+        }
+        setCanonicalXrayReadError(true);
+        setCanonicalXrayLoaded(true);
+        setMessage(ui.canonicalXrayReadFailed);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      canonicalXrayLoaded &&
+      xrayAdvancedEditor.enabled &&
+      !xrayAdvancedEditor.text &&
+      (canonicalXrayText || generatedDrafts.xray)
+    ) {
       setXrayAdvancedEditor((current) => ({
         ...current,
         text: canonicalXrayText || generatedDrafts.xray,
       }));
     }
-  }, [canonicalXrayText, generatedDrafts.xray, xrayAdvancedEditor.enabled, xrayAdvancedEditor.text]);
+  }, [
+    canonicalXrayLoaded,
+    canonicalXrayText,
+    generatedDrafts.xray,
+    xrayAdvancedEditor.enabled,
+    xrayAdvancedEditor.text,
+  ]);
 
   useEffect(() => {
     const onHashChange = () => setActiveView(viewFromHash(globalThis.location?.hash ?? ""));
@@ -3297,6 +3342,7 @@ export function App() {
             binarySourceInputs={binarySourceInputs}
             changeLanguage={changeLanguage}
             canonicalXrayAvailable={Boolean(canonicalXrayText)}
+            canonicalXrayReadError={canonicalXrayReadError}
             configPaths={configPaths}
             configuredStatusLabel={configuredStatusLabel}
             copyDraft={copyDraft}
@@ -4302,6 +4348,7 @@ function SettingsView({
   binarySourceInputs,
   changeLanguage,
   canonicalXrayAvailable,
+  canonicalXrayReadError,
   configPaths,
   configuredStatusLabel,
   copyDraft,
@@ -4371,6 +4418,7 @@ function SettingsView({
   binarySourceInputs: Record<ManagedBinaryKind, string>;
   changeLanguage: (language: Language) => void;
   canonicalXrayAvailable: boolean;
+  canonicalXrayReadError: boolean;
   configPaths: ConfigDraftPaths | null;
   configuredStatusLabel: (binary: ManagedBinaryInfo, ui: typeof zh) => string;
   copyDraft: (label: string, value: string) => Promise<void>;
@@ -5161,6 +5209,11 @@ function SettingsView({
                     </label>
                   </div>
                   <p className="field-hint">{ui.advancedXrayDescription}</p>
+                  {canonicalXrayReadError ? (
+                    <p className="xray-canonical-error" role="alert">
+                      {ui.canonicalXrayReadFailed}
+                    </p>
+                  ) : null}
                   {xrayAdvancedEditor.enabled ? (
                     <div className="xray-editor-actions row-actions">
                       <label className="file-action-button">

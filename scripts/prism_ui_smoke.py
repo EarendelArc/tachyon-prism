@@ -667,8 +667,8 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
     )
 
 
-def exercise_advanced_xray_editor(cdp: CDP) -> dict[str, Any]:
-    payload = json.dumps(
+def advanced_xray_payload() -> str:
+    return json.dumps(
         {
             "dns": {"servers": ["1.1.1.1"]},
             "inbounds": [
@@ -683,6 +683,140 @@ def exercise_advanced_xray_editor(cdp: CDP) -> dict[str, Any]:
         },
         separators=(",", ":"),
     )
+
+
+def assert_advanced_xray_layout(cdp: CDP, language: str) -> None:
+    expected = {
+        "zh-CN": {
+            "actions": {"导入 JSON", "导出 JSON", "恢复有效配置", "恢复生成配置"},
+            "heading": "高级 Xray JSON",
+            "toggle": "使用高级完整配置",
+        },
+        "en": {
+            "actions": {"Import JSON", "Export JSON", "Restore Valid", "Restore Generated"},
+            "heading": "Advanced Xray JSON",
+            "toggle": "Use advanced complete config",
+        },
+    }[language]
+    state = cdp.evaluate(
+        """
+        new Promise((resolve) => {
+          location.hash = 'settings';
+          setTimeout(() => {
+            document.querySelectorAll('.settings-sidebar button')[1]?.click();
+            setTimeout(() => {
+              const toggle = document.querySelector('[data-xray-advanced-toggle]');
+              if (!toggle) throw new Error('advanced Xray toggle missing');
+              if (!toggle.checked) toggle.click();
+              setTimeout(() => {
+                const editor = document.querySelector('[data-xray-advanced-editor="enabled"]');
+                const panel = editor?.closest('.settings-card');
+                const content = document.querySelector('.prism-content');
+                const actions = panel?.querySelector('.xray-editor-actions');
+                if (!editor || !panel || !content || !actions) {
+                  throw new Error('advanced Xray editor layout missing');
+                }
+                actions.scrollIntoView({ block: 'start' });
+                setTimeout(() => {
+                  const actionsRect = actions.getBoundingClientRect();
+                  const contentRect = content.getBoundingClientRect();
+                  const actionsReachable =
+                    actionsRect.top >= contentRect.top - 2 &&
+                    actionsRect.bottom <= contentRect.bottom + 2;
+                  editor.scrollIntoView({ block: 'end' });
+                  setTimeout(() => {
+                    const editorRect = editor.getBoundingClientRect();
+                    const finalContentRect = content.getBoundingClientRect();
+                    const controls = Array.from(
+                      actions.querySelectorAll('button, .file-action-button')
+                    );
+                    resolve({
+                      actionLabels: controls.map((item) => item.textContent.trim()),
+                      actionsReachable,
+                      editorReachable:
+                        editorRect.top >= finalContentRect.top - 2 &&
+                        editorRect.bottom <= finalContentRect.bottom + 2,
+                      editorLabel: editor.getAttribute('aria-label') ?? '',
+                      labelsFit: controls.every((item) => item.scrollWidth <= item.clientWidth + 1),
+                      noHorizontalOverflow:
+                        document.documentElement.scrollWidth <= window.innerWidth &&
+                        document.body.scrollWidth <= window.innerWidth &&
+                        panel.scrollWidth <= panel.clientWidth,
+                      toggleLabel: toggle.closest('label')?.textContent.trim() ?? '',
+                    });
+                  }, 220);
+                }, 220);
+              }, 300);
+            }, 350);
+          }, 350);
+        })
+        """,
+        await_promise=True,
+    )
+    if set(state["actionLabels"]) != expected["actions"]:
+        raise AssertionError(f"advanced Xray {language} action labels mismatch: {state}")
+    if state["editorLabel"] != expected["heading"] or state["toggleLabel"] != expected["toggle"]:
+        raise AssertionError(f"advanced Xray {language} entry labels mismatch: {state}")
+    required = ["actionsReachable", "editorReachable", "labelsFit", "noHorizontalOverflow"]
+    if not all(state.get(key) for key in required):
+        raise AssertionError(f"advanced Xray {language} fixed-window layout failed: {state}")
+    assert_no_horizontal_overflow(cdp)
+
+
+def assert_subscription_refresh_preserves_advanced_xray(cdp: CDP) -> None:
+    payload = advanced_xray_payload()
+    preserved = cdp.evaluate(
+        f"""
+        new Promise((resolve) => {{
+          location.hash = 'settings';
+          setTimeout(() => {{
+            document.querySelectorAll('.settings-sidebar button')[1]?.click();
+            setTimeout(() => {{
+              const toggle = document.querySelector('[data-xray-advanced-toggle]');
+              if (!toggle.checked) toggle.click();
+              setTimeout(() => {{
+                const editor = document.querySelector('[data-xray-advanced-editor="enabled"]');
+                const descriptor = Object.getOwnPropertyDescriptor(
+                  Object.getPrototypeOf(editor),
+                  'value'
+                );
+                descriptor.set.call(editor, {json.dumps(payload)});
+                editor.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                setTimeout(() => {{
+                  location.hash = 'subscriptions';
+                  setTimeout(() => {{
+                    const refresh = Array.from(document.querySelectorAll('button')).find(
+                      (button) => button.textContent.trim() === 'Update All'
+                    );
+                    if (!refresh) throw new Error('Update All button missing');
+                    refresh.click();
+                    setTimeout(() => {{
+                      location.hash = 'settings';
+                      setTimeout(() => {{
+                        document.querySelectorAll('.settings-sidebar button')[1]?.click();
+                        setTimeout(() => {{
+                          const current = document.querySelector(
+                            '[data-xray-advanced-editor="enabled"]'
+                          );
+                          resolve(current?.value === {json.dumps(payload)});
+                        }}, 350);
+                      }}, 350);
+                    }}, 800);
+                  }}, 350);
+                }}, 250);
+              }}, 250);
+            }}, 350);
+          }}, 350);
+        }})
+        """,
+        await_promise=True,
+    )
+    if not preserved:
+        raise AssertionError("subscription refresh replaced the advanced Xray JSON source")
+
+
+def exercise_advanced_xray_editor(cdp: CDP) -> dict[str, Any]:
+    payload = advanced_xray_payload()
     return cdp.evaluate(
         f"""
         new Promise((resolve) => {{
@@ -1205,6 +1339,17 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
             await_promise=True,
         )
         cdp.screenshot(output_dir / "settings-core-desktop-zh-CN.png")
+        assert_advanced_xray_layout(cdp, "zh-CN")
+        cdp.evaluate(
+            """
+            new Promise((resolve) => {
+              document.querySelector('.xray-config-editor')?.scrollIntoView({ block: 'start' });
+              setTimeout(resolve, 250);
+            })
+            """,
+            await_promise=True,
+        )
+        cdp.screenshot(output_dir / "settings-xray-json-editor-800x540-zh-CN.png")
         text = select_settings_section(cdp, 0)
         text = switch_to_english(cdp)
         assert_contains(text, "Personalization", "Theme", "Core")
@@ -1252,6 +1397,8 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         )
         cdp.screenshot(output_dir / "settings-binaries-800x540-en.png")
         assert_local_proxy_probe_panel(cdp)
+        assert_advanced_xray_layout(cdp, "en")
+        assert_subscription_refresh_preserves_advanced_xray(cdp)
         advanced_xray = exercise_advanced_xray_editor(cdp)
         required_states = [
             "exportPresent",

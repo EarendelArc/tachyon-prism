@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   buildReleaseDiagnosticsDisplay,
   commitValidatedXrayConfig,
+  readCanonicalXrayConfig,
   tachyonCorePreflightFallbackMessage,
   tachyonCorePreflightReadinessMessage,
   tachyonCorePreflightStartBlockReason,
@@ -60,6 +61,39 @@ describe("commitValidatedXrayConfig", () => {
       xrayConfigPath: "Preview mode / xray-client.json",
     });
 
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("readCanonicalXrayConfig", () => {
+  it("reads the controlled canonical Xray file with the Rust command", async () => {
+    root.isTauri = true;
+    const canonical = {
+      exists: true,
+      contents: '{"unknownFutureField":{"preserved":true}}',
+    };
+    invokeMock.mockResolvedValueOnce(canonical);
+
+    await expect(readCanonicalXrayConfig()).resolves.toEqual(canonical);
+    expect(invokeMock).toHaveBeenCalledWith("read_canonical_xray_config", undefined);
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports an absent canonical without inventing fallback contents", async () => {
+    root.isTauri = true;
+    invokeMock.mockResolvedValueOnce({ exists: false, contents: null });
+
+    await expect(readCanonicalXrayConfig()).resolves.toEqual({
+      exists: false,
+      contents: null,
+    });
+  });
+
+  it("keeps preview mode absent and side-effect free", async () => {
+    await expect(readCanonicalXrayConfig()).resolves.toEqual({
+      exists: false,
+      contents: null,
+    });
     expect(invokeMock).not.toHaveBeenCalled();
   });
 });
