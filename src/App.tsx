@@ -3,7 +3,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
-  commitValidatedXrayConfig,
   parseXrayConfigText,
   stringifyDraft,
   type XrayRoutingMode,
@@ -40,6 +39,7 @@ import {
   getRuntimeStatus,
   getSystemProxyStatus,
   getXrayTrafficStats,
+  commitValidatedXrayConfig,
   disableSystemProxy,
   enableSystemProxy,
   installLatestTachyonCore,
@@ -59,7 +59,6 @@ import {
   testXrayLocalProxies,
   testTcpLatency,
   validateTachyonCoreConfig,
-  validateXrayConfig,
   type ConfigValidationResult,
   type CoreReleaseDiagnostics,
   type ManagedBinaryInfo,
@@ -182,7 +181,6 @@ interface XrayProbeStatus {
 
 interface XrayAdvancedEditorState {
   enabled: boolean;
-  lastValidText: string;
   text: string;
 }
 
@@ -393,12 +391,22 @@ const zh = {
   advancedXrayDescription: "直接编辑完整配置；未知字段与未来协议保持原样。保存和启动前会运行 Xray 配置测试。",
   advancedXrayEnable: "使用高级完整配置",
   advancedXrayExport: "导出 JSON",
+  advancedXrayExportFailed: "Xray JSON 导出失败",
   advancedXrayImport: "导入 JSON",
+  advancedXrayImportFailed: "Xray JSON 导入失败",
   advancedXrayImported: "完整 Xray JSON 已导入",
   advancedXrayRestored: "已恢复上次有效 Xray 配置",
   advancedXrayRestore: "恢复有效配置",
   advancedXrayRestoreGenerated: "恢复生成配置",
   advancedXrayValidated: "Xray 配置已验证并保存",
+  configSaveFailed: "配置保存失败",
+  configValidationFailed: "配置验证失败",
+  coreConfigGenerationFailed: "Tachyon Core 配置生成失败",
+  coreConfigDraftUnavailable: "没有可用的 Tachyon Core 配置草稿",
+  xrayConfigDraftUnavailable: "没有可用的 Xray 配置草稿",
+  xrayConfigGenerationFailed: "Xray 配置生成失败",
+  xrayJsonValidationFailed: "Xray JSON 验证失败",
+  xraySelectNodeRequired: "生成 Xray 配置前请选择订阅节点",
   allowPluginNodeAccess: "允许插件读取节点",
   autoUpdatePlugins: "自动更新插件",
   behavior: "行为",
@@ -698,12 +706,22 @@ const en: typeof zh = {
   advancedXrayDescription: "Edit the complete config directly. Unknown fields and future protocols remain untouched. Xray config-test runs before save and start.",
   advancedXrayEnable: "Use advanced complete config",
   advancedXrayExport: "Export JSON",
+  advancedXrayExportFailed: "Xray JSON export failed",
   advancedXrayImport: "Import JSON",
+  advancedXrayImportFailed: "Xray JSON import failed",
   advancedXrayImported: "Complete Xray JSON imported",
   advancedXrayRestored: "Restored the last valid Xray config",
   advancedXrayRestore: "Restore Valid",
   advancedXrayRestoreGenerated: "Restore Generated",
   advancedXrayValidated: "Xray config validated and saved",
+  configSaveFailed: "Config save failed",
+  configValidationFailed: "Config validation failed",
+  coreConfigGenerationFailed: "Tachyon Core config generation failed",
+  coreConfigDraftUnavailable: "No Tachyon Core config draft is available",
+  xrayConfigDraftUnavailable: "No Xray config draft is available",
+  xrayConfigGenerationFailed: "Xray config generation failed",
+  xrayJsonValidationFailed: "Xray JSON validation failed",
+  xraySelectNodeRequired: "Select a subscription node before generating Xray config",
   allowPluginNodeAccess: "Allow plugins to read nodes",
   autoUpdatePlugins: "Auto-update plugins",
   behavior: "Behavior",
@@ -1043,16 +1061,15 @@ function loadXrayAdvancedEditor(): XrayAdvancedEditorState {
   try {
     const raw = globalThis.localStorage?.getItem(xrayAdvancedEditorStorageKey);
     if (!raw) {
-      return { enabled: false, lastValidText: "", text: "" };
+      return { enabled: false, text: "" };
     }
     const value = JSON.parse(raw) as Partial<XrayAdvancedEditorState>;
     return {
       enabled: value.enabled === true,
-      lastValidText: typeof value.lastValidText === "string" ? value.lastValidText : "",
       text: typeof value.text === "string" ? value.text : "",
     };
   } catch {
-    return { enabled: false, lastValidText: "", text: "" };
+    return { enabled: false, text: "" };
   }
 }
 
@@ -1256,6 +1273,7 @@ function draftText(
   launcherSettings: LauncherSettings,
   routingMode: XrayRoutingMode,
   runtimeSettings: RuntimeSettings,
+  ui: typeof zh,
 ): { core: string; coreError: string; error: string; xray: string; xrayError: string } {
   let core = "";
   let coreError = "";
@@ -1290,12 +1308,12 @@ function draftText(
       }),
     );
   } catch (error) {
-    coreError = error instanceof Error ? error.message : "Tachyon Core config generation failed";
+    coreError = error instanceof Error ? error.message : ui.coreConfigGenerationFailed;
   }
 
   try {
     if (!activeNode) {
-      throw new Error("Select an Xray subscription node before generating Xray config");
+      throw new Error(ui.xraySelectNodeRequired);
     }
     xray = stringifyDraft(
       buildXrayClientConfigDraft(activeNode, {
@@ -1310,7 +1328,7 @@ function draftText(
       }),
     );
   } catch (error) {
-    xrayError = error instanceof Error ? error.message : "Xray config generation failed";
+    xrayError = error instanceof Error ? error.message : ui.xrayConfigGenerationFailed;
   }
 
   return {
@@ -1404,6 +1422,7 @@ export function App() {
   const [routingMode, setRoutingMode] = useState<XrayRoutingMode>(loadRoutingMode);
   const [xrayAdvancedEditor, setXrayAdvancedEditor] =
     useState<XrayAdvancedEditorState>(loadXrayAdvancedEditor);
+  const [canonicalXrayText, setCanonicalXrayText] = useState("");
   const [showUnavailableNodes, setShowUnavailableNodes] = useState(false);
   const [sortPolicyNodesByDelay, setSortPolicyNodesByDelay] = useState(true);
   const [expandedPolicyGroupId, setExpandedPolicyGroupId] = useState("node-selector");
@@ -1473,8 +1492,8 @@ export function App() {
     [currentTachyonServer, runtimeInputs],
   );
   const generatedDrafts = useMemo(
-    () => draftText(activeNode, profiles, launcherSettings, routingMode, effectiveRuntimeInputs),
-    [activeNode, effectiveRuntimeInputs, launcherSettings, profiles, routingMode],
+    () => draftText(activeNode, profiles, launcherSettings, routingMode, effectiveRuntimeInputs, ui),
+    [activeNode, effectiveRuntimeInputs, launcherSettings, language, profiles, routingMode],
   );
   const drafts = useMemo(() => {
     if (!xrayAdvancedEditor.enabled) {
@@ -1484,7 +1503,7 @@ export function App() {
     try {
       parseXrayConfigText(xrayAdvancedEditor.text, language);
     } catch (error) {
-      xrayError = error instanceof Error ? error.message : "Xray JSON validation failed";
+      xrayError = error instanceof Error ? error.message : ui.xrayJsonValidationFailed;
     }
     return {
       ...generatedDrafts,
@@ -2071,7 +2090,7 @@ export function App() {
     setXrayAdvancedEditor((current) => ({
       ...current,
       enabled,
-      text: enabled && !current.text ? current.lastValidText || generatedDrafts.xray : current.text,
+      text: enabled && !current.text ? canonicalXrayText || generatedDrafts.xray : current.text,
     }));
   }
 
@@ -2089,7 +2108,7 @@ export function App() {
       setXrayAdvancedEditor((current) => ({ ...current, enabled: true, text }));
       setMessage(ui.advancedXrayImported);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Xray JSON import failed");
+      setMessage(error instanceof Error ? error.message : ui.advancedXrayImportFailed);
     }
   }
 
@@ -2099,12 +2118,12 @@ export function App() {
       downloadTextFile("xray-client.json", drafts.xray, "application/json;charset=utf-8");
       setMessage(ui.advancedXrayExport);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Xray JSON export failed");
+      setMessage(error instanceof Error ? error.message : ui.advancedXrayExportFailed);
     }
   }
 
   function restoreAdvancedXray(useGenerated: boolean) {
-    const text = useGenerated ? generatedDrafts.xray : xrayAdvancedEditor.lastValidText;
+    const text = useGenerated ? generatedDrafts.xray : canonicalXrayText;
     if (!text) {
       return;
     }
@@ -2280,40 +2299,35 @@ export function App() {
     }
   }
 
-  async function commitXrayDraft(settings: RuntimeSettings): Promise<ConfigDraftPaths> {
+  async function commitXrayDraft(): Promise<ConfigDraftPaths> {
     if (!drafts.xray) {
-      throw new Error(drafts.xrayError || "No Xray config draft available");
+      throw new Error(drafts.xrayError || ui.xrayConfigDraftUnavailable);
     }
-    const committed = await commitValidatedXrayConfig<ConfigDraftPaths>({
-      candidateText: drafts.xray,
-      language,
-      previousValidText: xrayAdvancedEditor.lastValidText,
-      validate: async (paths) => {
-        const result = await validateXrayConfig(settings.xrayBinaryPath, paths.xrayConfigPath);
-        setValidationResults((current) => ({ ...current, xray: result }));
-        return result;
-      },
-      write: (text) => saveConfigDraft("xray", text),
-    });
-    setConfigPaths(committed.target);
-    setXrayAdvancedEditor((current) => ({
+    parseXrayConfigText(drafts.xray, language);
+    const paths = await commitValidatedXrayConfig(drafts.xray);
+    setCanonicalXrayText(drafts.xray);
+    setConfigPaths(paths);
+    setValidationResults((current) => ({
       ...current,
-      lastValidText: committed.validText,
+      xray: {
+        command: "commit_validated_xray_config",
+        details: ui.advancedXrayValidated,
+        error: null,
+        ok: true,
+        target: paths.xrayConfigPath,
+      },
     }));
-    return committed.target;
+    return paths;
   }
 
-  async function writeDrafts(
-    kind: ManagedBinaryKind | "all" = "all",
-    settings: RuntimeSettings = effectiveRuntimeInputs,
-  ): Promise<ConfigDraftPaths> {
+  async function writeDrafts(kind: ManagedBinaryKind | "all" = "all"): Promise<ConfigDraftPaths> {
     if (kind === "xray") {
-      return commitXrayDraft(settings);
+      return commitXrayDraft();
     }
 
     if (kind === "tachyonCore") {
       if (!drafts.core) {
-        throw new Error(drafts.coreError || "No Tachyon Core config draft available");
+        throw new Error(drafts.coreError || ui.coreConfigDraftUnavailable);
       }
       const paths = await saveConfigDraft("core", drafts.core);
       setConfigPaths(paths);
@@ -2324,7 +2338,7 @@ export function App() {
       throw new Error(drafts.error || ui.noConfigDraftAvailable);
     }
     if (!drafts.core) {
-      return commitXrayDraft(settings);
+      return commitXrayDraft();
     }
     if (!drafts.xray) {
       const paths = await saveConfigDraft("core", drafts.core);
@@ -2332,39 +2346,38 @@ export function App() {
       return paths;
     }
     await saveConfigDraft("core", drafts.core);
-    return commitXrayDraft(settings);
+    return commitXrayDraft();
   }
 
   async function saveDrafts() {
     try {
-      await writeDrafts("all", effectiveRuntimeInputs);
+      const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
+      setRuntimeInputs(settings);
+      await writeDrafts("all");
       setMessage(drafts.xray ? ui.advancedXrayValidated : ui.configFilesSaved);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Save failed");
+      setMessage(error instanceof Error ? error.message : ui.configSaveFailed);
     }
   }
 
-  async function runConfigValidation(
-    kind: ManagedBinaryKind,
+  async function runTachyonConfigValidation(
     paths: ConfigDraftPaths,
     settings: RuntimeSettings,
     announce = true,
   ): Promise<ConfigValidationResult> {
-    const result =
-      kind === "xray"
-        ? await validateXrayConfig(settings.xrayBinaryPath, paths.xrayConfigPath)
-        : await validateTachyonCoreConfig(settings.tachyonCoreBinaryPath, paths.coreConfigPath);
-    setValidationResults((current) => ({ ...current, [kind]: result }));
+    const result = await validateTachyonCoreConfig(
+      settings.tachyonCoreBinaryPath,
+      paths.coreConfigPath,
+    );
+    setValidationResults((current) => ({ ...current, tachyonCore: result }));
     if (!result.ok) {
-      throw new Error(result.error || `${managedBinaryDisplayName(kind)} config validation failed`);
+      throw new Error(
+        result.error || `${managedBinaryDisplayName("tachyonCore")}: ${ui.configValidationFailed}`,
+      );
     }
     if (announce) {
-      if (kind === "tachyonCore") {
-        const preflight = await runTachyonCorePreflight(paths, settings);
-        setMessage(tachyonCorePreflightReadinessMessage(preflight));
-      } else {
-        setMessage(`${managedBinaryDisplayName(kind)} config validated`);
-      }
+      const preflight = await runTachyonCorePreflight(paths, settings);
+      setMessage(tachyonCorePreflightReadinessMessage(preflight));
     }
     return result;
   }
@@ -2394,18 +2407,18 @@ export function App() {
     try {
       const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
-      const paths = await writeDrafts("all", settings);
+      const paths = await writeDrafts("all");
       const results: ConfigValidationResult[] = [];
       let preflightFallback: string | null = null;
       if (drafts.core) {
-        results.push(await runConfigValidation("tachyonCore", paths, settings, false));
+        results.push(await runTachyonConfigValidation(paths, settings, false));
         const preflight = await runTachyonCorePreflight(paths, settings);
         preflightFallback = tachyonCorePreflightReadinessMessage(preflight);
       }
       const ok = Boolean(drafts.xray || results.length > 0) && results.every((result) => result.ok);
       setMessage(preflightFallback || (ok ? ui.configsValidated : ui.configsValidationErrors));
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Config validation failed");
+      setMessage(error instanceof Error ? error.message : ui.configValidationFailed);
     }
   }
 
@@ -2693,9 +2706,9 @@ export function App() {
     try {
       const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
-      const paths = await writeDrafts(kind, settings);
+      const paths = await writeDrafts(kind);
       if (kind === "tachyonCore") {
-        await runConfigValidation(kind, paths, settings, false);
+        await runTachyonConfigValidation(paths, settings, false);
         const preflight = await assertTachyonCoreStartable(paths, settings);
         setMessage(tachyonCorePreflightReadinessMessage(preflight));
       }
@@ -2730,7 +2743,7 @@ export function App() {
       setMessage(`${managedBinaryDisplayName(kind)} started`);
       return { error: null, ok: true };
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Start failed";
+      const message = error instanceof Error ? error.message : ui.runtimeFailed;
       setMessage(message);
       return { error: message, ok: false };
     }
@@ -2782,8 +2795,8 @@ export function App() {
     try {
       const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
-      const paths = await writeDrafts("all", settings);
-      await runConfigValidation("tachyonCore", paths, settings, false);
+      const paths = await writeDrafts("all");
+      await runTachyonConfigValidation(paths, settings, false);
       const preflight = await assertTachyonCoreStartable(paths, settings);
       setMessage(tachyonCorePreflightReadinessMessage(preflight));
       const result = await invokeDesktop<StartAllResult>("start_all", {
@@ -2883,10 +2896,10 @@ export function App() {
     if (xrayAdvancedEditor.enabled && !xrayAdvancedEditor.text && generatedDrafts.xray) {
       setXrayAdvancedEditor((current) => ({
         ...current,
-        text: current.lastValidText || generatedDrafts.xray,
+        text: canonicalXrayText || generatedDrafts.xray,
       }));
     }
-  }, [generatedDrafts.xray, xrayAdvancedEditor.enabled, xrayAdvancedEditor.text]);
+  }, [canonicalXrayText, generatedDrafts.xray, xrayAdvancedEditor.enabled, xrayAdvancedEditor.text]);
 
   useEffect(() => {
     const onHashChange = () => setActiveView(viewFromHash(globalThis.location?.hash ?? ""));
@@ -3283,6 +3296,7 @@ export function App() {
             binaryReleases={binaryReleases}
             binarySourceInputs={binarySourceInputs}
             changeLanguage={changeLanguage}
+            canonicalXrayAvailable={Boolean(canonicalXrayText)}
             configPaths={configPaths}
             configuredStatusLabel={configuredStatusLabel}
             copyDraft={copyDraft}
@@ -4287,6 +4301,7 @@ function SettingsView({
   binaryReleases,
   binarySourceInputs,
   changeLanguage,
+  canonicalXrayAvailable,
   configPaths,
   configuredStatusLabel,
   copyDraft,
@@ -4355,6 +4370,7 @@ function SettingsView({
   binaryReleases: Partial<Record<ManagedBinaryKind, RuntimeReleaseInfo>>;
   binarySourceInputs: Record<ManagedBinaryKind, string>;
   changeLanguage: (language: Language) => void;
+  canonicalXrayAvailable: boolean;
   configPaths: ConfigDraftPaths | null;
   configuredStatusLabel: (binary: ManagedBinaryInfo, ui: typeof zh) => string;
   copyDraft: (label: string, value: string) => Promise<void>;
@@ -5161,7 +5177,7 @@ function SettingsView({
                       </label>
                       <button type="button" onClick={onExportAdvancedXray}>{ui.advancedXrayExport}</button>
                       <button
-                        disabled={!xrayAdvancedEditor.lastValidText}
+                        disabled={!canonicalXrayAvailable}
                         type="button"
                         onClick={() => onRestoreAdvancedXray(false)}
                       >

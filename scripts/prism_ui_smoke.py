@@ -704,6 +704,10 @@ def exercise_advanced_xray_editor(cdp: CDP) -> dict[str, Any]:
                   descriptor.set.call(editor, value);
                   editor.dispatchEvent(new Event('input', {{ bubbles: true }}));
                 }};
+                const restoreBeforeSave = Array.from(
+                  editor.closest('.settings-card').querySelectorAll('.xray-editor-actions button')
+                ).find((button) => button.textContent.includes('Restore Valid'));
+                const restoreInitiallyDisabled = Boolean(restoreBeforeSave?.disabled);
                 setEditor({json.dumps(payload)});
                 setTimeout(() => {{
                   const panel = editor.closest('.settings-card');
@@ -736,12 +740,23 @@ def exercise_advanced_xray_editor(cdp: CDP) -> dict[str, Any]:
                           setTimeout(() => {{
                             let generatedConfig = {{}};
                             try {{ generatedConfig = JSON.parse(editor.value); }} catch {{}}
+                            const actionLabels = Array.from(
+                              panel.querySelectorAll('.xray-editor-actions button, .file-action-button')
+                            ).map((item) => item.textContent.trim());
+                            const noHorizontalOverflow =
+                              document.documentElement.scrollWidth <= window.innerWidth &&
+                              document.body.scrollWidth <= window.innerWidth &&
+                              panel.scrollWidth <= panel.clientWidth;
                             resolve({{
+                              actionLabels,
                               exportPresent: Boolean(exportButton),
                               generatedRestored: Boolean(generatedConfig.routing),
                               importPresent: Boolean(importInput),
+                              noHorizontalOverflow,
+                              restoreInitiallyDisabled,
                               restoredExact,
                               syntaxVisible,
+                              toggleLabel: toggle.closest('label')?.textContent.trim() ?? '',
                               validSaved,
                             }});
                           }}, 300);
@@ -1238,8 +1253,24 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         cdp.screenshot(output_dir / "settings-binaries-800x540-en.png")
         assert_local_proxy_probe_panel(cdp)
         advanced_xray = exercise_advanced_xray_editor(cdp)
-        if not all(advanced_xray.values()):
+        required_states = [
+            "exportPresent",
+            "generatedRestored",
+            "importPresent",
+            "noHorizontalOverflow",
+            "restoreInitiallyDisabled",
+            "restoredExact",
+            "syntaxVisible",
+            "validSaved",
+        ]
+        if not all(advanced_xray.get(key) for key in required_states):
             raise AssertionError(f"advanced Xray JSON editor workflow failed: {advanced_xray}")
+        expected_labels = {"Import JSON", "Export JSON", "Restore Valid", "Restore Generated"}
+        if set(advanced_xray.get("actionLabels", [])) != expected_labels:
+            raise AssertionError(f"advanced Xray action labels mismatch: {advanced_xray}")
+        if advanced_xray.get("toggleLabel") != "Use advanced complete config":
+            raise AssertionError(f"advanced Xray toggle label mismatch: {advanced_xray}")
+        assert_no_horizontal_overflow(cdp)
         cdp.evaluate(
             """
             new Promise((resolve) => {

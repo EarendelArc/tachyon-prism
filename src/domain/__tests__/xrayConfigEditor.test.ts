@@ -29,7 +29,7 @@ describe("advanced Xray JSON UI wiring", () => {
     expect(appSource).toContain("Unknown fields and future protocols remain untouched");
   });
 
-  it("uses the validated rollback transaction for every Xray write", () => {
+  it("uses the Rust transaction as the only Xray commit path", () => {
     const commit = /async function commitXrayDraft[\s\S]*?\n  async function writeDrafts/.exec(
       appSource,
     )?.[0];
@@ -37,15 +37,20 @@ describe("advanced Xray JSON UI wiring", () => {
       appSource,
     )?.[0];
 
-    expect(commit).toContain("commitValidatedXrayConfig<ConfigDraftPaths>");
-    expect(commit).toContain("previousValidText: xrayAdvancedEditor.lastValidText");
-    expect(commit).toContain("validateXrayConfig(settings.xrayBinaryPath, paths.xrayConfigPath)");
-    expect(commit).toContain('saveConfigDraft("xray", text)');
-    expect(write).toContain("return commitXrayDraft(settings)");
-    expect(write).not.toContain('saveConfigDraft("xray", drafts.xray)');
+    expect(commit).toContain("parseXrayConfigText(drafts.xray, language)");
+    expect(commit).toContain("const paths = await commitValidatedXrayConfig(drafts.xray)");
+    expect(commit).toContain("setCanonicalXrayText(drafts.xray)");
+    expect(commit).toContain("setConfigPaths(paths)");
+    expect(commit).not.toContain('saveConfigDraft("xray"');
+    expect(commit).not.toContain("validateXrayConfig");
+    expect(commit?.indexOf("await commitValidatedXrayConfig")).toBeLessThan(
+      commit?.indexOf("setCanonicalXrayText") ?? -1,
+    );
+    expect(write).toContain("return commitXrayDraft()");
+    expect(appSource).not.toContain('saveConfigDraft("xray"');
   });
 
-  it("validates through the same write path before Xray start", () => {
+  it("commits through the same Rust path before Xray start", () => {
     const start = /async function startRuntime[\s\S]*?\n  async function stopRuntime/.exec(
       appSource,
     )?.[0];
@@ -53,9 +58,35 @@ describe("advanced Xray JSON UI wiring", () => {
       appSource,
     )?.[0];
 
-    expect(start).toContain("const paths = await writeDrafts(kind, settings)");
+    expect(start).toContain("const paths = await writeDrafts(kind)");
     expect(start).toContain('if (kind === "tachyonCore")');
-    expect(startAll).toContain('const paths = await writeDrafts("all", settings)');
-    expect(startAll).not.toContain('runConfigValidation("xray"');
+    expect(startAll).toContain('const paths = await writeDrafts("all")');
+    expect(startAll).not.toContain("validateXrayConfig");
+  });
+
+  it("keeps localStorage as draft-only state", () => {
+    const state = /interface XrayAdvancedEditorState[\s\S]*?\n}/.exec(appSource)?.[0];
+    const loader = /function loadXrayAdvancedEditor[\s\S]*?\n}/.exec(appSource)?.[0];
+
+    expect(state).toContain("enabled: boolean");
+    expect(state).toContain("text: string");
+    expect(state).not.toContain("lastValid");
+    expect(loader).not.toContain("lastValid");
+    expect(appSource).toContain('const [canonicalXrayText, setCanonicalXrayText] = useState("")');
+  });
+
+  it("uses i18n fallbacks for every advanced editor error", () => {
+    expect(appSource).toContain("ui.xrayJsonValidationFailed");
+    expect(appSource).toContain("ui.advancedXrayImportFailed");
+    expect(appSource).toContain("ui.advancedXrayExportFailed");
+    expect(appSource).toContain("ui.xrayConfigDraftUnavailable");
+    expect(appSource).toContain("ui.configSaveFailed");
+    expect(appSource).toContain("ui.configValidationFailed");
+    expect(appSource).toContain('advancedXrayImportFailed: "Xray JSON 导入失败"');
+    expect(appSource).toContain('advancedXrayImportFailed: "Xray JSON import failed"');
+    expect(appSource).toContain('advancedXrayExportFailed: "Xray JSON 导出失败"');
+    expect(appSource).toContain('advancedXrayExportFailed: "Xray JSON export failed"');
+    expect(appSource).toContain('configSaveFailed: "配置保存失败"');
+    expect(appSource).toContain('configSaveFailed: "Config save failed"');
   });
 });

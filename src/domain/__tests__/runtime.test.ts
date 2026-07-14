@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
 import {
   buildReleaseDiagnosticsDisplay,
+  commitValidatedXrayConfig,
   tachyonCorePreflightFallbackMessage,
   tachyonCorePreflightReadinessMessage,
   tachyonCorePreflightStartBlockReason,
@@ -14,6 +16,53 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
   isTauri: vi.fn(() => false),
 }));
+
+const root = globalThis as typeof globalThis & { isTauri?: boolean };
+const invokeMock = vi.mocked(invoke);
+
+afterEach(() => {
+  delete root.isTauri;
+  invokeMock.mockReset();
+});
+
+describe("commitValidatedXrayConfig", () => {
+  it("uses the Rust transaction with contents only on first upgrade", async () => {
+    root.isTauri = true;
+    const paths = {
+      configDir: "C:\\Prism\\config",
+      coreConfigPath: "C:\\Prism\\config\\client.json",
+      xrayConfigPath: "C:\\Prism\\config\\xray-client.json",
+    };
+    invokeMock.mockResolvedValueOnce(paths);
+    const contents = '{"inbounds":[],"outbounds":[]}';
+
+    await expect(commitValidatedXrayConfig(contents)).resolves.toEqual(paths);
+
+    expect(invokeMock).toHaveBeenCalledWith("commit_validated_xray_config", { contents });
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fall back to a write command after semantic validation fails", async () => {
+    root.isTauri = true;
+    invokeMock.mockRejectedValueOnce(new Error("Xray semantic validation failed"));
+
+    await expect(commitValidatedXrayConfig('{"outbounds":[]}')).rejects.toThrow(
+      "Xray semantic validation failed",
+    );
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual([
+      "commit_validated_xray_config",
+    ]);
+  });
+
+  it("keeps preview mode side-effect free", async () => {
+    await expect(commitValidatedXrayConfig('{"outbounds":[]}')).resolves.toMatchObject({
+      xrayConfigPath: "Preview mode / xray-client.json",
+    });
+
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+});
 
 describe("tachyonIpcBaseUrl", () => {
   it("uses the configured Tachyon IPC listen address and port", () => {

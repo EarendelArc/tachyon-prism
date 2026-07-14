@@ -1,4 +1,5 @@
 import { invokeDesktop, isTauriRuntime } from "./tauri";
+import type { ConfigDraftPaths } from "./desktopConfig";
 
 export type ProcessState = "failed" | "running" | "stopped";
 
@@ -449,6 +450,17 @@ export async function validateXrayConfig(
     binaryPath,
     configPath,
   });
+}
+
+export async function commitValidatedXrayConfig(contents: string): Promise<ConfigDraftPaths> {
+  if (!isTauriRuntime()) {
+    return {
+      configDir: "Preview mode",
+      coreConfigPath: "Preview mode / client.json",
+      xrayConfigPath: "Preview mode / xray-client.json",
+    };
+  }
+  return invokeDesktop<ConfigDraftPaths>("commit_validated_xray_config", { contents });
 }
 
 export async function validateTachyonCoreConfig(

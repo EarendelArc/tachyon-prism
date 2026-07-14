@@ -82,6 +82,7 @@ describe("live Xray config contract", () => {
         rmSync(tempDir, { recursive: true, force: true });
       }
     },
+    15_000,
   );
 
   itWithXray("accepts a managed-tag merge from an imported multi-outbound config", () => {

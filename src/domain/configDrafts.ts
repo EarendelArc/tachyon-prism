@@ -41,25 +41,6 @@ export class XrayConfigTextError extends Error {
   }
 }
 
-export interface XrayConfigValidationResult {
-  error?: string | null;
-  ok: boolean;
-}
-
-export interface CommitXrayConfigOptions<TTarget> {
-  candidateText: string;
-  language?: XrayConfigLanguage;
-  previousValidText?: string;
-  validate: (target: TTarget) => Promise<XrayConfigValidationResult>;
-  write: (text: string) => Promise<TTarget>;
-}
-
-export interface CommittedXrayConfig<TTarget> {
-  target: TTarget;
-  validText: string;
-  validation: XrayConfigValidationResult;
-}
-
 const xrayObjectFields = [
   "api",
   "burstObservatory",
@@ -130,38 +111,6 @@ export function parseXrayConfigText(
 
   validateManagedXrayTags(value, language);
   return value;
-}
-
-export async function commitValidatedXrayConfig<TTarget>(
-  options: CommitXrayConfigOptions<TTarget>,
-): Promise<CommittedXrayConfig<TTarget>> {
-  const language = options.language ?? "en";
-  parseXrayConfigText(options.candidateText, language);
-
-  let target: TTarget | undefined;
-  try {
-    target = await options.write(options.candidateText);
-    const validation = await options.validate(target);
-    if (!validation.ok) {
-      throw new Error(xrayConfigTestFailure(language, validation.error));
-    }
-    return {
-      target,
-      validText: options.candidateText,
-      validation,
-    };
-  } catch (error) {
-    if (target !== undefined && options.previousValidText) {
-      try {
-        await options.write(options.previousValidText);
-      } catch (rollbackError) {
-        throw new Error(
-          `${errorMessage(error)}; ${xrayRollbackFailure(language)}: ${errorMessage(rollbackError)}`,
-        );
-      }
-    }
-    throw error;
-  }
 }
 
 export interface CoreClientDraftOptions {
@@ -366,12 +315,16 @@ function validateManagedXrayTags(
   }
 }
 
-function managedTagMatches(value: string, managedTag: string): boolean {
+export function managedTagMatches(value: string, managedTag: string): boolean {
   if (value === managedTag) {
     return true;
   }
-  const suffix = value.slice(managedTag.length);
-  return suffix.startsWith("-") && /^-[2-9][0-9]*$/.test(suffix);
+  const prefix = `${managedTag}-`;
+  if (!value.startsWith(prefix)) {
+    return false;
+  }
+  const suffix = value.slice(prefix.length);
+  return /^[0-9]+$/.test(suffix) && Number(suffix) >= 2 && !suffix.startsWith("0");
 }
 
 function jsonErrorPosition(error: unknown): number | undefined {
@@ -420,17 +373,6 @@ function xrayTextError(
     },
   };
   return new XrayConfigTextError(code, messages[code][language]);
-}
-
-function xrayConfigTestFailure(language: XrayConfigLanguage, detail?: string | null): string {
-  const prefix = language === "zh-CN" ? "Xray 配置测试失败" : "Xray config test failed";
-  return detail ? `${prefix}: ${detail}` : prefix;
-}
-
-function xrayRollbackFailure(language: XrayConfigLanguage): string {
-  return language === "zh-CN"
-    ? "恢复上次有效 Xray 配置失败"
-    : "Failed to restore the last valid Xray config";
 }
 
 function errorMessage(error: unknown): string {

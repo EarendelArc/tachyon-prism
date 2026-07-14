@@ -6,7 +6,7 @@ import { join } from "node:path";
 import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
-  commitValidatedXrayConfig,
+  managedTagMatches,
   parseXrayConfigText,
   stringifyDraft,
 } from "../configDrafts";
@@ -824,78 +824,25 @@ describe("complete Xray JSON editing", () => {
     );
   });
 
-  it("does not write malformed candidates", async () => {
-    const writes: string[] = [];
-
-    await expect(
-      commitValidatedXrayConfig({
-        candidateText: "not-json",
-        validate: async () => ({ ok: true }),
-        write: async (text) => {
-          writes.push(text);
-          return "xray-client.json";
-        },
-      }),
-    ).rejects.toThrow(/syntax error/);
-    expect(writes).toEqual([]);
+  it("matches only exact managed tags or canonical numeric suffixes", () => {
+    expect(managedTagMatches("tachyon-proxy", "tachyon-proxy")).toBe(true);
+    expect(managedTagMatches("tachyon-proxy-2", "tachyon-proxy")).toBe(true);
+    expect(managedTagMatches("tachyon-proxy-10", "tachyon-proxy")).toBe(true);
+    expect(managedTagMatches("tachyon-proxy-100", "tachyon-proxy")).toBe(true);
+    expect(managedTagMatches("tachyon-proxy-1", "tachyon-proxy")).toBe(false);
+    expect(managedTagMatches("tachyon-proxy-02", "tachyon-proxy")).toBe(false);
+    expect(managedTagMatches("unrelated-tag-10", "tachyon-proxy")).toBe(false);
+    expect(managedTagMatches("same-length--10", "tachyon-proxy")).toBe(false);
   });
 
-  it("restores the last valid text when the real config test rejects a candidate", async () => {
-    const candidate = xrayAdvancedRoundTripJsonFixture.replace(
-      '"future-protocol"',
-      '"rejected-by-installed-xray"',
-    );
-    const previous = '{\n  "outbounds": []\n}';
-    const writes: string[] = [];
-
-    await expect(
-      commitValidatedXrayConfig({
-        candidateText: candidate,
-        language: "zh-CN",
-        previousValidText: previous,
-        validate: async () => ({ error: "exit status 23", ok: false }),
-        write: async (text) => {
-          writes.push(text);
-          return "xray-client.json";
-        },
-      }),
-    ).rejects.toThrow("Xray 配置测试失败: exit status 23");
-    expect(writes).toEqual([candidate, previous]);
-  });
-
-  it("restores the last valid text when the config-test command throws", async () => {
-    const previous = '{"inbounds":[],"outbounds":[]}';
-    const candidate = '{"inbounds":[],"outbounds":[{"protocol":"freedom"}]}';
-    const writes: string[] = [];
-
-    await expect(
-      commitValidatedXrayConfig({
-        candidateText: candidate,
-        previousValidText: previous,
-        validate: async () => {
-          throw new Error("xray executable unavailable");
-        },
-        write: async (text) => {
-          writes.push(text);
-          return "xray-client.json";
-        },
-      }),
-    ).rejects.toThrow("xray executable unavailable");
-    expect(writes).toEqual([candidate, previous]);
-  });
-
-  it("keeps the exact original text after a successful config test", async () => {
-    const writes: string[] = [];
-    const result = await commitValidatedXrayConfig({
-      candidateText: xrayAdvancedRoundTripJsonFixture,
-      validate: async () => ({ ok: true }),
-      write: async (text) => {
-        writes.push(text);
-        return "xray-client.json";
-      },
+  it("reports a suffixed managed tag conflict at -10", () => {
+    const conflict = JSON.stringify({
+      inbounds: [{ tag: "tachyon-proxy-10", protocol: "socks" }],
+      outbounds: [],
     });
 
-    expect(result.validText).toBe(xrayAdvancedRoundTripJsonFixture);
-    expect(writes).toEqual([xrayAdvancedRoundTripJsonFixture]);
+    expect(() => parseXrayConfigText(conflict, "en")).toThrow(
+      /Prism managed tag conflict: tachyon-proxy-10/,
+    );
   });
 });
