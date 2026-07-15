@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
+  initializeAdvancedXrayDraftText,
   managedTagMatches,
   parseXrayConfigText,
   stringifyDraft,
@@ -775,6 +776,69 @@ describe("stringifyDraft", () => {
 });
 
 describe("complete Xray JSON editing", () => {
+  describe("canonical Xray draft initialization", () => {
+    it("preserves an enabled empty persisted draft while canonical loading fails", () => {
+      expect(
+        initializeAdvancedXrayDraftText({
+          canonicalText: "",
+          enabled: true,
+          generatedText: '{"outbounds":[{"tag":"subscription-node"}]}',
+          loadState: "error",
+          persistedText: "",
+        }),
+      ).toBe("");
+    });
+
+    it("initializes from generated JSON only after canonical absence is confirmed", () => {
+      const generatedText = '{"outbounds":[{"tag":"subscription-node"}]}';
+      const input = {
+        canonicalText: "",
+        enabled: true,
+        generatedText,
+        persistedText: "",
+      } as const;
+
+      expect(initializeAdvancedXrayDraftText({ ...input, loadState: "loading" })).toBe("");
+      expect(initializeAdvancedXrayDraftText({ ...input, loadState: "loaded" })).toBe(
+        generatedText,
+      );
+    });
+
+    it("initializes from an existing canonical config before generated JSON", () => {
+      const canonicalText = '{"outbounds":[{"tag":"last-valid"}]}';
+
+      expect(
+        initializeAdvancedXrayDraftText({
+          canonicalText,
+          enabled: true,
+          generatedText: '{"outbounds":[{"tag":"subscription-node"}]}',
+          loadState: "loaded",
+          persistedText: "",
+        }),
+      ).toBe(canonicalText);
+    });
+
+    it("does not replace a persisted advanced draft when subscriptions refresh", () => {
+      const persistedText = '{"outbounds":[{"tag":"manual-advanced"}]}';
+      const beforeRefresh = initializeAdvancedXrayDraftText({
+        canonicalText: '{"outbounds":[{"tag":"last-valid"}]}',
+        enabled: true,
+        generatedText: '{"outbounds":[{"tag":"subscription-a"}]}',
+        loadState: "loaded",
+        persistedText,
+      });
+      const afterRefresh = initializeAdvancedXrayDraftText({
+        canonicalText: '{"outbounds":[{"tag":"last-valid"}]}',
+        enabled: true,
+        generatedText: '{"outbounds":[{"tag":"subscription-b"}]}',
+        loadState: "loaded",
+        persistedText: beforeRefresh,
+      });
+
+      expect(afterRefresh).toBe(persistedText);
+    });
+  });
+
   it("round-trips the complete fixture without dropping known or future fields", () => {
     const parsed = parseXrayConfigText(xrayAdvancedRoundTripJsonFixture);
 

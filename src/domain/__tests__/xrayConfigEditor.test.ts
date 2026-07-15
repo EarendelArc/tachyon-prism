@@ -82,12 +82,14 @@ describe("advanced Xray JSON UI wiring", () => {
 
     expect(hydration).toContain("canonical.exists && canonical.contents !== null");
     expect(hydration).toContain("setCanonicalXrayText(canonical.contents)");
-    expect(hydration).toContain("setCanonicalXrayLoaded(true)");
-    expect(hydration).toContain("setCanonicalXrayReadError(true)");
+    expect(hydration).toContain('setCanonicalXrayLoadState("loaded")');
+    expect(hydration).toContain('setCanonicalXrayLoadState("error")');
     expect(hydration).toContain("setMessage(ui.canonicalXrayReadFailed)");
     expect(hydration).not.toContain("error.message");
     expect(hydration).not.toContain("setXrayAdvancedEditor");
-    expect(appSource).toContain("canonicalXrayLoaded &&");
+    expect(appSource).toContain('useState<CanonicalXrayLoadState>("loading")');
+    expect(appSource).toContain("loadState: canonicalXrayLoadState");
+    expect(appSource).toContain('canonicalXrayLoadState === "error"');
     expect(appSource).toContain("disabled={!canonicalXrayAvailable}");
     expect(appSource).toContain('className="xray-canonical-error" role="alert"');
   });

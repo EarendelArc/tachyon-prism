@@ -3,8 +3,10 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
+  initializeAdvancedXrayDraftText,
   parseXrayConfigText,
   stringifyDraft,
+  type CanonicalXrayLoadState,
   type XrayRoutingMode,
 } from "./domain/configDrafts";
 import {
@@ -1426,8 +1428,8 @@ export function App() {
   const [xrayAdvancedEditor, setXrayAdvancedEditor] =
     useState<XrayAdvancedEditorState>(loadXrayAdvancedEditor);
   const [canonicalXrayText, setCanonicalXrayText] = useState("");
-  const [canonicalXrayLoaded, setCanonicalXrayLoaded] = useState(false);
-  const [canonicalXrayReadError, setCanonicalXrayReadError] = useState(false);
+  const [canonicalXrayLoadState, setCanonicalXrayLoadState] =
+    useState<CanonicalXrayLoadState>("loading");
   const [showUnavailableNodes, setShowUnavailableNodes] = useState(false);
   const [sortPolicyNodesByDelay, setSortPolicyNodesByDelay] = useState(true);
   const [expandedPolicyGroupId, setExpandedPolicyGroupId] = useState("node-selector");
@@ -2095,10 +2097,13 @@ export function App() {
     setXrayAdvancedEditor((current) => ({
       ...current,
       enabled,
-      text:
-        enabled && canonicalXrayLoaded && !current.text
-          ? canonicalXrayText || generatedDrafts.xray
-          : current.text,
+      text: initializeAdvancedXrayDraftText({
+        canonicalText: canonicalXrayText,
+        enabled,
+        generatedText: generatedDrafts.xray,
+        loadState: canonicalXrayLoadState,
+        persistedText: current.text,
+      }),
     }));
   }
 
@@ -2910,15 +2915,13 @@ export function App() {
         if (canonical.exists && canonical.contents !== null) {
           setCanonicalXrayText(canonical.contents);
         }
-        setCanonicalXrayReadError(false);
-        setCanonicalXrayLoaded(true);
+        setCanonicalXrayLoadState("loaded");
       })
       .catch(() => {
         if (!active) {
           return;
         }
-        setCanonicalXrayReadError(true);
-        setCanonicalXrayLoaded(true);
+        setCanonicalXrayLoadState("error");
         setMessage(ui.canonicalXrayReadFailed);
       });
     return () => {
@@ -2927,23 +2930,20 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (
-      canonicalXrayLoaded &&
-      xrayAdvancedEditor.enabled &&
-      !xrayAdvancedEditor.text &&
-      (canonicalXrayText || generatedDrafts.xray)
-    ) {
-      setXrayAdvancedEditor((current) => ({
-        ...current,
-        text: canonicalXrayText || generatedDrafts.xray,
-      }));
-    }
+    setXrayAdvancedEditor((current) => {
+      const text = initializeAdvancedXrayDraftText({
+        canonicalText: canonicalXrayText,
+        enabled: current.enabled,
+        generatedText: generatedDrafts.xray,
+        loadState: canonicalXrayLoadState,
+        persistedText: current.text,
+      });
+      return text === current.text ? current : { ...current, text };
+    });
   }, [
-    canonicalXrayLoaded,
+    canonicalXrayLoadState,
     canonicalXrayText,
     generatedDrafts.xray,
-    xrayAdvancedEditor.enabled,
-    xrayAdvancedEditor.text,
   ]);
 
   useEffect(() => {
@@ -3342,7 +3342,7 @@ export function App() {
             binarySourceInputs={binarySourceInputs}
             changeLanguage={changeLanguage}
             canonicalXrayAvailable={Boolean(canonicalXrayText)}
-            canonicalXrayReadError={canonicalXrayReadError}
+            canonicalXrayReadError={canonicalXrayLoadState === "error"}
             configPaths={configPaths}
             configuredStatusLabel={configuredStatusLabel}
             copyDraft={copyDraft}

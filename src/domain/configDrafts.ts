@@ -20,6 +20,20 @@ export interface XrayClientDraftOptions {
 export type XrayRoutingMode = "direct" | "global" | "rule";
 
 export type XrayConfigLanguage = "en" | "zh-CN";
+export type CanonicalXrayLoadState = "error" | "loaded" | "loading";
+
+export function initializeAdvancedXrayDraftText(input: {
+  canonicalText: string;
+  enabled: boolean;
+  generatedText: string;
+  loadState: CanonicalXrayLoadState;
+  persistedText: string;
+}): string {
+  if (!input.enabled || input.persistedText || input.loadState !== "loaded") {
+    return input.persistedText;
+  }
+  return input.canonicalText || input.generatedText;
+}
 
 export type XrayConfigTextErrorCode =
   | "empty"
