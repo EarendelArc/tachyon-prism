@@ -4970,8 +4970,8 @@ impl Drop for SyncedTempFile {
 
 fn atomic_candidate_path(canonical: &Path, attempt: u32) -> Result<PathBuf, String> {
     let parent = atomic_parent(canonical);
-    let file_name = canonical
-        .file_name()
+    let file_stem = canonical
+        .file_stem()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
             format!(
@@ -4979,16 +4979,23 @@ fn atomic_candidate_path(canonical: &Path, attempt: u32) -> Result<PathBuf, Stri
                 canonical.display()
             )
         })?;
+    let extension = canonical
+        .extension()
+        .and_then(|extension| extension.to_str());
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    Ok(parent.join(format!(
-        ".{file_name}.{}.{}.{}.tmp",
+    let unique_name = format!(
+        ".{file_stem}.{}.{}.{}.tmp",
         std::process::id(),
         nanos,
         attempt
-    )))
+    );
+    Ok(parent.join(match extension {
+        Some(extension) => format!("{unique_name}.{extension}"),
+        None => unique_name,
+    }))
 }
 
 fn atomic_parent(canonical: &Path) -> &Path {
@@ -6251,7 +6258,15 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
     }
 
     fn atomic_candidates(directory: &Path, canonical_name: &str) -> Vec<PathBuf> {
-        let prefix = format!(".{canonical_name}.");
+        let canonical = Path::new(canonical_name);
+        let prefix = format!(
+            ".{}.",
+            canonical
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .expect("canonical test name must have a UTF-8 file stem")
+        );
+        let extension = canonical.extension();
         fs::read_dir(directory)
             .into_iter()
             .flatten()
@@ -6260,7 +6275,8 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
             .filter(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".tmp"))
+                    .is_some_and(|name| name.starts_with(&prefix) && name.contains(".tmp."))
+                    && path.extension() == extension
             })
             .collect()
     }
@@ -6448,7 +6464,7 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
     }
 
     #[test]
-    fn xray_commit_cleans_candidate_when_validator_errors() {
+    fn xray_commit_uses_json_candidate_and_cleans_it_when_validator_errors() {
         let directory = unique_temp_dir("tachyon-test-xray-commit-validator-error");
         fs::create_dir_all(&directory).unwrap();
         let canonical = directory.join("xray-client.json");
@@ -6465,7 +6481,51 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         )
         .expect_err("validator execution error must fail the commit");
 
-        assert!(!candidate_path.expect("validator saw candidate").exists());
+        let candidate = candidate_path.expect("validator saw candidate");
+        assert_eq!(candidate.parent(), canonical.parent());
+        assert_eq!(candidate.extension(), Some(std::ffi::OsStr::new("json")));
+        assert!(
+            candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".xray-client.")),
+            "candidate must remain hidden beside the canonical config"
+        );
+        assert!(!candidate.exists());
+        assert!(atomic_candidates(&directory, "xray-client.json").is_empty());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn concurrent_xray_candidates_are_unique_json_files_and_cleaned_on_drop() {
+        const WORKERS: usize = 8;
+
+        let directory = unique_temp_dir("tachyon-test-xray-candidate-concurrency");
+        fs::create_dir_all(&directory).unwrap();
+        let canonical = Arc::new(directory.join("xray-client.json"));
+        let barrier = Arc::new(std::sync::Barrier::new(WORKERS));
+        let handles = (0..WORKERS)
+            .map(|_| {
+                let canonical = Arc::clone(&canonical);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let candidate = SyncedTempFile::create(&canonical, "{}").unwrap();
+                    let path = candidate.path.clone();
+                    assert_eq!(path.parent(), canonical.parent());
+                    assert_eq!(path.extension(), Some(std::ffi::OsStr::new("json")));
+                    barrier.wait();
+                    path
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let candidates = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("candidate worker must complete"))
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(candidates.len(), WORKERS);
+        assert!(candidates.iter().all(|candidate| !candidate.exists()));
         assert!(atomic_candidates(&directory, "xray-client.json").is_empty());
         let _ = fs::remove_dir_all(directory);
     }
