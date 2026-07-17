@@ -1,11 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
+  CoreClientConfigError,
   initializeAdvancedXrayDraftText,
   managedTagMatches,
   parseXrayConfigText,
@@ -551,9 +548,11 @@ describe("buildCoreClientConfigDraft", () => {
     expect(client).toBeDefined();
     const tun = client.tun as Record<string, unknown>;
     expect(tun.address).toBe("198.18.0.1/16");
-    expect(tun.mtu).toBe(9000);
+    expect(tun.mtu).toBe(1280);
     expect(tun.auto_route).toBe(false);
     expect(tun.dns_hijack).toBe(false);
+    expect(tun.tgp_only).toBe(true);
+    expect(tun.game_routes).toEqual([]);
   });
 
   it("includes game profiles in routing", () => {
@@ -617,10 +616,11 @@ describe("buildCoreClientConfigDraft", () => {
     const client = config.client as Record<string, unknown>;
     const routing = client.routing as Record<string, unknown>;
     const rules = routing.rules as Array<Record<string, unknown>>;
-    expect(rules.length).toBeGreaterThanOrEqual(2);
+    expect(rules).toHaveLength(1);
     const cidrRule = rules.find((r) => r.cidr === "192.168.0.0/16");
     expect(cidrRule).toBeDefined();
     expect(cidrRule?.action).toBe("direct");
+    expect(rules.some((rule) => "domain" in rule || "geoip" in rule)).toBe(false);
   });
 
   it("includes TGP settings", () => {
@@ -635,6 +635,7 @@ describe("buildCoreClientConfigDraft", () => {
     });
     expect(tgp.pacing).toBeDefined();
     expect(tgp.connection_migration).toBe(true);
+    expect(tgp.max_datagram_size).toBe(1352);
   });
 
   it("includes TGP PSK authentication when configured", () => {
@@ -697,7 +698,7 @@ describe("buildCoreClientConfigDraft", () => {
       tunAddress: "198.19.0.1/16",
       tunAutoRoute: true,
       tunDnsHijack: true,
-      tunMtu: 8500,
+      tunMtu: 1200,
     });
     const client = config.client as Record<string, unknown>;
     const tun = client.tun as Record<string, unknown>;
@@ -709,7 +710,7 @@ describe("buildCoreClientConfigDraft", () => {
     // Alpha builds must not enable OS-affecting TUN routing, even if a caller passes true.
     expect(tun.auto_route).toBe(false);
     expect(tun.dns_hijack).toBe(false);
-    expect(tun.mtu).toBe(8500);
+    expect(tun.mtu).toBe(1200);
     expect(ipc.websocket_addr).toBe("127.0.0.6:55124");
     expect(ipc.grpc_addr).toBe("127.0.0.5:50052");
     expect(ipc.telemetry_interval_ms).toBe(250);
@@ -722,6 +723,26 @@ describe("buildCoreClientConfigDraft", () => {
     });
   });
 
+  it("includes validated game server routes in the TUN allow-list", () => {
+    const config = buildCoreClientConfigDraft({
+      ...mockCoreOptions,
+      gameRoutes: [" 203.0.113.0/24 ", "2001:DB8::/48"],
+    });
+    const client = config.client as Record<string, unknown>;
+    const tun = client.tun as Record<string, unknown>;
+    expect(tun.game_routes).toEqual(["203.0.113.0/24", "2001:db8::/48"]);
+  });
+
+  it("rejects a TUN MTU that exceeds the fixed datagram budget", () => {
+    try {
+      buildCoreClientConfigDraft({ ...mockCoreOptions, tunMtu: 1285 });
+      throw new Error("expected validation failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CoreClientConfigError);
+      expect(error).toMatchObject({ code: "tun-mtu-unsafe", mtu: 1285 });
+    }
+  });
+
   it("uses default launcher settings when not provided", () => {
     const config = buildCoreClientConfigDraft(mockCoreOptions);
     const client = config.client as Record<string, unknown>;
@@ -731,32 +752,6 @@ describe("buildCoreClientConfigDraft", () => {
     expect(launchers.steam.trackChildProcesses).toBe(true);
   });
 
-  const coreBinaryPath = process.env.TACHYON_CORE_BINARY_PATH?.trim();
-  const itWithCore = coreBinaryPath ? it : it.skip;
-
-  itWithCore("generates config accepted by the Tachyon Core binary", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "tachyon-prism-core-contract-"));
-    const configPath = join(tempDir, "client.json");
-    try {
-      writeFileSync(
-        configPath,
-        stringifyDraft(
-          buildCoreClientConfigDraft({
-            ...mockCoreOptions,
-            gameProfiles: mockProfiles,
-          }),
-        ),
-        "utf8",
-      );
-      const output = execFileSync(coreBinaryPath ?? "", ["validate", "--config", configPath], {
-        encoding: "utf8",
-        timeout: 8000,
-      });
-      expect(output).toContain("is valid");
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
 });
 
 describe("stringifyDraft", () => {

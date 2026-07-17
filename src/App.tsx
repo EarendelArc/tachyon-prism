@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
+  CoreClientConfigError,
   initializeAdvancedXrayDraftText,
   parseXrayConfigText,
   stringifyDraft,
@@ -29,6 +30,12 @@ import {
   saveLauncherSettings,
   scanSteamLibrary,
 } from "./domain/gameProfiles";
+import {
+  GameRouteValidationError,
+  loadGameRoutes,
+  saveGameRoutes,
+  type GameRouteErrorCode,
+} from "./domain/gameRoutes";
 import {
   getLatestTachyonCoreRelease,
   getLatestXrayRelease,
@@ -244,7 +251,7 @@ const emptyRuntimeInputs = {
   tachyonTunAddress: "198.18.0.1/16",
   tachyonTunAutoRoute: false,
   tachyonTunDnsHijack: false,
-  tachyonTunMtu: 9000,
+  tachyonTunMtu: 1280,
   xrayBinaryPath: "",
   xrayHttpListen: "127.0.0.1",
   xrayHttpPort: 10809,
@@ -584,6 +591,39 @@ const zh = {
   minimizeWindow: "最小化窗口",
   maximizeUnavailable: "固定窗口不可最大化",
   closeWindow: "关闭窗口",
+  gameServerRoutes: "游戏服务器网段",
+  gameServerRoutesHelp: "仅把明确的游戏服务器 CIDR 写入 Core 的系统目的路由。网段会影响访问该目的地址的所有程序；程序规则和 Steam 规则不会自动创建这些路由。",
+  gameRoutesEmpty: "当前列表为空：Prism 不接管任何游戏服务器网段。",
+  gameRoutePlaceholder: "例如 203.0.113.0/24 或 2001:db8::/48",
+  gameRouteAdded: "游戏服务器网段已保存",
+  gameRouteRemoved: "游戏服务器网段已移除",
+  gameRouteErrorEmpty: "请输入游戏服务器 CIDR。",
+  gameRouteErrorFormat: "必须使用 CIDR 格式，例如 203.0.113.0/24。",
+  gameRouteErrorAddress: "CIDR 中的 IPv4 或 IPv6 地址无效。",
+  gameRouteErrorPrefix: "CIDR 前缀长度无效。",
+  gameRouteErrorDefault: "不允许添加默认路由；请填写具体的游戏服务器网段。",
+  gameRouteErrorDuplicate: "该游戏服务器网段已存在。",
+  manualPrograms: "手动程序规则",
+  manualProgramsHelp: "按进程名或可执行文件匹配游戏 UDP；这类规则本身不会添加系统目的路由。",
+  noManualPrograms: "还没有手动程序规则。",
+  steamGameRules: "Steam 游戏规则",
+  steamGameRulesHelp: "扫描 Steam 库并添加游戏识别规则；Steam 规则与游戏服务器 CIDR 分开保存。",
+  noSteamSuggestions: "扫描后，可添加的 Steam 游戏会显示在这里。",
+  profilesLoaded: "程序规则已加载",
+  profileStoreUnavailable: "程序规则存储不可用",
+  profileRuleRequired: "需要填写显示名称，以及进程名或可执行文件路径。",
+  profileAdded: "手动程序规则已添加",
+  profileAddFailed: "添加程序规则失败",
+  profileRemoved: "程序规则已移除",
+  profileRemoveFailed: "移除程序规则失败",
+  steamAppsFound: "找到 {count} 个 Steam 游戏",
+  steamScanFailed: "Steam 扫描失败",
+  steamProfileAdded: "Steam 游戏规则已添加",
+  launcherSettingsSaved: "Steam 启动器设置已保存",
+  coreTunMtuTooSmall: "TUN MTU {mtu} 过小；最小值为 576。",
+  coreTunMtuUnsafe: "TUN MTU {mtu} 超出安全预算；当前 1352 字节 TGP datagram 的上限为 1284。",
+  tachyonTunBudgetDesc: "安全预算：MTU 576-1284；TGP max_datagram_size 固定为 1352。",
+  profileNoMatch: "没有匹配条件",
 };
 
 const en: typeof zh = {
@@ -900,6 +940,39 @@ const en: typeof zh = {
   minimizeWindow: "Minimize window",
   maximizeUnavailable: "Maximize is unavailable for the fixed window",
   closeWindow: "Close window",
+  gameServerRoutes: "Game Server Networks",
+  gameServerRoutesHelp: "Only explicit game server CIDRs become Core OS destination routes. A route affects every program contacting that network; program and Steam rules do not create these routes.",
+  gameRoutesEmpty: "The list is empty: Prism takes over no game server networks.",
+  gameRoutePlaceholder: "For example, 203.0.113.0/24 or 2001:db8::/48",
+  gameRouteAdded: "Game server network saved",
+  gameRouteRemoved: "Game server network removed",
+  gameRouteErrorEmpty: "Enter a game server CIDR.",
+  gameRouteErrorFormat: "Use CIDR notation, such as 203.0.113.0/24.",
+  gameRouteErrorAddress: "The IPv4 or IPv6 address in the CIDR is invalid.",
+  gameRouteErrorPrefix: "The CIDR prefix length is invalid.",
+  gameRouteErrorDefault: "Default routes are not allowed; enter a specific game server network.",
+  gameRouteErrorDuplicate: "That game server network already exists.",
+  manualPrograms: "Manual Program Rules",
+  manualProgramsHelp: "Match game UDP by process name or executable path. These rules do not add OS destination routes by themselves.",
+  noManualPrograms: "No manual program rules yet.",
+  steamGameRules: "Steam Game Rules",
+  steamGameRulesHelp: "Scan Steam libraries and add game detection rules. Steam rules are stored separately from game server CIDRs.",
+  noSteamSuggestions: "Steam games available to add will appear here after a scan.",
+  profilesLoaded: "Program rules loaded",
+  profileStoreUnavailable: "Program rule storage unavailable",
+  profileRuleRequired: "Enter a display name and either a process name or executable path.",
+  profileAdded: "Manual program rule added",
+  profileAddFailed: "Could not add program rule",
+  profileRemoved: "Program rule removed",
+  profileRemoveFailed: "Could not remove program rule",
+  steamAppsFound: "Found {count} Steam games",
+  steamScanFailed: "Steam scan failed",
+  steamProfileAdded: "Steam game rule added",
+  launcherSettingsSaved: "Steam launcher settings saved",
+  coreTunMtuTooSmall: "TUN MTU {mtu} is too small; the minimum is 576.",
+  coreTunMtuUnsafe: "TUN MTU {mtu} exceeds the safe budget; the limit is 1284 for the fixed 1352-byte TGP datagram.",
+  tachyonTunBudgetDesc: "Safe budget: MTU 576-1284; TGP max_datagram_size is fixed at 1352.",
+  profileNoMatch: "No match rule",
 };
 
 function selectedNode(snapshot: SubscriptionSnapshot): ProxyNode | undefined {
@@ -1113,14 +1186,33 @@ function routingModeLabel(mode: XrayRoutingMode, ui: typeof zh): string {
   return ui.rulesMode;
 }
 
-function profileMatchLabel(profile: GameProfile): string {
+function profileMatchLabel(profile: GameProfile, ui: typeof zh): string {
   const labels = [
     ...profile.match.processNames,
     ...profile.match.paths,
     ...profile.match.pathPrefixes.map((path) => `${path}/*`),
     ...profile.match.steamAppIds.map((id) => `Steam ${id}`),
   ].filter(Boolean);
-  return labels.join(", ") || "No match rule";
+  return labels.join(", ") || ui.profileNoMatch;
+}
+
+function gameRouteErrorMessage(code: GameRouteErrorCode, ui: typeof zh): string {
+  const messages: Record<GameRouteErrorCode, string> = {
+    empty: ui.gameRouteErrorEmpty,
+    format: ui.gameRouteErrorFormat,
+    address: ui.gameRouteErrorAddress,
+    prefix: ui.gameRouteErrorPrefix,
+    "default-route": ui.gameRouteErrorDefault,
+    duplicate: ui.gameRouteErrorDuplicate,
+  };
+  return messages[code];
+}
+
+function coreConfigErrorMessage(error: CoreClientConfigError, ui: typeof zh): string {
+  const template = error.code === "tun-mtu-too-small"
+    ? ui.coreTunMtuTooSmall
+    : ui.coreTunMtuUnsafe;
+  return templateValue(template, "mtu", String(error.mtu));
 }
 
 function managedBinaryDisplayName(kind: ManagedBinaryKind): string {
@@ -1275,6 +1367,7 @@ function preflightReadinessState(preflight: TachyonCorePreflightResult): Readine
 function draftText(
   activeNode: ProxyNode | undefined,
   profiles: GameProfile[],
+  gameRoutes: string[],
   launcherSettings: LauncherSettings,
   routingMode: XrayRoutingMode,
   runtimeSettings: RuntimeSettings,
@@ -1289,6 +1382,7 @@ function draftText(
     core = stringifyDraft(
       buildCoreClientConfigDraft({
         gameProfiles: profiles,
+        gameRoutes,
         fecAdaptWindow: runtimeSettings.tachyonFecAdaptWindow,
         fecDataShards: runtimeSettings.tachyonFecDataShards,
         fecDynamic: runtimeSettings.tachyonFecDynamic,
@@ -1313,7 +1407,11 @@ function draftText(
       }),
     );
   } catch (error) {
-    coreError = error instanceof Error ? error.message : ui.coreConfigGenerationFailed;
+    coreError = error instanceof CoreClientConfigError
+      ? coreConfigErrorMessage(error, ui)
+      : error instanceof Error
+        ? error.message
+        : ui.coreConfigGenerationFailed;
   }
 
   try {
@@ -1406,6 +1504,9 @@ export function App() {
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
   const [connection, setConnection] = useState<ConnectionState>("checking");
   const [profiles, setProfiles] = useState<GameProfile[]>(defaultGameProfiles);
+  const [gameRoutes, setGameRoutes] = useState(loadGameRoutes);
+  const [gameRouteDraft, setGameRouteDraft] = useState("");
+  const [gameRouteError, setGameRouteError] = useState<GameRouteErrorCode | null>(null);
   const [launcherSettings, setLauncherSettings] = useState(loadLauncherSettings);
   const [suggestions, setSuggestions] = useState<GameProfile[]>([]);
   const [steamRoot, setSteamRoot] = useState("");
@@ -1499,8 +1600,8 @@ export function App() {
     [currentTachyonServer, runtimeInputs],
   );
   const generatedDrafts = useMemo(
-    () => draftText(activeNode, profiles, launcherSettings, routingMode, effectiveRuntimeInputs, ui),
-    [activeNode, effectiveRuntimeInputs, launcherSettings, language, profiles, routingMode],
+    () => draftText(activeNode, profiles, gameRoutes, launcherSettings, routingMode, effectiveRuntimeInputs, ui),
+    [activeNode, effectiveRuntimeInputs, gameRoutes, launcherSettings, language, profiles, routingMode],
   );
   const drafts = useMemo(() => {
     if (!xrayAdvancedEditor.enabled) {
@@ -1780,10 +1881,10 @@ export function App() {
       const nextProfiles = await listGameProfiles();
       setProfiles(nextProfiles);
       setConnection("connected");
-      setMessage("Profiles loaded");
-    } catch (error) {
+      setMessage(ui.profilesLoaded);
+    } catch {
       setConnection("disconnected");
-      setMessage(error instanceof Error ? error.message : "Profile store unavailable");
+      setMessage(ui.profileStoreUnavailable);
     }
   }
 
@@ -1792,7 +1893,7 @@ export function App() {
     const processName = manualProfile.processName.trim();
     const executablePath = manualProfile.executablePath.trim();
     if (!displayName || (!processName && !executablePath)) {
-      setMessage("Name and one match rule are required");
+      setMessage(ui.profileRuleRequired);
       return;
     }
     const id = `manual-${displayName
@@ -1819,9 +1920,9 @@ export function App() {
       await saveGameProfile(profile);
       setManualProfile(emptyProfile);
       await refreshProfiles();
-      setMessage("Profile added");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Add failed");
+      setMessage(ui.profileAdded);
+    } catch {
+      setMessage(ui.profileAddFailed);
     }
   }
 
@@ -1829,9 +1930,9 @@ export function App() {
     try {
       const nextProfiles = await removeGameProfile(id);
       setProfiles(nextProfiles);
-      setMessage("Profile removed");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Remove failed");
+      setMessage(ui.profileRemoved);
+    } catch {
+      setMessage(ui.profileRemoveFailed);
     }
   }
 
@@ -1840,20 +1941,20 @@ export function App() {
       const result = await scanSteamLibrary(steamRoot);
       setSuggestions(result.profiles);
       setConnection("connected");
-      setMessage(`${result.apps.length} Steam apps found`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Steam scan failed");
+      setMessage(templateValue(ui.steamAppsFound, "count", String(result.apps.length)));
+    } catch {
+      setMessage(ui.steamScanFailed);
     }
   }
 
   async function addSuggestion(profile: GameProfile) {
     try {
-      await saveGameProfile({ ...profile, manual: true, priority: 80 });
+      await saveGameProfile({ ...profile, manual: false, priority: 80 });
       setSuggestions((current) => current.filter((item) => item.id !== profile.id));
       await refreshProfiles();
-      setMessage("Steam profile added");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Add failed");
+      setMessage(ui.steamProfileAdded);
+    } catch {
+      setMessage(ui.profileAddFailed);
     }
   }
 
@@ -1867,7 +1968,28 @@ export function App() {
     };
     saveLauncherSettings(nextSettings);
     setLauncherSettings(nextSettings);
-    setMessage("Launcher settings saved");
+    setMessage(ui.launcherSettingsSaved);
+  }
+
+  function addGameRoute() {
+    try {
+      const next = saveGameRoutes([...gameRoutes, gameRouteDraft]);
+      setGameRoutes(next);
+      setGameRouteDraft("");
+      setGameRouteError(null);
+      setMessage(ui.gameRouteAdded);
+    } catch (error) {
+      const code = error instanceof GameRouteValidationError ? error.code : "format";
+      setGameRouteError(code);
+      setMessage(gameRouteErrorMessage(code, ui));
+    }
+  }
+
+  function removeGameRoute(route: string) {
+    const next = saveGameRoutes(gameRoutes.filter((current) => current !== route));
+    setGameRoutes(next);
+    setGameRouteError(null);
+    setMessage(ui.gameRouteRemoved);
   }
 
   async function updateSubscriptionFromUrl() {
@@ -3353,6 +3475,10 @@ export function App() {
             installBinary={installBinary}
             managedBinaries={managedBinaries}
             managedStatusLabel={managedStatusLabel}
+            gameRouteDraft={gameRouteDraft}
+            gameRouteError={gameRouteError}
+            gameRoutes={gameRoutes}
+            onAddGameRoute={addGameRoute}
             onAddManualProfile={() => void addManualProfile()}
             onAddSuggestion={(profile) => void addSuggestion(profile)}
             onCheckLatest={(kind) => void checkLatestRelease(kind)}
@@ -3366,6 +3492,7 @@ export function App() {
               void refreshSystemProxy();
             }}
             onRemoveProfile={(id) => void removeProfile(id)}
+            onRemoveGameRoute={removeGameRoute}
             onSaveTachyonServer={saveTachyonServerProfile}
             onSaveDrafts={() => void saveDrafts()}
             onSaveRuntime={() => void saveRuntimeInputs()}
@@ -3394,6 +3521,10 @@ export function App() {
             section={settingsSection}
             setBinarySourceInputs={setBinarySourceInputs}
             setManualProfile={setManualProfile}
+            setGameRouteDraft={(value) => {
+              setGameRouteDraft(value);
+              setGameRouteError(null);
+            }}
             setRuntimeInputs={setRuntimeInputs}
             setSteamRoot={setSteamRoot}
             suggestions={suggestions}
@@ -4360,6 +4491,10 @@ function SettingsView({
   launcherSettings,
   managedBinaries,
   managedStatusLabel,
+  gameRouteDraft,
+  gameRouteError,
+  gameRoutes,
+  onAddGameRoute,
   manualProfile,
   onAddManualProfile,
   onAddSuggestion,
@@ -4370,6 +4505,7 @@ function SettingsView({
   onRefreshBinaries,
   onRefreshRuntime,
   onRemoveProfile,
+  onRemoveGameRoute,
   onSaveTachyonServer,
   onSaveDrafts,
   onSaveRuntime,
@@ -4398,6 +4534,7 @@ function SettingsView({
   section,
   setBinarySourceInputs,
   setManualProfile,
+  setGameRouteDraft,
   setReleaseChannelForKind: setReleaseChannelForKindFn,
   setRuntimeInputs,
   setSteamRoot,
@@ -4426,11 +4563,15 @@ function SettingsView({
   drafts: { core: string; error: string; xray: string };
   generatedXrayDraft: string;
   formatBytes: (value: number | null) => string;
+  gameRouteDraft: string;
+  gameRouteError: GameRouteErrorCode | null;
+  gameRoutes: string[];
   installBinary: (kind: ManagedBinaryKind) => Promise<void>;
   launcherSettings: LauncherSettings;
   managedBinaries: ManagedBinaryInventory | null;
   managedStatusLabel: (binary: ManagedBinaryInfo, ui: typeof zh) => string;
   manualProfile: typeof emptyProfile;
+  onAddGameRoute: () => void;
   onAddManualProfile: () => void;
   onAddSuggestion: (profile: GameProfile) => void;
   onCheckLatest: (kind: ManagedBinaryKind) => void;
@@ -4440,6 +4581,7 @@ function SettingsView({
   onRefreshBinaries: () => void;
   onRefreshRuntime: () => void;
   onRemoveProfile: (id: string) => void;
+  onRemoveGameRoute: (route: string) => void;
   onSaveTachyonServer: () => void;
   onSaveDrafts: () => void;
   onSaveRuntime: () => void;
@@ -4468,6 +4610,7 @@ function SettingsView({
   section: SettingsSection;
   setBinarySourceInputs: React.Dispatch<React.SetStateAction<typeof emptyBinarySourceInputs>>;
   setManualProfile: React.Dispatch<React.SetStateAction<typeof emptyProfile>>;
+  setGameRouteDraft: (value: string) => void;
   setReleaseChannelForKind: (
     settings: RuntimeSettings,
     kind: ManagedBinaryKind,
@@ -4945,7 +5088,7 @@ function SettingsView({
                     />
                     <input
                       min={576}
-                      max={9500}
+                      max={1284}
                       type="number"
                       value={runtimeInputs.tachyonTunMtu}
                       onChange={(event) =>
@@ -4953,6 +5096,7 @@ function SettingsView({
                       }
                     />
                   </div>
+                  <small className="field-hint">{ui.tachyonTunBudgetDesc}</small>
                 </label>
                 <label className="wide-field">
                   <span>{ui.tachyonTunAutoRoute}</span>
@@ -5268,9 +5412,46 @@ function SettingsView({
           <div className="settings-stack">
             <article className="settings-card">
               <header>
-                <h1>{ui.gameMode}</h1>
+                <h1>{ui.gameServerRoutes}</h1>
+              </header>
+              <p className="field-hint">{ui.gameServerRoutesHelp}</p>
+              <form
+                className="game-route-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  onAddGameRoute();
+                }}
+              >
+                <input
+                  aria-invalid={Boolean(gameRouteError)}
+                  placeholder={ui.gameRoutePlaceholder}
+                  value={gameRouteDraft}
+                  onChange={(event) => setGameRouteDraft(event.currentTarget.value)}
+                />
+                <button type="submit">{ui.add}</button>
+              </form>
+              {gameRouteError ? (
+                <p className="inline-error" role="alert">
+                  {gameRouteErrorMessage(gameRouteError, ui)}
+                </p>
+              ) : null}
+              <div className="profile-list">
+                {gameRoutes.map((route) => (
+                  <div className="profile-row" key={route}>
+                    <div><strong>{route}</strong></div>
+                    <button type="button" onClick={() => onRemoveGameRoute(route)}>{ui.remove}</button>
+                  </div>
+                ))}
+                {gameRoutes.length === 0 ? <p className="empty-note">{ui.gameRoutesEmpty}</p> : null}
+              </div>
+            </article>
+
+            <article className="settings-card">
+              <header>
+                <h1>{ui.manualPrograms}</h1>
                 <button type="button" onClick={onAddManualProfile}>{ui.addProgram}</button>
               </header>
+              <p className="field-hint">{ui.manualProgramsHelp}</p>
               <div className="form-grid">
                 <input
                   placeholder={ui.displayName}
@@ -5290,20 +5471,24 @@ function SettingsView({
                 />
               </div>
               <div className="profile-list">
-                {profiles.map((profile) => (
+                {profiles.filter((profile) => profile.manual).map((profile) => (
                   <div className="profile-row" key={profile.id}>
-                    <div><strong>{profile.displayName}</strong><span>{profileMatchLabel(profile)}</span></div>
+                    <div><strong>{profile.displayName}</strong><span>{profileMatchLabel(profile, ui)}</span></div>
                     <button type="button" onClick={() => onRemoveProfile(profile.id)}>{ui.remove}</button>
                   </div>
                 ))}
+                {profiles.every((profile) => !profile.manual) ? (
+                  <p className="empty-note">{ui.noManualPrograms}</p>
+                ) : null}
               </div>
             </article>
 
             <article className="settings-card">
               <header>
-                <h1>{ui.launchers}</h1>
+                <h1>{ui.steamGameRules}</h1>
                 <button type="button" onClick={onScanSteam}>{ui.scanSteam}</button>
               </header>
+              <p className="field-hint">{ui.steamGameRulesHelp}</p>
               <input
                 className="full-input"
                 placeholder={ui.steamRoot}
@@ -5328,12 +5513,21 @@ function SettingsView({
                 />
               </label>
               <div className="profile-list">
+                {profiles.filter((profile) => !profile.manual).map((profile) => (
+                  <div className="profile-row" key={profile.id}>
+                    <div><strong>{profile.displayName}</strong><span>{profileMatchLabel(profile, ui)}</span></div>
+                    <button type="button" onClick={() => onRemoveProfile(profile.id)}>{ui.remove}</button>
+                  </div>
+                ))}
                 {suggestions.map((profile) => (
                   <div className="profile-row" key={profile.id}>
-                    <div><strong>{profile.displayName}</strong><span>{profileMatchLabel(profile)}</span></div>
+                    <div><strong>{profile.displayName}</strong><span>{profileMatchLabel(profile, ui)}</span></div>
                     <button type="button" onClick={() => onAddSuggestion(profile)}>{ui.add}</button>
                   </div>
                 ))}
+                {suggestions.length === 0 && profiles.every((profile) => profile.manual) ? (
+                  <p className="empty-note">{ui.noSteamSuggestions}</p>
+                ) : null}
               </div>
             </article>
           </div>

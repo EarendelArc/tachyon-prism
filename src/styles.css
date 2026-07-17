@@ -1916,6 +1916,17 @@ p,
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.game-route-form {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.game-route-form input {
+  min-width: 0;
+  width: 100%;
+}
+
 .wide-input,
 .full-input {
   grid-column: 1 / -1;
@@ -2504,6 +2515,7 @@ p,
   }
 
   .form-grid,
+  .game-route-form,
   .config-grid,
   .core-settings-grid,
   .diagnostics-export-grid,

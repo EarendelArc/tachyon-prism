@@ -643,7 +643,7 @@ function previewRuntimeSettings(): RuntimeSettings {
     tachyonTunAddress: "198.18.0.1/16",
     tachyonTunAutoRoute: false,
     tachyonTunDnsHijack: false,
-    tachyonTunMtu: 9000,
+    tachyonTunMtu: 1280,
     xrayBinaryPath: "",
     xrayHttpListen: "127.0.0.1",
     xrayHttpPort: 10809,

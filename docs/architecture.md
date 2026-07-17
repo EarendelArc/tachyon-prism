@@ -31,7 +31,7 @@ the Rust side returns JSON-serializable results.
 | --- | --- |
 | Overview | Runtime status, game mode summary, readiness count |
 | Nodes | Import subscription, browse nodes, select active node |
-| Game Mode | Manual profiles, Steam scan suggestions |
+| Game Mode | Explicit server CIDRs, manual profiles, Steam scan suggestions |
 | Launchers | Steam launcher detection, child-process tracking, UDP acceleration |
 | Runtime | Binary management, install-from-release, start/stop cores, readiness |
 | Config | Generate and save Xray + Core JSON drafts |
@@ -43,7 +43,8 @@ Prism generates two JSON files from the selected node and user settings:
 - `xray-client.json`: local SOCKS inbound + Xray outbound from the selected node.
 - `client.json`: Tachyon Core client config for the TGP game path, including
   game profiles under `client.routing.game_profiles`, launcher policy under
-  `client.routing.launchers`, TGP bind addresses under
+  `client.routing.launchers`, explicit destination CIDRs under
+  `client.tun.game_routes`, TGP bind addresses under
   `client.proxy.local_addrs`, connection migration under
   `tgp.connection_migration`, and the multipath switch under `tgp.multipath`.
 
@@ -86,7 +87,8 @@ macOS and Linux system proxy control are unsupported.
 
 TUN one-click takeover remains disabled and is a stable-release gate. Generated
 Core configs force `client.tun.auto_route=false` and
-`client.tun.dns_hijack=false`; the local HTTP/SOCKS probe only validates Prism's
+`client.tun.dns_hijack=false`, require `client.tun.tgp_only=true`, and use the
+safe MTU/datagram budget 1280/1352. The local HTTP/SOCKS probe only validates Prism's
 generated Xray inbounds and does not change host network state.
 
 ## Test Coverage

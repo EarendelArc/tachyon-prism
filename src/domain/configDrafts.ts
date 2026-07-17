@@ -1,5 +1,6 @@
 import { defaultLauncherSettings } from "./gameProfiles";
 import type { GameProfile, LauncherSettings } from "./gameProfiles";
+import { normalizeGameRoutes } from "./gameRoutes";
 import {
   buildXrayOutboundDraft,
   xrayConfigTemplateForNode,
@@ -134,6 +135,7 @@ export interface CoreClientDraftOptions {
   fecGroupTimeoutMs?: number;
   fecParityShards?: number;
   gameProfiles?: GameProfile[];
+  gameRoutes?: string[];
   launchers?: LauncherSettings;
   connectionMigration?: boolean;
   localAddrs?: string[];
@@ -151,6 +153,24 @@ export interface CoreClientDraftOptions {
   tunDnsHijack?: boolean;
   tunMtu?: number;
 }
+
+export type CoreClientConfigErrorCode = "tun-mtu-too-small" | "tun-mtu-unsafe";
+
+export class CoreClientConfigError extends Error {
+  readonly code: CoreClientConfigErrorCode;
+  readonly mtu: number;
+
+  constructor(code: CoreClientConfigErrorCode, mtu: number) {
+    super(code);
+    this.name = "CoreClientConfigError";
+    this.code = code;
+    this.mtu = mtu;
+  }
+}
+
+export const coreTgpMaxDatagramSize = 1352;
+export const coreTgpWorstCaseTunOverhead = 68;
+export const defaultCoreTunMtu = 1280;
 
 export function buildXrayClientConfigDraft(
   node: ProxyNode,
@@ -447,10 +467,18 @@ export function buildCoreClientConfigDraft(
     throw new Error("Tachyon multipath requires connection migration");
   }
   const gameProfiles = options.gameProfiles ?? [];
+  const gameRoutes = normalizeGameRoutes(options.gameRoutes ?? []);
   const launchers = options.launchers ?? defaultLauncherSettings;
   const tgpAuthPsk = options.tgpAuthPsk?.trim() ?? "";
   if (tgpAuthPsk && tgpAuthPsk.length < 16) {
     throw new Error("Tachyon TGP PSK must be at least 16 characters");
+  }
+  const tunMtu = options.tunMtu ?? defaultCoreTunMtu;
+  if (tunMtu < 576) {
+    throw new CoreClientConfigError("tun-mtu-too-small", tunMtu);
+  }
+  if (tunMtu + coreTgpWorstCaseTunOverhead > coreTgpMaxDatagramSize) {
+    throw new CoreClientConfigError("tun-mtu-unsafe", tunMtu);
   }
 
   return {
@@ -459,9 +487,11 @@ export function buildCoreClientConfigDraft(
       tun: {
         name: "",
         address: options.tunAddress ?? "198.18.0.1/16",
-        mtu: options.tunMtu ?? 9000,
+        mtu: tunMtu,
         auto_route: false,
         dns_hijack: false,
+        tgp_only: true,
+        game_routes: gameRoutes,
       },
       routing: {
         default_action: "direct",
@@ -472,11 +502,6 @@ export function buildCoreClientConfigDraft(
             cidr: "192.168.0.0/16",
             action: "direct",
             priority: 50,
-          },
-          {
-            geoip: "CN",
-            action: "direct",
-            priority: 10,
           },
         ],
       },
@@ -501,6 +526,7 @@ export function buildCoreClientConfigDraft(
       },
       connection_migration: connectionMigration,
       multipath: options.multipath ?? false,
+      max_datagram_size: coreTgpMaxDatagramSize,
       handshake_timeout: "5s",
       session_idle_timeout: "60s",
     },

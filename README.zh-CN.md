@@ -68,7 +68,9 @@ Prism 在本地解析订阅内容，并把选中节点保存在桌面控制面�
 Config 面板会根据当前选中的 Xray 节点和 Tachyon 服务器档案生成两份 JSON 草稿：
 
 - `xray-client.json`：本地 SOCKS/HTTP inbound 加选中节点对应的 Xray outbound。HTTP inbound 用于 Prism 的本地代理探测，也可供支持显式 HTTP 代理的应用使用。启用 Xray 统计时，Prism 还会按 Xray 官方 API 方式加入 `StatsService` inbound，让概览图可以显示 Xray 流量而不需要 Tachyon Core 参与。
-- `client.json`：Tachyon Core 客户端配置，描述 TGP UDP 游戏路径，并把 Prism 管理的游戏配置写入 `client.routing.game_profiles`，把启动器策略写入 `client.routing.launchers`。
+- `client.json`：Tachyon Core 客户端配置，描述 TGP UDP 游戏路径，并把 Prism 管理的游戏配置写入 `client.routing.game_profiles`，把启动器策略写入 `client.routing.launchers`，把单独持久化的游戏服务器 CIDR 写入 `client.tun.game_routes`。
+
+设置 > 规则会明确分开游戏服务器网段、手动程序规则和 Steam 游戏规则。游戏服务器网段列表为空表示 Prism 不接管任何目的网段。程序和 Steam 规则只在流量被捕获后负责分类，不会自行添加系统路由；CIDR 路由按目的地址生效，因此会影响访问该网段的所有程序。
 
 为了完整支持 Xray 能力，Prism 优先使用订阅或完整 Xray JSON 输入里保留下来的 outbound 对象，而不是重新猜测所有字段。
 
@@ -82,7 +84,7 @@ Binaries 面板可以把本地 `xray` 或 `tachyon-core` 可执行文件复制�
 写设置或生成配置，不会启动任一核心，不会执行已安装二进制，也不会启用系统代理或
 Tachyon TUN。
 
-Runtime 面板会把二进制路径保存到 `runtime-settings.json`。`Start All` 会先写入并验证最新生成的配置文件：Xray 使用原生 `run -test -config` 模式，Tachyon Core 使用 `validate --config`。随后 Prism 启动 Xray 并等待其本地 readiness，通过后才启动 Tachyon Core 并等待本地 Core `/v1/health`；任一启动或 readiness 失败都会回滚本次事务已经启动的核心。Config Drafts 区域也提供手动验证按钮，并会保留最近一次验证结果。同一个 Runtime 面板还会保存本地监听端口与核心传输设置：Xray SOCKS、Xray HTTP 探测入站、Xray StatsService、Tachyon HTTP IPC、Tachyon gRPC、TUN 地址/MTU 和遥测间隔。Alpha 配置生成始终写入 `client.tun.auto_route=false` 和 `client.tun.dns_hijack=false`，即使调用方传入 true。在 Windows 上，Tachyon Core 还要求 `wintun.dll` 与配置的 `tachyon-core.exe` 位于同一目录；Prism 会在 Runtime readiness 中提示，并在缺少必需 sidecar 时阻止启动 Core。Prism 也会检查当前进程是否具备管理 TUN 设备的权限，但这个检查只读，不是当前 alpha 的启动门槛，也不会自行启用 TUN。
+Runtime 面板会把二进制路径保存到 `runtime-settings.json`。`Start All` 会先写入并验证最新生成的配置文件：Xray 使用原生 `run -test -config` 模式，Tachyon Core 使用 `validate --config`。随后 Prism 启动 Xray 并等待其本地 readiness，通过后才启动 Tachyon Core 并等待本地 Core `/v1/health`；任一启动或 readiness 失败都会回滚本次事务已经启动的核心。Config Drafts 区域也提供手动验证按钮，并会保留最近一次验证结果。同一个 Runtime 面板还会保存本地监听端口与核心传输设置：Xray SOCKS、Xray HTTP 探测入站、Xray StatsService、Tachyon HTTP IPC、Tachyon gRPC、TUN 地址/MTU 和遥测间隔。Alpha 配置生成始终写入 `client.tun.auto_route=false`、`client.tun.dns_hijack=false` 与 `client.tun.tgp_only=true`；默认 MTU 为 1280，`tgp.max_datagram_size` 为 1352，超过 1284 字节的内层 MTU 预算会被拒绝。Prism 不再生成 Core 不支持的 `domain` 或 `geoip` 客户端规则。在 Windows 上，Tachyon Core 还要求 `wintun.dll` 与配置的 `tachyon-core.exe` 位于同一目录；Prism 会在 Runtime readiness 中提示，并在缺少必需 sidecar 时阻止启动 Core。Prism 也会检查当前进程是否具备管理 TUN 设备的权限，但这个检查只读，不是当前 alpha 的启动门槛，也不会自行启用 TUN。
 
 概览页快捷操作里提供本地 HTTP/SOCKS 代理探测。它会检查配置的本地 Xray HTTP inbound 和 SOCKS inbound，并分别显示状态码、耗时和错误。这个测试只验证当前选中 Xray outbound 的代理链路，不会修改系统代理，也不会触发 Tachyon TUN 模式。
 

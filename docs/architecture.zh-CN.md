@@ -27,7 +27,7 @@ Tauri `invoke()` 连接两端：前端调用 Rust 命令，Rust 返回 JSON 可�
 | --- | --- |
 | Overview | 运行时状态、游戏模式概要、就绪计数 |
 | Nodes | 导入订阅、浏览节点、选择活跃节点 |
-| Game Mode | 手动配置文件、Steam 扫描建议 |
+| Game Mode | 显式服务器 CIDR、手动配置文件、Steam 扫描建议 |
 | Launchers | Steam 启动器检测、子进程跟踪、UDP 加速 |
 | Runtime | 二进制管理、从 release 安装、启动/停止核心、就绪检查 |
 | Config | 生成和保存 Xray + Core JSON 配置草稿 |
@@ -37,7 +37,7 @@ Tauri `invoke()` 连接两端：前端调用 Rust 命令，Rust 返回 JSON 可�
 Prism 根据选中的节点和用户设置生成两个 JSON 文件：
 
 - `xray-client.json`：本地 SOCKS 入站 + 选中节点的 Xray 出站。
-- `client.json`：Tachyon Core 客户端配置，包含 `client.routing.game_profiles` 中的游戏配置文件、`client.routing.launchers` 中的启动器策略、`client.proxy.local_addrs` 中的 TGP 本地绑定地址、`tgp.connection_migration` 中的连接迁移开关，以及 `tgp.multipath` 中的多路径开关。
+- `client.json`：Tachyon Core 客户端配置，包含 `client.routing.game_profiles` 中的游戏配置文件、`client.routing.launchers` 中的启动器策略、`client.tun.game_routes` 中的显式目的 CIDR、`client.proxy.local_addrs` 中的 TGP 本地绑定地址、`tgp.connection_migration` 中的连接迁移开关，以及 `tgp.multipath` 中的多路径开关。
 
 生成的配置写入 Tauri 应用配置目录，也可从 Config 面板复制到剪贴板。
 
@@ -67,7 +67,7 @@ Runtime 面板实时显示两个核心的进程状态，并支持单独启动/�
 
 Windows 系统代理控制是已经实现的 alpha 事务，管理当前用户的 WinINet 注册表设置。它会快照原状态、验证应用值、在释放接管时恢复快照，并写入恢复日志以便崩溃后下次启动时恢复。真实 Windows 宿主注册表验收尚未执行，因此该功能还不能视为生产可用。macOS 和 Linux 系统代理不受支持。
 
-TUN 一键接管仍保持禁用，并且是 stable 发布门禁。生成的 Core 配置会强制 `client.tun.auto_route=false` 与 `client.tun.dns_hijack=false`；本地 HTTP/SOCKS 探针只验证 Prism 生成的 Xray 入站，不修改宿主网络状态。
+TUN 一键接管仍保持禁用，并且是 stable 发布门禁。生成的 Core 配置会强制 `client.tun.auto_route=false`、`client.tun.dns_hijack=false` 与 `client.tun.tgp_only=true`，并使用 1280/1352 的安全 MTU/datagram 预算；本地 HTTP/SOCKS 探针只验证 Prism 生成的 Xray 入站，不修改宿主网络状态。
 
 ## 测试覆盖
 

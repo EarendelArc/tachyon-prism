@@ -111,7 +111,14 @@ selected Tachyon server profile:
   involving Tachyon Core.
 - `client.json`: a Tachyon Core client config for the TGP UDP game path,
   including Prism-managed game profiles under `client.routing.game_profiles`
-  and launcher policy under `client.routing.launchers`.
+  and launcher policy under `client.routing.launchers`. Explicit game server
+  CIDRs are persisted separately and written to `client.tun.game_routes`.
+
+Settings > Rules separates game server networks, manual program rules, and
+Steam game rules. An empty game server network list means Prism takes over no
+destination networks. Program and Steam rules classify traffic after capture;
+they do not add OS routes. A configured CIDR is destination-based and therefore
+affects every process contacting that network.
 
 For complete Xray feature support, Prism prefers the preserved outbound object
 from the subscription or full Xray JSON input instead of rebuilding fields from
@@ -157,7 +164,11 @@ The same Runtime panel stores local listen ports and Core transport settings:
 Xray SOCKS, Xray HTTP probe inbound, Xray StatsService, Tachyon HTTP IPC,
 Tachyon gRPC, TUN address/MTU, and telemetry interval.
 Alpha config generation always writes `client.tun.auto_route=false` and
-`client.tun.dns_hijack=false`, even if a caller passes true.
+`client.tun.dns_hijack=false`, even if a caller passes true. It also writes
+`client.tun.tgp_only=true`, uses a default MTU of 1280 with
+`tgp.max_datagram_size=1352`, and rejects MTUs above the resulting 1284-byte
+inner-packet budget. Core-unsupported `domain` and `geoip` route rules are not
+generated.
 On Windows, Tachyon Core also requires `wintun.dll` in the same directory as
 the configured `tachyon-core.exe`; Prism reports this in Runtime readiness and
 blocks Core start when the required sidecar is missing.
