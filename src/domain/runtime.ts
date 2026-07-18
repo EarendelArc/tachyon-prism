@@ -509,26 +509,128 @@ const tachyonCoreStartBlockCodes = new Set([
 
 export interface TachyonCorePreflightMessages {
   capabilityUnavailable: string;
+  checkConfirmed: string;
+  checkLabels: Record<string, string>;
+  checkNotReady: string;
+  checkSkipped: string;
+  checkWarning: string;
+  diagnosticDetails: string;
   fallback: string;
   issues: string;
   passed: string;
   startBlocked: string;
+  unknownCheck: string;
   warnings: string;
   xrayIndependent: string;
 }
 
 const defaultTachyonCorePreflightMessages: TachyonCorePreflightMessages = {
   capabilityUnavailable: "required capability is unavailable",
+  checkConfirmed: "{label}: confirmed",
+  checkLabels: {
+    AUTO_ROUTE_DISABLED: "Automatic routing disabled",
+    AUTO_ROUTE_SEMANTICS: "Automatic routing disabled",
+    CLIENT_REQUIRES_TUN: "Client TUN requirement",
+    CONFIG_VALID: "Core configuration",
+    IFCONFIG_PRESENT: "ifconfig tool",
+    ROUTE_PRESENT: "route tool",
+    SELECTIVE_ROUTES_SUPPORTED: "Selective game routes",
+    TUN_DEVICE_PRESENT: "TUN device",
+    TUN_PRIVILEGE: "TUN privilege",
+    TUN_REQUIRED: "Client TUN requirement",
+    WINTUN_DLL_PRESENT: "Wintun sidecar",
+  },
+  checkNotReady: "{label}: not ready",
+  checkSkipped: "{label}: skipped",
+  checkWarning: "{label}: requires attention",
+  diagnosticDetails: "Diagnostic details: {details}",
   fallback: "Core version lacks preflight; validate only",
   issues: "Tachyon Core preflight found readiness issues: {details}",
   passed: "Tachyon Core preflight passed",
   startBlocked: "Tachyon Core game acceleration cannot start: {details}.",
+  unknownCheck: "Core check {code}",
   warnings: "Tachyon Core preflight completed with warnings: {details}",
   xrayIndependent: "Xray local proxy can still run independently.",
 };
 
-function preflightMessage(template: string, details: string): string {
-  return template.replace("{details}", details);
+function preflightMessage(template: string, values: Record<string, string>): string {
+  return Object.entries(values).reduce(
+    (message, [key, value]) => message.split(`{${key}}`).join(value),
+    template,
+  );
+}
+
+function preflightCheckLabel(
+  check: TachyonCorePreflightCheck,
+  messages: TachyonCorePreflightMessages,
+): string {
+  const code = check.code.trim().toUpperCase();
+  return (
+    messages.checkLabels[code] ||
+    preflightMessage(messages.unknownCheck, { code: code || "UNKNOWN" })
+  );
+}
+
+function preflightCheckUserSummary(
+  check: TachyonCorePreflightCheck,
+  messages: TachyonCorePreflightMessages,
+): string {
+  const status = check.status.trim().toLowerCase();
+  const template = ["error", "failed", "fail"].includes(status)
+    ? messages.checkNotReady
+    : ["warn", "warning"].includes(status)
+      ? messages.checkWarning
+      : status === "skipped"
+        ? messages.checkSkipped
+        : ["ok", "pass", "passed", "success"].includes(status)
+          ? messages.checkConfirmed
+          : messages.checkWarning;
+  return preflightMessage(template, { label: preflightCheckLabel(check, messages) });
+}
+
+function preflightCheckSummary(
+  checks: TachyonCorePreflightCheck[],
+  messages: TachyonCorePreflightMessages,
+): string {
+  return checks.map((check) => preflightCheckUserSummary(check, messages)).join("; ");
+}
+
+function preflightDiagnosticSummary(
+  checks: TachyonCorePreflightCheck[],
+  coreError?: string | null,
+): string {
+  const details = checks.flatMap((check) => {
+    const values = [check.message, check.details]
+      .map((value) => value.trim())
+      .filter((value, index, all) => value.length > 0 && all.indexOf(value) === index);
+    return values.length > 0 ? [`${check.code}: ${values.join(" / ")}`] : [];
+  });
+  const normalizedCoreError = coreError?.trim();
+  if (normalizedCoreError && !details.includes(normalizedCoreError)) {
+    details.push(`CORE: ${normalizedCoreError}`);
+  }
+  return details.join("; ");
+}
+
+function appendPreflightDiagnostics(
+  summary: string,
+  diagnostics: string,
+  messages: TachyonCorePreflightMessages,
+): string {
+  return diagnostics
+    ? `${summary} ${preflightMessage(messages.diagnosticDetails, { details: diagnostics })}`
+    : summary;
+}
+
+export function tachyonCorePreflightCheckMessage(
+  check: TachyonCorePreflightCheck,
+  messages: TachyonCorePreflightMessages = defaultTachyonCorePreflightMessages,
+): string {
+  return appendPreflightDiagnostics(
+    preflightCheckUserSummary(check, messages),
+    preflightDiagnosticSummary([check]),
+    messages,
+  );
 }
 
 export function tachyonCorePreflightFallbackMessage(
@@ -548,10 +650,30 @@ export function tachyonCorePreflightReadinessMessage(
   }
   if (result.ok) {
     return result.overall.toLowerCase() === "warn" || result.overall.toLowerCase() === "warning"
-      ? preflightMessage(messages.warnings, preflightWarningSummary(result))
+      ? appendPreflightDiagnostics(
+          preflightMessage(messages.warnings, {
+            details: preflightWarningSummary(result, messages),
+          }),
+          preflightDiagnosticSummary(
+            result.checks.filter((check) =>
+              ["warn", "warning"].includes(check.status.toLowerCase()),
+            ),
+          ),
+          messages,
+        )
       : messages.passed;
   }
-  return preflightMessage(messages.issues, result.error || preflightFailureSummary(result));
+  const failedChecks = result.checks.filter((check) =>
+    ["error", "failed", "fail"].includes(check.status.toLowerCase()),
+  );
+  const summaryChecks = failedChecks.length > 0 ? failedChecks : result.checks;
+  return appendPreflightDiagnostics(
+    preflightMessage(messages.issues, {
+      details: preflightFailureSummary(result, messages),
+    }),
+    preflightDiagnosticSummary(summaryChecks, result.error),
+    messages,
+  );
 }
 
 export function tachyonCorePreflightStartBlockReason(
@@ -569,41 +691,39 @@ export function tachyonCorePreflightStartBlockReason(
   if (blockingChecks.length === 0) {
     return null;
   }
-  const details = blockingChecks
-    .map((check) => {
-      const message = check.message || check.details || messages.capabilityUnavailable;
-      return `${check.code}: ${message}`;
-    })
-    .join("; ");
-  return `${preflightMessage(messages.startBlocked, details)} ${messages.xrayIndependent}`;
+  const summary = `${preflightMessage(messages.startBlocked, {
+    details: preflightCheckSummary(blockingChecks, messages),
+  })} ${messages.xrayIndependent}`;
+  return appendPreflightDiagnostics(
+    summary,
+    preflightDiagnosticSummary(blockingChecks),
+    messages,
+  );
 }
 
-function preflightFailureSummary(result: TachyonCorePreflightResult): string {
+function preflightFailureSummary(
+  result: TachyonCorePreflightResult,
+  messages: TachyonCorePreflightMessages,
+): string {
   const failedChecks = result.checks.filter((check) =>
     ["error", "failed", "fail"].includes(check.status.toLowerCase()),
   );
   const checks = failedChecks.length > 0 ? failedChecks : result.checks;
-  return preflightCheckSummary(checks) || `overall=${result.overall}`;
+  return preflightCheckSummary(checks, messages) || messages.capabilityUnavailable;
 }
 
-function preflightWarningSummary(result: TachyonCorePreflightResult): string {
+function preflightWarningSummary(
+  result: TachyonCorePreflightResult,
+  messages: TachyonCorePreflightMessages,
+): string {
   return (
     preflightCheckSummary(
       result.checks.filter((check) =>
         ["warn", "warning"].includes(check.status.toLowerCase()),
       ),
-    ) || `overall=${result.overall}`
+      messages,
+    ) || messages.capabilityUnavailable
   );
-}
-
-function preflightCheckSummary(checks: TachyonCorePreflightCheck[]): string {
-  return checks
-    .map((check) => {
-      const message = check.message || check.details;
-      return message ? `${check.code}: ${message}` : check.code;
-    })
-    .filter(Boolean)
-    .join("; ");
 }
 
 export async function getSystemProxyStatus(): Promise<SystemProxyState> {

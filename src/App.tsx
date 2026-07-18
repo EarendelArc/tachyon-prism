@@ -62,6 +62,7 @@ import {
   startXray,
   stopTachyonCore,
   stopXray,
+  tachyonCorePreflightCheckMessage,
   tachyonCorePreflightReadinessMessage,
   tachyonCorePreflightStartBlockReason,
   tachyonIpcBaseUrl,
@@ -89,6 +90,7 @@ import {
   type TcpLatencyResult,
   type XrayTrafficStats,
 } from "./domain/runtime";
+import { preflightMessagesForLanguage } from "./domain/preflightI18n";
 import {
   activeSubscription,
   createSubscriptionSnapshot,
@@ -649,13 +651,6 @@ const zh = {
   gameProfilesReadiness: "游戏规则",
   gameProfilesEnabled: "已启用 {count} 条游戏规则。",
   gameProfilesNone: "没有启用的游戏规则。请添加程序规则或扫描 Steam。",
-  preflightCapabilityUnavailable: "所需能力不可用",
-  preflightFallback: "Core 版本不支持启动前检查；仅验证配置",
-  preflightIssues: "Tachyon Core 启动前检查发现就绪问题：{details}",
-  preflightPassed: "Tachyon Core 启动前检查通过",
-  preflightStartBlocked: "Tachyon Core 游戏加速无法启动：{details}。",
-  preflightWarnings: "Tachyon Core 启动前检查完成，但存在警告：{details}",
-  preflightXrayIndependent: "Xray 本地代理仍可独立运行。",
   subscriptionUpdateFailed: "订阅更新失败",
   subscriptionImportFailed: "订阅导入失败",
   subscriptionSelectionFailed: "订阅选择失败",
@@ -1063,13 +1058,6 @@ const en: typeof zh = {
   gameProfilesReadiness: "Game profiles",
   gameProfilesEnabled: "{count} game profile(s) enabled.",
   gameProfilesNone: "No enabled game profile. Add a program or scan Steam.",
-  preflightCapabilityUnavailable: "required capability is unavailable",
-  preflightFallback: "Core version lacks preflight; validate only",
-  preflightIssues: "Tachyon Core preflight found readiness issues: {details}",
-  preflightPassed: "Tachyon Core preflight passed",
-  preflightStartBlocked: "Tachyon Core game acceleration cannot start: {details}.",
-  preflightWarnings: "Tachyon Core preflight completed with warnings: {details}",
-  preflightXrayIndependent: "Xray local proxy can still run independently.",
   subscriptionUpdateFailed: "Subscription update failed",
   subscriptionImportFailed: "Subscription import failed",
   subscriptionSelectionFailed: "Subscription selection failed",
@@ -1412,18 +1400,6 @@ function runtimeWithTachyonServer(
   };
 }
 
-function preflightMessages(ui: typeof zh): TachyonCorePreflightMessages {
-  return {
-    capabilityUnavailable: ui.preflightCapabilityUnavailable,
-    fallback: ui.preflightFallback,
-    issues: ui.preflightIssues,
-    passed: ui.preflightPassed,
-    startBlocked: ui.preflightStartBlocked,
-    warnings: ui.preflightWarnings,
-    xrayIndependent: ui.preflightXrayIndependent,
-  };
-}
-
 function binaryReadiness(
   label: string,
   path: string,
@@ -1479,13 +1455,14 @@ function checkReadiness(
   check: TachyonCorePreflightCheck | null,
   label: string,
   fallback: ReadinessItem,
+  messages: TachyonCorePreflightMessages,
 ): ReadinessItem {
   if (!check) {
     return fallback;
   }
   const status = check.status.toLowerCase();
   return {
-    detail: check.message || check.details || fallback.detail,
+    detail: tachyonCorePreflightCheckMessage(check, messages),
     label,
     state: ["error", "failed", "fail"].includes(status)
       ? "error"
@@ -1768,7 +1745,7 @@ export function App() {
   const trafficRates = trafficSamples[trafficSamples.length - 1] ?? emptyTrafficSample();
   const readinessItems = useMemo<ReadinessItem[]>(() => {
     const items: ReadinessItem[] = [];
-    const localizedPreflightMessages = preflightMessages(ui);
+    const localizedPreflightMessages = preflightMessagesForLanguage(language);
     const activeNodeCompatibility = activeNode
       ? xrayOutboundCompatibilityForNode(activeNode)
       : null;
@@ -1874,6 +1851,7 @@ export function App() {
               label: ui.tachyonConfigValid,
               state: "error",
             },
+        localizedPreflightMessages,
       ),
     );
     items.push(
@@ -1885,6 +1863,7 @@ export function App() {
           label: ui.clientRequiresTun,
           state: "warning",
         },
+        localizedPreflightMessages,
       ),
     );
     items.push(
@@ -1896,6 +1875,7 @@ export function App() {
           label: ui.autoRouteDisabled,
           state: "warning",
         },
+        localizedPreflightMessages,
       ),
     );
     items.push(
@@ -1911,6 +1891,7 @@ export function App() {
             ? "ok"
             : "warning",
         },
+        localizedPreflightMessages,
       ),
     );
     items.push(
@@ -1930,6 +1911,7 @@ export function App() {
               label: ui.tunPrivilege,
               state: "warning",
             },
+        localizedPreflightMessages,
       ),
     );
     items.push(
@@ -2655,7 +2637,12 @@ export function App() {
     }
     if (announce) {
       const preflight = await runTachyonCorePreflight(paths, settings);
-      setMessage(tachyonCorePreflightReadinessMessage(preflight, preflightMessages(ui)));
+      setMessage(
+        tachyonCorePreflightReadinessMessage(
+          preflight,
+          preflightMessagesForLanguage(language),
+        ),
+      );
     }
     return result;
   }
@@ -2674,7 +2661,10 @@ export function App() {
     settings: RuntimeSettings,
   ): Promise<TachyonCorePreflightResult> {
     const result = await runTachyonCorePreflight(paths, settings);
-    const blocker = tachyonCorePreflightStartBlockReason(result, preflightMessages(ui));
+    const blocker = tachyonCorePreflightStartBlockReason(
+      result,
+      preflightMessagesForLanguage(language),
+    );
     if (blocker) {
       throw new Error(blocker);
     }
@@ -2691,7 +2681,10 @@ export function App() {
       if (drafts.core) {
         results.push(await runTachyonConfigValidation(paths, settings, false));
         const preflight = await runTachyonCorePreflight(paths, settings);
-        preflightFallback = tachyonCorePreflightReadinessMessage(preflight, preflightMessages(ui));
+        preflightFallback = tachyonCorePreflightReadinessMessage(
+          preflight,
+          preflightMessagesForLanguage(language),
+        );
       }
       const ok = Boolean(drafts.xray || results.length > 0) && results.every((result) => result.ok);
       setMessage(preflightFallback || (ok ? ui.configsValidated : ui.configsValidationErrors));
@@ -2999,7 +2992,12 @@ export function App() {
       if (kind === "tachyonCore") {
         await runTachyonConfigValidation(paths, settings, false);
         const preflight = await assertTachyonCoreStartable(paths, settings);
-        setMessage(tachyonCorePreflightReadinessMessage(preflight, preflightMessages(ui)));
+        setMessage(
+          tachyonCorePreflightReadinessMessage(
+            preflight,
+            preflightMessagesForLanguage(language),
+          ),
+        );
       }
       const status =
         kind === "xray"
@@ -3087,7 +3085,12 @@ export function App() {
       const paths = await writeDrafts("all");
       await runTachyonConfigValidation(paths, settings, false);
       const preflight = await assertTachyonCoreStartable(paths, settings);
-      setMessage(tachyonCorePreflightReadinessMessage(preflight, preflightMessages(ui)));
+      setMessage(
+        tachyonCorePreflightReadinessMessage(
+          preflight,
+          preflightMessagesForLanguage(language),
+        ),
+      );
       const result = await invokeDesktop<StartAllResult>("start_all", {
         tachyonCoreBinaryPath: settings.tachyonCoreBinaryPath,
         tachyonCoreConfigPath: paths.coreConfigPath,

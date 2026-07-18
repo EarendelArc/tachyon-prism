@@ -4,6 +4,7 @@ import {
   buildReleaseDiagnosticsDisplay,
   commitValidatedXrayConfig,
   readCanonicalXrayConfig,
+  tachyonCorePreflightCheckMessage,
   tachyonCorePreflightFallbackMessage,
   tachyonCorePreflightReadinessMessage,
   tachyonCorePreflightStartBlockReason,
@@ -12,6 +13,7 @@ import {
   type CoreReleaseDiagnostics,
   type TachyonCorePreflightResult,
 } from "../runtime";
+import { preflightMessagesForLanguage } from "../preflightI18n";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -285,19 +287,20 @@ describe("tachyonCore preflight helpers", () => {
     expect(tachyonCorePreflightReadinessMessage(result)).toContain("preflight found readiness issues");
   });
 
-  it("uses the caller message catalog for user-visible preflight text", () => {
+  it("keeps non-empty English Core diagnostics out of zh-CN primary summaries", () => {
     const result: TachyonCorePreflightResult = {
       checks: [
         {
-          code: "TUN_PRIVILEGE",
-          details: "",
-          message: "",
+          code: "WINTUN_DLL_PRESENT",
+          details:
+            "Ship wintun.dll with tachyon-core.exe or add its directory to PATH before starting client mode.",
+          message: "wintun.dll was not found next to tachyon-core.exe or on PATH.",
           raw: null,
           status: "error",
         },
       ],
       command: "tachyon-core preflight --config client.json --json",
-      error: null,
+      error: "WINTUN_DLL_PRESENT: wintun.dll is unavailable",
       exitCode: 1,
       ok: false,
       overall: "error",
@@ -308,19 +311,36 @@ describe("tachyonCore preflight helpers", () => {
       stdoutTruncated: false,
       supported: true,
     };
-    const messages = {
-      capabilityUnavailable: "所需能力不可用",
-      fallback: "仅验证配置",
-      issues: "启动前检查失败：{details}",
-      passed: "启动前检查通过",
-      startBlocked: "游戏加速无法启动：{details}。",
-      warnings: "启动前检查有警告：{details}",
-      xrayIndependent: "Xray 仍可独立运行。",
+    const messages = preflightMessagesForLanguage("zh-CN");
+    const readiness = tachyonCorePreflightReadinessMessage(result, messages);
+    const blocker = tachyonCorePreflightStartBlockReason(result, messages) ?? "";
+    const check = tachyonCorePreflightCheckMessage(result.checks[0], messages);
+
+    for (const text of [readiness, blocker, check]) {
+      const [primary, diagnostics = ""] = text.split("诊断详情：");
+      expect(primary).toContain("Wintun 配套文件：未就绪");
+      expect(primary).not.toContain("was not found");
+      expect(primary).not.toContain("Ship wintun.dll");
+      expect(diagnostics).toContain("was not found");
+      expect(diagnostics).toContain("Ship wintun.dll");
+    }
+    expect(readiness).toContain("Tachyon Core 启动前检查发现就绪问题");
+    expect(blocker).toContain("Xray 本地代理仍可独立运行");
+  });
+
+  it("uses suitable localized summaries in the English interface", () => {
+    const check = {
+      code: "TUN_PRIVILEGE",
+      details: "Run Prism as administrator.",
+      message: "Administrator privileges are required to create the TUN device.",
+      raw: null,
+      status: "error",
     };
 
-    expect(tachyonCorePreflightReadinessMessage(result, messages)).toContain("启动前检查失败");
-    expect(tachyonCorePreflightStartBlockReason(result, messages)).toBe(
-      "游戏加速无法启动：TUN_PRIVILEGE: 所需能力不可用。 Xray 仍可独立运行。",
+    expect(
+      tachyonCorePreflightCheckMessage(check, preflightMessagesForLanguage("en")),
+    ).toBe(
+      "TUN privilege: not ready Diagnostic details: TUN_PRIVILEGE: Administrator privileges are required to create the TUN device. / Run Prism as administrator.",
     );
   });
 });
