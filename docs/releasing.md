@@ -23,6 +23,13 @@ test, build, and publish job checks out that same verified commit SHA. Runs for
 the same tag share one non-cancelling concurrency group, so two publication
 transactions cannot race.
 
+After all assets are prepared, the publication transaction verifies the remote
+tag object and peeled commit again. The next external write is the API call that
+creates the draft. This narrows the tag-check/create TOCTOU window, but GitHub
+does not offer an atomic operation that binds those two actions. Repository tag
+rulesets must therefore prohibit release-tag updates and deletions; the final
+check is defense in depth, not a replacement for an immutable-tag policy.
+
 ## Core compatibility contract
 
 `core-contract.json` pins the paired Tachyon Core repository, release tag, and
@@ -55,12 +62,20 @@ signing-status record. Release asset names include the platform label, and
 `SHA256SUMS.txt` covers every downloadable package, release notes, and
 `BUILD_METADATA.json`. The metadata records the verified Prism tag object and
 commit, `SOURCE_DATE_EPOCH`, pinned Core contract, and tool versions with stable
-key ordering.
+key ordering. Before upload, Prism normalizes the staged files and directories
+to `SOURCE_DATE_EPOCH` without rewriting package contents.
+
+This is best-effort timestamp normalization, not a claim that installers are
+byte-for-byte reproducible. Authenticode timestamps, Apple signing and
+notarization, and installer/package tool internals may still vary between runs.
 
 Publication is fail-on-existing: any GitHub Release with the same tag, including
 a draft, stops the workflow. The workflow creates a new draft, uploads the full
 asset set exactly once without `--clobber`, then publishes that draft. It never
-edits or replaces an existing official release.
+edits or replaces an existing official release. An EXIT trap handles upload or
+publish failures by querying only the numeric release ID returned by this
+transaction. It deletes that ID only when the API still reports the same tag and
+`draft=true`; a release that has become official is never deleted by cleanup.
 
 ## Signing policy
 

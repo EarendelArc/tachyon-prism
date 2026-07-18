@@ -132,6 +132,7 @@ def extract_matrix(path: Path, job_name: str) -> list[dict[str, str]]:
 def validate_workflows() -> None:
     release_path = ROOT / ".github" / "workflows" / "release.yml"
     ci_path = ROOT / ".github" / "workflows" / "ci.yml"
+    publication_path = ROOT / ".github" / "scripts" / "publish-release.sh"
     release_matrix = extract_matrix(release_path, "build")
     ci_matrix = extract_matrix(ci_path, "rust")
     if release_matrix != EXPECTED_MATRIX:
@@ -141,6 +142,7 @@ def validate_workflows() -> None:
 
     release = release_path.read_text(encoding="utf-8")
     ci = ci_path.read_text(encoding="utf-8")
+    publication = publication_path.read_text(encoding="utf-8")
     core_contract = json.loads((ROOT / "core-contract.json").read_text(encoding="utf-8"))
     core_repository = str(core_contract["repository"])
     core_commit = str(core_contract["commit"])
@@ -160,27 +162,44 @@ def validate_workflows() -> None:
         "EXPECTED_TAG_OBJECT: ${{ needs.prepare.outputs.tag_object }}",
         "ref: ${{ needs.prepare.outputs.commit }}",
         "group: prism-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}",
-        'gh release create "${VERSION}"',
-        "--draft",
-        'gh release upload "${VERSION}" release/*',
-        "release ${VERSION} already exists",
-        'gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}"',
+        "bash .github/scripts/publish-release.sh release/RELEASE_NOTES.md release",
+        'python .github/scripts/normalize-release-timestamps.py release "${SOURCE_DATE_EPOCH}"',
         "BUILD_METADATA.json",
+        '"installerByteReproducibilityGuaranteed": False',
+        '"stagedAssetTimestampsNormalized": True',
         "SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}",
-        "--verify-tag",
         "SHA256SUMS.txt",
         "SIGNING_STATUS",
     ]
     missing = [fragment for fragment in required_fragments if fragment not in release]
     if missing:
         fail("release workflow is missing contract guards: " + ", ".join(missing))
+    publication_fragments = [
+        "trap 'cleanup_failed_draft $?' EXIT",
+        'bash "${tag_verify_script}" "${VERSION}" "${COMMIT}" origin "${EXPECTED_TAG_OBJECT}"',
+        'release_id=$("${gh_cli}" api --method POST',
+        '-F draft=true',
+        '"${gh_cli}" release upload "${VERSION}" "${release_dir}"/*',
+        '"${gh_cli}" api --method PATCH',
+        '"${gh_cli}" api --method DELETE',
+        '"${current_draft}" != "true"',
+        "release ${VERSION} already exists",
+    ]
+    missing_publication = [fragment for fragment in publication_fragments if fragment not in publication]
+    if missing_publication:
+        fail("publication script is missing transaction guards: " + ", ".join(missing_publication))
+    verify_index = publication.index('bash "${tag_verify_script}"')
+    create_index = publication.index('release_id=$("${gh_cli}" api --method POST')
+    if verify_index >= create_index:
+        fail("final tag verification must precede draft creation")
+
     forbidden = ['gh release edit', '--clobber']
-    present = [fragment for fragment in forbidden if fragment in release]
+    present = [fragment for fragment in forbidden if fragment in release or fragment in publication]
     if present:
         fail("release workflow contains replace-in-place operations: " + ", ".join(present))
     if release.count("ref: ${{ needs.prepare.outputs.commit }}") != 3:
         fail("release jobs are not all pinned to the verified Prism commit")
-    if release.count('gh release upload "${VERSION}" release/*') != 1:
+    if publication.count('release upload "${VERSION}" "${release_dir}"/*') != 1:
         fail("release assets must be uploaded exactly once")
 
     core_fragments = [

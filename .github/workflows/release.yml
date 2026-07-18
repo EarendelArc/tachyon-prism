@@ -411,15 +411,6 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.commit }}
 
-      - name: Reverify release tag before publishing
-        id: publish_gate
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-          EXPECTED_COMMIT: ${{ needs.prepare.outputs.commit }}
-          EXPECTED_TAG_OBJECT: ${{ needs.prepare.outputs.tag_object }}
-        run: bash .github/scripts/verify-release-tag.sh "${RELEASE_TAG}" "${EXPECTED_COMMIT}" origin "${EXPECTED_TAG_OBJECT}"
-
       - name: Download artifacts
         uses: actions/download-artifact@v7.0.0
         with:
@@ -485,6 +476,10 @@ jobs:
                   "tagObject": os.environ["PRISM_TAG_OBJECT"],
                   "tagVerification": os.environ["TAG_VERIFICATION"],
               },
+              "reproducibility": {
+                  "installerByteReproducibilityGuaranteed": False,
+                  "stagedAssetTimestampsNormalized": True,
+              },
               "tools": tools,
           }
           (root / "release" / "BUILD_METADATA.json").write_text(
@@ -534,6 +529,7 @@ jobs:
             echo "Verify downloads with SHA256SUMS.txt."
           } > release/RELEASE_NOTES.md
           (cd release && sha256sum * > SHA256SUMS.txt && sha256sum --check SHA256SUMS.txt)
+          python .github/scripts/normalize-release-timestamps.py release "${SOURCE_DATE_EPOCH}"
 
       - name: Publish release
         shell: bash
@@ -542,36 +538,5 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.tag }}
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
           COMMIT: ${{ needs.prepare.outputs.commit }}
-        run: |
-          set -euo pipefail
-          existing_id=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            --jq ".[] | select(.tag_name == \"${VERSION}\") | .id" | head -n 1)
-          [[ -z "${existing_id}" ]] || {
-            echo "release ${VERSION} already exists as id ${existing_id}; refusing to edit or replace assets" >&2
-            exit 1
-          }
-
-          prerelease_flag=()
-          [[ "${PRERELEASE}" == "true" ]] && prerelease_flag=(--prerelease)
-          gh release create "${VERSION}" \
-            --draft \
-            --verify-tag \
-            --target "${COMMIT}" \
-            --title "Tachyon Prism ${VERSION}" \
-            --notes-file release/RELEASE_NOTES.md \
-            "${prerelease_flag[@]}"
-
-          release_id=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            --jq ".[] | select(.tag_name == \"${VERSION}\" and .draft == true) | .id" | head -n 1)
-          [[ -n "${release_id}" ]] || { echo "created draft release ${VERSION} was not found" >&2; exit 1; }
-          gh release upload "${VERSION}" release/*
-
-          if [[ "${PRERELEASE}" == "true" ]]; then
-            make_latest="false"
-          else
-            make_latest="true"
-          fi
-          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
-            -F draft=false \
-            -F prerelease="${PRERELEASE}" \
-            -f make_latest="${make_latest}" >/dev/null
+          EXPECTED_TAG_OBJECT: ${{ needs.prepare.outputs.tag_object }}
+        run: bash .github/scripts/publish-release.sh release/RELEASE_NOTES.md release

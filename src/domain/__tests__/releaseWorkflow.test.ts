@@ -11,8 +11,12 @@ const ciWorkflowPath = fileURLToPath(
 const coreContractPath = fileURLToPath(
   new URL("../../../core-contract.json", import.meta.url),
 );
+const publicationScriptPath = fileURLToPath(
+  new URL("../../../.github/scripts/publish-release.sh", import.meta.url),
+);
 
 const readReleaseWorkflow = () => readFileSync(releaseWorkflowPath, "utf8");
+const readPublicationScript = () => readFileSync(publicationScriptPath, "utf8");
 
 const getReleaseBaseCommand = (workflow: string) => {
   const match = workflow.match(/release_base="\$\((?<command>.+)\)"/);
@@ -79,18 +83,19 @@ describe("release workflow checksum assets", () => {
     expect(notesIndex).toBeGreaterThan(-1);
     expect(checksumsIndex).toBeGreaterThan(-1);
     expect(notesIndex).toBeLessThan(checksumsIndex);
-    expect(workflow).toContain("gh release upload \"${VERSION}\" release/*");
-    expect(workflow).not.toContain("--clobber");
+    const publication = readPublicationScript();
+    expect(publication).toContain('"${gh_cli}" release upload "${VERSION}" "${release_dir}"/*');
+    expect(publication).not.toContain("--clobber");
   });
 
-  it("uses generated release notes when creating the draft GitHub release", () => {
-    const workflow = readReleaseWorkflow();
+  it("uses generated release notes when creating the draft through the GitHub API", () => {
+    const publication = readPublicationScript();
 
-    expect(workflow).toMatch(
-      /gh release create "\$\{VERSION\}"[\s\S]*--notes-file release\/RELEASE_NOTES\.md/,
-    );
-    expect(workflow).not.toContain("gh release edit");
-    expect(workflow).not.toContain("--clobber");
+    expect(publication).toContain('"${gh_cli}" api --method POST');
+    expect(publication).toContain('-f body="$(<"${release_notes}")"');
+    expect(publication).toContain("-F draft=true");
+    expect(publication).not.toContain("gh release edit");
+    expect(publication).not.toContain("--clobber");
   });
 
   it("publishes alpha release limitations in GitHub release notes", () => {
@@ -108,21 +113,30 @@ describe("release workflow checksum assets", () => {
 
   it("pins every downstream release job to the verified tag commit", () => {
     const workflow = readReleaseWorkflow();
+    const publication = readPublicationScript();
 
     expect(workflow).toContain("Verify remote tag object and peeled commit");
     expect(workflow).toContain("EXPECTED_TAG_OBJECT: ${{ needs.prepare.outputs.tag_object }}");
     expect(workflow.match(/ref: \$\{\{ needs\.prepare\.outputs\.commit \}\}/g)).toHaveLength(3);
-    expect(workflow.match(/bash \.github\/scripts\/verify-release-tag\.sh/g)).toHaveLength(2);
+    expect(workflow.match(/bash \.github\/scripts\/verify-release-tag\.sh/g)).toHaveLength(1);
+    expect(publication).toContain('bash "${tag_verify_script}" "${VERSION}" "${COMMIT}" origin "${EXPECTED_TAG_OBJECT}"');
+    expect(publication.indexOf('bash "${tag_verify_script}"')).toBeLessThan(
+      publication.indexOf('release_id=$("${gh_cli}" api --method POST'),
+    );
   });
 
   it("uses same-tag concurrency and a fail-on-existing draft publication transaction", () => {
     const workflow = readReleaseWorkflow();
+    const publication = readPublicationScript();
 
     expect(workflow).toContain("group: prism-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}");
-    expect(workflow).toContain("release ${VERSION} already exists");
-    expect(workflow).toContain("--draft");
-    expect(workflow.match(/gh release upload "\$\{VERSION\}" release\/\*/g)).toHaveLength(1);
-    expect(workflow).toContain('gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}"');
+    expect(workflow).toContain("bash .github/scripts/publish-release.sh");
+    expect(publication).toContain("release ${VERSION} already exists");
+    expect(publication).toContain("trap 'cleanup_failed_draft $?' EXIT");
+    expect(publication.match(/release upload/g)).toHaveLength(1);
+    expect(publication).toContain('"${gh_cli}" api --method PATCH');
+    expect(publication).toContain('"${gh_cli}" api --method DELETE');
+    expect(publication).toContain('"${current_draft}" != "true"');
   });
 
   it("records reproducible Prism and Core source metadata", () => {
@@ -132,6 +146,11 @@ describe("release workflow checksum assets", () => {
     expect(workflow).toContain("BUILD_METADATA.json");
     expect(workflow).toContain('"coreContract": core');
     expect(workflow).toContain('"sourceDateEpoch": int(os.environ["SOURCE_DATE_EPOCH"])');
+    expect(workflow).toContain('"installerByteReproducibilityGuaranteed": False');
+    expect(workflow).toContain('"stagedAssetTimestampsNormalized": True');
+    expect(workflow).toContain(
+      'python .github/scripts/normalize-release-timestamps.py release "${SOURCE_DATE_EPOCH}"',
+    );
   });
 
   it("checks out the exact Core release pin in CI and Release", () => {

@@ -20,6 +20,11 @@ prepare job 会把远端标签取到隔离 ref，验证 tag object 与 peeled co
 对象 ID。后续 test、build 和 publish job 全部检出同一个已验证 commit SHA。同一标签的运行
 共享一个不取消旧任务的 concurrency group，避免两个发布事务并发竞争。
 
+全部资产准备完成后，发布事务会再次验证远端 tag object 与 peeled commit；紧接着的下一次
+外部写操作就是创建 draft 的 API。这样能缩小 tag 检查与创建 Release 之间的 TOCTOU 窗口，
+但 GitHub 没有把两者绑定为一个原子操作。仓库 tag ruleset 仍必须禁止更新或删除发布标签；
+最终复验是纵深防护，不能替代不可变标签策略。
+
 ## Core 兼容契约
 
 `core-contract.json` 固定配套 Tachyon Core 的仓库、发布标签和完整 commit。CI 与 Release
@@ -47,10 +52,17 @@ runner。
 和签名状态记录时，才会创建 GitHub Release。Release 文件名包含平台标识，
 `SHA256SUMS.txt` 覆盖全部可下载安装包、发布说明和 `BUILD_METADATA.json`。构建元数据以
 稳定键序记录已验证 Prism tag object/commit、`SOURCE_DATE_EPOCH`、固定 Core 契约和工具版本。
+上传前，Prism 会在不改写包内容的前提下，把暂存文件和目录时间戳归一到
+`SOURCE_DATE_EPOCH`。
+
+这是 best-effort 时间戳归一化，不代表安装包能够逐字节完全复现。Authenticode 时间戳、
+Apple 签名/公证，以及安装器和打包工具内部数据仍可能导致不同运行产生不同字节。
 
 发布采用 fail-on-existing：同一标签只要已有任何 GitHub Release（包括 draft）就直接失败。
 工作流新建 draft，不使用 `--clobber`，只上传一次完整资产集，然后发布该 draft；不会编辑或
-替换已有正式 Release。
+替换已有正式 Release。上传或发布失败时，EXIT trap 只查询本次事务 POST 返回的数值
+release ID；只有 API 仍报告相同 tag 且 `draft=true` 时才删除。已经转为正式的 Release
+绝不会被清理逻辑删除。
 
 ## 签名策略
 
