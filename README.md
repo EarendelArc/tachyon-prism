@@ -118,7 +118,10 @@ Settings > Rules separates game server networks, manual program rules, and
 Steam game rules. An empty game server network list means Prism takes over no
 destination networks. Program and Steam rules classify traffic after capture;
 they do not add OS routes. A configured CIDR is destination-based and therefore
-affects every process contacting that network.
+affects every process contacting that network. Prism clears IPv4/IPv6 host bits,
+stores canonical network CIDRs, and rejects equivalent duplicate networks. If
+the persisted list contains a malformed or non-string item, the whole list is
+loaded as empty so a damaged setting cannot silently add routes.
 
 For complete Xray feature support, Prism prefers the preserved outbound object
 from the subscription or full Xray JSON input instead of rebuilding fields from
@@ -231,7 +234,9 @@ Cargo dependencies are fetched through the project-local mirror configuration in
 GitHub Actions builds Prism from strict stable or prerelease tags. The release
 workflow produces downloadable Windows x64/ARM64, macOS x64/ARM64, and Linux
 x64/ARM64 packages, then publishes them with `SHA256SUMS.txt`. CI checks the
-same six-target matrix.
+same six-target matrix. CI and Release also check out the Tachyon Core tag and
+full commit pinned in `core-contract.json`, build that exact Core version, and
+validate JSON emitted by Prism's real generator.
 
 Stable releases require complete Windows Authenticode and Apple Developer ID
 signing/notarization credentials. Prereleases may be explicitly unsigned only

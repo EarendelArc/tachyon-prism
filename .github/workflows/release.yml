@@ -34,11 +34,16 @@ jobs:
       tag: ${{ steps.validate.outputs.tag }}
       channel: ${{ steps.validate.outputs.channel }}
       prerelease: ${{ steps.validate.outputs.prerelease }}
+      commit: ${{ steps.gate.outputs.commit }}
+      tag_object: ${{ steps.gate.outputs.tag_object }}
+      verification: ${{ steps.gate.outputs.verification }}
+      source_date_epoch: ${{ steps.gate.outputs.source_date_epoch }}
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v6.0.3
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
 
       - name: Validate tag, version, and workflow contract
         id: validate
@@ -54,6 +59,17 @@ jobs:
             --channel "${RELEASE_CHANNEL}" \
             --github-output "${GITHUB_OUTPUT}"
 
+      - name: Verify remote tag object and peeled commit
+        id: gate
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          expected_commit=$(git rev-parse HEAD)
+          bash .github/scripts/verify-release-tag.sh "${RELEASE_TAG}" "${expected_commit}"
+          echo "source_date_epoch=$(git show -s --format=%ct HEAD)" >> "${GITHUB_OUTPUT}"
+
   test:
     name: Test release tag
     needs: prepare
@@ -62,7 +78,15 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@v6.0.3
         with:
-          ref: refs/tags/${{ needs.prepare.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.commit }}
+
+      - name: Checkout pinned Tachyon Core contract
+        uses: actions/checkout@v6.0.3
+        with:
+          repository: tachyon-space/tachyon-core
+          ref: cbd46164e7dd8532b618723f3d6c5fc44a824e32
+          path: tachyon-core
+          fetch-depth: 0
 
       - name: Use crates.io on GitHub Actions
         shell: bash
@@ -81,6 +105,12 @@ jobs:
         with:
           node-version: "26.4.0"
           cache: npm
+
+      - name: Setup Go for Core contract
+        uses: actions/setup-go@v6.4.0
+        with:
+          go-version-file: tachyon-core/go.mod
+          cache-dependency-path: tachyon-core/go.sum
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.96.1
@@ -102,7 +132,14 @@ jobs:
         run: npm run typecheck
 
       - name: Frontend tests
+        env:
+          TACHYON_CORE_SOURCE_DIR: ${{ github.workspace }}/tachyon-core
         run: npm test
+
+      - name: Pinned Core contract
+        env:
+          TACHYON_CORE_SOURCE_DIR: ${{ github.workspace }}/tachyon-core
+        run: npm run test:core-contract
 
       - name: Rust check
         working-directory: src-tauri
@@ -152,11 +189,13 @@ jobs:
             signing_kind: none
     env:
       RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
+      TZ: UTC
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v6.0.3
         with:
-          ref: refs/tags/${{ needs.prepare.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.commit }}
 
       - name: Use crates.io on GitHub Actions
         shell: bash
@@ -370,7 +409,16 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@v6.0.3
         with:
-          ref: refs/tags/${{ needs.prepare.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.commit }}
+
+      - name: Reverify release tag before publishing
+        id: publish_gate
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          EXPECTED_COMMIT: ${{ needs.prepare.outputs.commit }}
+          EXPECTED_TAG_OBJECT: ${{ needs.prepare.outputs.tag_object }}
+        run: bash .github/scripts/verify-release-tag.sh "${RELEASE_TAG}" "${EXPECTED_COMMIT}" origin "${EXPECTED_TAG_OBJECT}"
 
       - name: Download artifacts
         uses: actions/download-artifact@v7.0.0
@@ -383,6 +431,10 @@ jobs:
         env:
           VERSION: ${{ needs.prepare.outputs.tag }}
           CHANNEL: ${{ needs.prepare.outputs.channel }}
+          PRISM_COMMIT: ${{ needs.prepare.outputs.commit }}
+          PRISM_TAG_OBJECT: ${{ needs.prepare.outputs.tag_object }}
+          TAG_VERIFICATION: ${{ needs.prepare.outputs.verification }}
+          SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
         run: |
           set -euo pipefail
           expected=(windows-x64 windows-arm64 macos-x64 macos-arm64 linux-x64 linux-arm64)
@@ -413,10 +465,41 @@ jobs:
             [[ "${status}" == "unsigned-no-credentials" ]] && unsigned_desktop=true
           done
 
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path.cwd()
+          core = json.loads((root / "core-contract.json").read_text(encoding="utf-8"))
+          tools = {}
+          for line in (root / ".tool-versions").read_text(encoding="utf-8").splitlines():
+              name, version = line.split(maxsplit=1)
+              tools[name] = version
+          metadata = {
+              "coreContract": core,
+              "prism": {
+                  "commit": os.environ["PRISM_COMMIT"],
+                  "sourceDateEpoch": int(os.environ["SOURCE_DATE_EPOCH"]),
+                  "tag": os.environ["VERSION"],
+                  "tagObject": os.environ["PRISM_TAG_OBJECT"],
+                  "tagVerification": os.environ["TAG_VERIFICATION"],
+              },
+              "tools": tools,
+          }
+          (root / "release" / "BUILD_METADATA.json").write_text(
+              json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+              newline="\n",
+          )
+          PY
+
           {
             echo "# Tachyon Prism ${VERSION}"
             echo
             echo "Channel: ${CHANNEL}"
+            echo "Prism commit: ${PRISM_COMMIT}"
+            echo "Compatible Tachyon Core: $(python -c 'import json; c=json.load(open("core-contract.json")); print(c["tag"] + " (" + c["commit"] + ")")')"
             echo
             if [[ "${VERSION}" == *-alpha* ]]; then
               echo "This is an alpha Tachyon Prism desktop release."
@@ -458,27 +541,37 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.tag }}
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
         run: |
           set -euo pipefail
-          if [[ "${PRERELEASE}" == "true" ]]; then
-            LATEST="false"
-          else
-            LATEST="true"
-          fi
+          existing_id=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"${VERSION}\") | .id" | head -n 1)
+          [[ -z "${existing_id}" ]] || {
+            echo "release ${VERSION} already exists as id ${existing_id}; refusing to edit or replace assets" >&2
+            exit 1
+          }
 
-          if gh release view "${VERSION}" >/dev/null 2>&1; then
-            gh release edit "${VERSION}" \
-              --title "Tachyon Prism ${VERSION}" \
-              --notes-file release/RELEASE_NOTES.md \
-              --prerelease="${PRERELEASE}" \
-              --latest="${LATEST}" \
-              --verify-tag
+          prerelease_flag=()
+          [[ "${PRERELEASE}" == "true" ]] && prerelease_flag=(--prerelease)
+          gh release create "${VERSION}" \
+            --draft \
+            --verify-tag \
+            --target "${COMMIT}" \
+            --title "Tachyon Prism ${VERSION}" \
+            --notes-file release/RELEASE_NOTES.md \
+            "${prerelease_flag[@]}"
+
+          release_id=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"${VERSION}\" and .draft == true) | .id" | head -n 1)
+          [[ -n "${release_id}" ]] || { echo "created draft release ${VERSION} was not found" >&2; exit 1; }
+          gh release upload "${VERSION}" release/*
+
+          if [[ "${PRERELEASE}" == "true" ]]; then
+            make_latest="false"
           else
-            gh release create "${VERSION}" \
-              --title "Tachyon Prism ${VERSION}" \
-              --notes-file release/RELEASE_NOTES.md \
-              --prerelease="${PRERELEASE}" \
-              --latest="${LATEST}" \
-              --verify-tag
+            make_latest="true"
           fi
-          gh release upload "${VERSION}" release/* --clobber
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -F draft=false \
+            -F prerelease="${PRERELEASE}" \
+            -f make_latest="${make_latest}" >/dev/null

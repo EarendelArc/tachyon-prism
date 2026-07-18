@@ -14,8 +14,18 @@
 本身，不是启动工作流时所在的分支。
 
 stable 会被标记为 GitHub Latest Release。prerelease 会被标记为预发布，并明确排除在
-Latest 之外。重新运行并编辑已有 Release 时也会按已校验标签重设这两个状态，避免保留
-旧通道信息。
+Latest 之外。
+
+prepare job 会把远端标签取到隔离 ref，验证 tag object 与 peeled commit，并记录两个完整
+对象 ID。后续 test、build 和 publish job 全部检出同一个已验证 commit SHA。同一标签的运行
+共享一个不取消旧任务的 concurrency group，避免两个发布事务并发竞争。
+
+## Core 兼容契约
+
+`core-contract.json` 固定配套 Tachyon Core 的仓库、发布标签和完整 commit。CI 与 Release
+会带完整标签历史检出该精确 commit；仓库或 ref 缺失会直接失败。跨仓测试会确认检出 commit
+具有固定标签，用该发布版本构建 Core，通过 Prism 的生产生成器产生 `client.json`，再调用
+真实 Core 的 `validate` 命令。测试不会在 Prism 中复制一份 Core 校验规则。
 
 ## 构建矩阵
 
@@ -34,8 +44,13 @@ ARM64 runner 标记为 public preview，因此首次发布前仍需确认仓库�
 runner。
 
 每个构建都会上传 Actions artifact。发布任务只有在六个 artifact 目录都包含实际产物
-和签名状态记录时，才会创建或更新 GitHub Release。Release 文件名包含平台标识，
-`SHA256SUMS.txt` 覆盖全部可下载安装包和发布说明。
+和签名状态记录时，才会创建 GitHub Release。Release 文件名包含平台标识，
+`SHA256SUMS.txt` 覆盖全部可下载安装包、发布说明和 `BUILD_METADATA.json`。构建元数据以
+稳定键序记录已验证 Prism tag object/commit、`SOURCE_DATE_EPOCH`、固定 Core 契约和工具版本。
+
+发布采用 fail-on-existing：同一标签只要已有任何 GitHub Release（包括 draft）就直接失败。
+工作流新建 draft，不使用 `--clobber`，只上传一次完整资产集，然后发布该 draft；不会编辑或
+替换已有正式 Release。
 
 ## 签名策略
 

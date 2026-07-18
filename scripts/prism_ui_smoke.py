@@ -338,18 +338,12 @@ def assert_fixed_window_labels_fit(cdp: CDP, page: str) -> None:
             document.querySelectorAll('.capability-pill strong, .core-switch strong')
           ).filter((item) => item.scrollWidth > item.clientWidth + 1)
             .map((item) => item.textContent.trim());
-          const visibilityRows = page === 'settings'
-            ? Array.from(document.querySelectorAll('.setting-row .segmented.wide button'))
-                .map((item) => Math.round(item.getBoundingClientRect().top))
-            : [];
-          return {{ clipped, visibilityRows }};
+          return {{ clipped }};
         }})()
         """,
     )
     if fit["clipped"]:
         raise AssertionError(f"fixed-window quick labels are clipped: {fit}")
-    if page == "settings" and len(set(fit["visibilityRows"])) > 1:
-        raise AssertionError(f"page visibility controls wrapped at 800x540: {fit}")
 
 
 def assert_desktop_viewport(cdp: CDP) -> None:
@@ -993,13 +987,13 @@ def capture_fixed_window_pages(cdp: CDP, output_dir: Path, language: str) -> Non
             "overview": "工作模式",
             "subscriptions": "更新全部",
             "plugins": "插件中心",
-            "settings": "个性化",
+            "settings": "通用设置",
         },
         "en": {
             "overview": "Work Mode",
             "subscriptions": "Update All",
             "plugins": "Plugin Center",
-            "settings": "Personalization",
+            "settings": "General Settings",
         },
     }[language]
     set_viewport(cdp, 800, 540)
@@ -1315,7 +1309,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
 
         text = navigate_hash(cdp, "settings")
         text = select_settings_section(cdp, 0)
-        assert_contains(text, "个性化", "主题", "核心")
+        assert_contains(text, "通用设置", "语言")
         assert_no_runtime_error(text)
         text = select_settings_section(cdp, 1)
         assert_contains(text, "诊断", "稳定", "预览", "诊断仅使用已保存的运行时设置")
@@ -1352,7 +1346,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         cdp.screenshot(output_dir / "settings-xray-json-editor-800x540-zh-CN.png")
         text = select_settings_section(cdp, 0)
         text = switch_to_english(cdp)
-        assert_contains(text, "Personalization", "Theme", "Core")
+        assert_contains(text, "General Settings", "Language")
         assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "settings-desktop-en.png")
         capture_fixed_window_pages(cdp, output_dir, "en")

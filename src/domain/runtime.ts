@@ -507,27 +507,56 @@ const tachyonCoreStartBlockCodes = new Set([
   "TUN_DEVICE_PRESENT",
 ]);
 
-export function tachyonCorePreflightFallbackMessage(result: TachyonCorePreflightResult): string | null {
-  return result.supported ? null : "Core version lacks preflight; validate only";
+export interface TachyonCorePreflightMessages {
+  capabilityUnavailable: string;
+  fallback: string;
+  issues: string;
+  passed: string;
+  startBlocked: string;
+  warnings: string;
+  xrayIndependent: string;
 }
 
-export function tachyonCorePreflightReadinessMessage(result: TachyonCorePreflightResult): string {
-  const fallback = tachyonCorePreflightFallbackMessage(result);
+const defaultTachyonCorePreflightMessages: TachyonCorePreflightMessages = {
+  capabilityUnavailable: "required capability is unavailable",
+  fallback: "Core version lacks preflight; validate only",
+  issues: "Tachyon Core preflight found readiness issues: {details}",
+  passed: "Tachyon Core preflight passed",
+  startBlocked: "Tachyon Core game acceleration cannot start: {details}.",
+  warnings: "Tachyon Core preflight completed with warnings: {details}",
+  xrayIndependent: "Xray local proxy can still run independently.",
+};
+
+function preflightMessage(template: string, details: string): string {
+  return template.replace("{details}", details);
+}
+
+export function tachyonCorePreflightFallbackMessage(
+  result: TachyonCorePreflightResult,
+  messages: TachyonCorePreflightMessages = defaultTachyonCorePreflightMessages,
+): string | null {
+  return result.supported ? null : messages.fallback;
+}
+
+export function tachyonCorePreflightReadinessMessage(
+  result: TachyonCorePreflightResult,
+  messages: TachyonCorePreflightMessages = defaultTachyonCorePreflightMessages,
+): string {
+  const fallback = tachyonCorePreflightFallbackMessage(result, messages);
   if (fallback) {
     return fallback;
   }
   if (result.ok) {
     return result.overall.toLowerCase() === "warn" || result.overall.toLowerCase() === "warning"
-      ? `Tachyon Core preflight completed with warnings: ${preflightWarningSummary(result)}`
-      : "Tachyon Core preflight passed";
+      ? preflightMessage(messages.warnings, preflightWarningSummary(result))
+      : messages.passed;
   }
-  return `Tachyon Core preflight found readiness issues: ${
-    result.error || preflightFailureSummary(result)
-  }`;
+  return preflightMessage(messages.issues, result.error || preflightFailureSummary(result));
 }
 
 export function tachyonCorePreflightStartBlockReason(
   result: TachyonCorePreflightResult | null,
+  messages: TachyonCorePreflightMessages = defaultTachyonCorePreflightMessages,
 ): string | null {
   if (!result?.supported) {
     return null;
@@ -542,11 +571,11 @@ export function tachyonCorePreflightStartBlockReason(
   }
   const details = blockingChecks
     .map((check) => {
-      const message = check.message || check.details || "required capability is unavailable";
+      const message = check.message || check.details || messages.capabilityUnavailable;
       return `${check.code}: ${message}`;
     })
     .join("; ");
-  return `Tachyon Core game acceleration cannot start: ${details}. Xray local proxy can still run independently.`;
+  return `${preflightMessage(messages.startBlocked, details)} ${messages.xrayIndependent}`;
 }
 
 function preflightFailureSummary(result: TachyonCorePreflightResult): string {

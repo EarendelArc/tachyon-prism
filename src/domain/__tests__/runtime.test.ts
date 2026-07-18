@@ -284,4 +284,43 @@ describe("tachyonCore preflight helpers", () => {
     expect(tachyonCorePreflightStartBlockReason(result)).toContain("TUN_PRIVILEGE");
     expect(tachyonCorePreflightReadinessMessage(result)).toContain("preflight found readiness issues");
   });
+
+  it("uses the caller message catalog for user-visible preflight text", () => {
+    const result: TachyonCorePreflightResult = {
+      checks: [
+        {
+          code: "TUN_PRIVILEGE",
+          details: "",
+          message: "",
+          raw: null,
+          status: "error",
+        },
+      ],
+      command: "tachyon-core preflight --config client.json --json",
+      error: null,
+      exitCode: 1,
+      ok: false,
+      overall: "error",
+      structuredReport: null,
+      stderr: "",
+      stderrTruncated: false,
+      stdout: "",
+      stdoutTruncated: false,
+      supported: true,
+    };
+    const messages = {
+      capabilityUnavailable: "所需能力不可用",
+      fallback: "仅验证配置",
+      issues: "启动前检查失败：{details}",
+      passed: "启动前检查通过",
+      startBlocked: "游戏加速无法启动：{details}。",
+      warnings: "启动前检查有警告：{details}",
+      xrayIndependent: "Xray 仍可独立运行。",
+    };
+
+    expect(tachyonCorePreflightReadinessMessage(result, messages)).toContain("启动前检查失败");
+    expect(tachyonCorePreflightStartBlockReason(result, messages)).toBe(
+      "游戏加速无法启动：TUN_PRIVILEGE: 所需能力不可用。 Xray 仍可独立运行。",
+    );
+  });
 });

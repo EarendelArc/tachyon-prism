@@ -28,16 +28,15 @@ export function normalizeGameRouteCidr(input: string): string {
     throw new GameRouteValidationError("format");
   }
 
-  const address = parts[0];
-  const family = ipv4Parts(address) ? 4 : isIpv6Address(address) ? 6 : 0;
-  if (!family) {
+  const parsed = parseIpAddress(parts[0]);
+  if (!parsed) {
     throw new GameRouteValidationError("address");
   }
   if (!/^\d+$/.test(parts[1])) {
     throw new GameRouteValidationError("prefix");
   }
   const prefix = Number(parts[1]);
-  const maxPrefix = family === 4 ? 32 : 128;
+  const maxPrefix = parsed.bits;
   if (!Number.isInteger(prefix) || prefix < 0 || prefix > maxPrefix) {
     throw new GameRouteValidationError("prefix");
   }
@@ -45,9 +44,11 @@ export function normalizeGameRouteCidr(input: string): string {
     throw new GameRouteValidationError("default-route");
   }
 
-  const normalizedAddress = family === 4
-    ? ipv4Parts(address)!.join(".")
-    : address.toLowerCase();
+  const hostBits = BigInt(parsed.bits - prefix);
+  const network = (parsed.value >> hostBits) << hostBits;
+  const normalizedAddress = parsed.family === 4
+    ? formatIpv4(network)
+    : formatIpv6(network);
   return `${normalizedAddress}/${prefix}`;
 }
 
@@ -72,9 +73,10 @@ export function loadGameRoutes(): string[] {
       return [];
     }
     const value = JSON.parse(raw) as unknown;
-    return Array.isArray(value)
-      ? normalizeGameRoutes(value.filter((route): route is string => typeof route === "string"))
-      : [];
+    if (!Array.isArray(value) || value.some((route) => typeof route !== "string")) {
+      return [];
+    }
+    return normalizeGameRoutes(value);
   } catch {
     return [];
   }
@@ -84,6 +86,32 @@ export function saveGameRoutes(routes: string[]): string[] {
   const normalized = normalizeGameRoutes(routes);
   globalThis.localStorage?.setItem(gameRoutesStorageKey, JSON.stringify(normalized));
   return normalized;
+}
+
+interface ParsedIpAddress {
+  bits: 32 | 128;
+  family: 4 | 6;
+  value: bigint;
+}
+
+function parseIpAddress(value: string): ParsedIpAddress | null {
+  const ipv4 = ipv4Parts(value);
+  if (ipv4) {
+    return {
+      bits: 32,
+      family: 4,
+      value: ipv4.reduce((address, part) => (address << 8n) | BigInt(part), 0n),
+    };
+  }
+  const ipv6 = ipv6Parts(value);
+  if (!ipv6) {
+    return null;
+  }
+  return {
+    bits: 128,
+    family: 6,
+    value: ipv6.reduce((address, part) => (address << 16n) | BigInt(part), 0n),
+  };
 }
 
 function ipv4Parts(value: string): number[] | null {
@@ -105,29 +133,35 @@ function ipv4Parts(value: string): number[] | null {
   return numbers;
 }
 
-function isIpv6Address(value: string): boolean {
+function ipv6Parts(value: string): number[] | null {
   if (!value.includes(":") || value.includes("%")) {
-    return false;
+    return null;
   }
   const compressed = value.split("::");
   if (compressed.length > 2) {
-    return false;
+    return null;
   }
   const left = ipv6Units(compressed[0]);
   const right = compressed.length === 2 ? ipv6Units(compressed[1]) : [];
   if (left === null || right === null) {
-    return false;
+    return null;
   }
   const units = left.length + right.length;
-  return compressed.length === 2 ? units < 8 : units === 8;
+  if (compressed.length === 1) {
+    return units === 8 ? left : null;
+  }
+  if (units >= 8) {
+    return null;
+  }
+  return [...left, ...Array<number>(8 - units).fill(0), ...right];
 }
 
-function ipv6Units(value: string): string[] | null {
+function ipv6Units(value: string): number[] | null {
   if (!value) {
     return [];
   }
   const parts = value.split(":");
-  const units: string[] = [];
+  const units: number[] = [];
   for (const [index, part] of parts.entries()) {
     if (!part) {
       return null;
@@ -136,12 +170,51 @@ function ipv6Units(value: string): string[] | null {
       if (index !== parts.length - 1 || !ipv4Parts(part)) {
         return null;
       }
-      units.push("ipv4-high", "ipv4-low");
+      const ipv4 = ipv4Parts(part)!;
+      units.push((ipv4[0] << 8) | ipv4[1], (ipv4[2] << 8) | ipv4[3]);
     } else if (/^[0-9a-f]{1,4}$/i.test(part)) {
-      units.push(part);
+      units.push(Number.parseInt(part, 16));
     } else {
       return null;
     }
   }
   return units;
+}
+
+function formatIpv4(value: bigint): string {
+  return [24n, 16n, 8n, 0n]
+    .map((shift) => Number((value >> shift) & 0xffn))
+    .join(".");
+}
+
+function formatIpv6(value: bigint): string {
+  const groups = Array.from(
+    { length: 8 },
+    (_, index) => Number((value >> BigInt((7 - index) * 16)) & 0xffffn),
+  );
+  let bestStart = -1;
+  let bestLength = 0;
+  for (let start = 0; start < groups.length;) {
+    if (groups[start] !== 0) {
+      start += 1;
+      continue;
+    }
+    let end = start;
+    while (end < groups.length && groups[end] === 0) {
+      end += 1;
+    }
+    const length = end - start;
+    if (length >= 2 && length > bestLength) {
+      bestStart = start;
+      bestLength = length;
+    }
+    start = end;
+  }
+  const formatted = groups.map((group) => group.toString(16));
+  if (bestStart < 0) {
+    return formatted.join(":");
+  }
+  const before = formatted.slice(0, bestStart).join(":");
+  const after = formatted.slice(bestStart + bestLength).join(":");
+  return `${before}::${after}`;
 }

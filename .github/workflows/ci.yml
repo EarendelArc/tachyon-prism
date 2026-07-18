@@ -24,11 +24,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6.0.3
 
+      - name: Checkout pinned Tachyon Core contract
+        uses: actions/checkout@v6.0.3
+        with:
+          repository: tachyon-space/tachyon-core
+          ref: cbd46164e7dd8532b618723f3d6c5fc44a824e32
+          path: tachyon-core
+          fetch-depth: 0
+
       - name: Setup Node
         uses: actions/setup-node@v5.0.0
         with:
           node-version: "26.4.0"
           cache: npm
+
+      - name: Setup Go for Core contract
+        uses: actions/setup-go@v6.4.0
+        with:
+          go-version-file: tachyon-core/go.mod
+          cache-dependency-path: tachyon-core/go.sum
 
       - name: Install
         run: npm ci
@@ -37,7 +51,14 @@ jobs:
         run: npm run typecheck
 
       - name: Frontend Tests
+        env:
+          TACHYON_CORE_SOURCE_DIR: ${{ github.workspace }}/tachyon-core
         run: npm test
+
+      - name: Pinned Core contract
+        env:
+          TACHYON_CORE_SOURCE_DIR: ${{ github.workspace }}/tachyon-core
+        run: npm run test:core-contract
 
       - name: Web Build
         run: npm run web:build

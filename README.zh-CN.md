@@ -70,7 +70,7 @@ Config 面板会根据当前选中的 Xray 节点和 Tachyon 服务器档案生�
 - `xray-client.json`：本地 SOCKS/HTTP inbound 加选中节点对应的 Xray outbound。HTTP inbound 用于 Prism 的本地代理探测，也可供支持显式 HTTP 代理的应用使用。启用 Xray 统计时，Prism 还会按 Xray 官方 API 方式加入 `StatsService` inbound，让概览图可以显示 Xray 流量而不需要 Tachyon Core 参与。
 - `client.json`：Tachyon Core 客户端配置，描述 TGP UDP 游戏路径，并把 Prism 管理的游戏配置写入 `client.routing.game_profiles`，把启动器策略写入 `client.routing.launchers`，把单独持久化的游戏服务器 CIDR 写入 `client.tun.game_routes`。
 
-设置 > 规则会明确分开游戏服务器网段、手动程序规则和 Steam 游戏规则。游戏服务器网段列表为空表示 Prism 不接管任何目的网段。程序和 Steam 规则只在流量被捕获后负责分类，不会自行添加系统路由；CIDR 路由按目的地址生效，因此会影响访问该网段的所有程序。
+设置 > 规则会明确分开游戏服务器网段、手动程序规则和 Steam 游戏规则。游戏服务器网段列表为空表示 Prism 不接管任何目的网段。程序和 Steam 规则只在流量被捕获后负责分类，不会自行添加系统路由；CIDR 路由按目的地址生效，因此会影响访问该网段的所有程序。Prism 会清除 IPv4/IPv6 host bits、保存 canonical 网络 CIDR，并拒绝语义等价的重复网段；如果持久化列表包含损坏项或非字符串项，则整体按空列表 fail-closed，避免损坏设置静默增加路由。
 
 为了完整支持 Xray 能力，Prism 优先使用订阅或完整 Xray JSON 输入里保留下来的 outbound 对象，而不是重新猜测所有字段。
 
@@ -114,7 +114,7 @@ CI 会在每次推送时运行 typecheck、前端测试、Rust check 和 Rust te
 
 ## Release 构建
 
-GitHub Actions 会从严格校验的 stable 或 prerelease 标签构建 Prism。Release 工作流会产出可下载的 Windows x64/ARM64、macOS x64/ARM64 和 Linux x64/ARM64 安装包，并随包发布 `SHA256SUMS.txt`；CI 会检查相同的六目标矩阵。
+GitHub Actions 会从严格校验的 stable 或 prerelease 标签构建 Prism。Release 工作流会产出可下载的 Windows x64/ARM64、macOS x64/ARM64 和 Linux x64/ARM64 安装包，并随包发布 `SHA256SUMS.txt`；CI 会检查相同的六目标矩阵。CI 与 Release 还会检出 `core-contract.json` 固定的 Tachyon Core tag 与完整 commit，构建该精确 Core 版本，并用它验证 Prism 真实生成逻辑产生的 JSON。
 
 stable 发布严格要求完整的 Windows Authenticode 与 Apple Developer ID 签名/公证凭据。prerelease 只有在某平台整组凭据全部缺失时才允许明确发布 unsigned 产物；半套凭据会直接失败。标签规则、包格式、凭据名称、签名门禁和本地校验方式见[发布流程](docs/releasing.zh-CN.md)。
 真实 VPS、真实客户端和真实游戏 UDP 加速链路仍需实测；当前 alpha 不能宣称 stable 或完整。

@@ -5,6 +5,12 @@ import { describe, expect, it } from "vitest";
 const releaseWorkflowPath = fileURLToPath(
   new URL("../../../.github/workflows/release.yml", import.meta.url),
 );
+const ciWorkflowPath = fileURLToPath(
+  new URL("../../../.github/workflows/ci.yml", import.meta.url),
+);
+const coreContractPath = fileURLToPath(
+  new URL("../../../core-contract.json", import.meta.url),
+);
 
 const readReleaseWorkflow = () => readFileSync(releaseWorkflowPath, "utf8");
 
@@ -73,18 +79,18 @@ describe("release workflow checksum assets", () => {
     expect(notesIndex).toBeGreaterThan(-1);
     expect(checksumsIndex).toBeGreaterThan(-1);
     expect(notesIndex).toBeLessThan(checksumsIndex);
-    expect(workflow).toContain("gh release upload \"${VERSION}\" release/* --clobber");
+    expect(workflow).toContain("gh release upload \"${VERSION}\" release/*");
+    expect(workflow).not.toContain("--clobber");
   });
 
-  it("uses generated release notes when creating or editing GitHub releases", () => {
+  it("uses generated release notes when creating the draft GitHub release", () => {
     const workflow = readReleaseWorkflow();
 
     expect(workflow).toMatch(
-      /gh release edit "\$\{VERSION\}"[\s\S]*--notes-file release\/RELEASE_NOTES\.md/,
-    );
-    expect(workflow).toMatch(
       /gh release create "\$\{VERSION\}"[\s\S]*--notes-file release\/RELEASE_NOTES\.md/,
     );
+    expect(workflow).not.toContain("gh release edit");
+    expect(workflow).not.toContain("--clobber");
   });
 
   it("publishes alpha release limitations in GitHub release notes", () => {
@@ -98,5 +104,51 @@ describe("release workflow checksum assets", () => {
       "Real VPS, real client, and real game UDP acceleration paths still need field testing.",
     );
     expect(workflow).toContain("Bundles are unsigned and not notarized");
+  });
+
+  it("pins every downstream release job to the verified tag commit", () => {
+    const workflow = readReleaseWorkflow();
+
+    expect(workflow).toContain("Verify remote tag object and peeled commit");
+    expect(workflow).toContain("EXPECTED_TAG_OBJECT: ${{ needs.prepare.outputs.tag_object }}");
+    expect(workflow.match(/ref: \$\{\{ needs\.prepare\.outputs\.commit \}\}/g)).toHaveLength(3);
+    expect(workflow.match(/bash \.github\/scripts\/verify-release-tag\.sh/g)).toHaveLength(2);
+  });
+
+  it("uses same-tag concurrency and a fail-on-existing draft publication transaction", () => {
+    const workflow = readReleaseWorkflow();
+
+    expect(workflow).toContain("group: prism-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}");
+    expect(workflow).toContain("release ${VERSION} already exists");
+    expect(workflow).toContain("--draft");
+    expect(workflow.match(/gh release upload "\$\{VERSION\}" release\/\*/g)).toHaveLength(1);
+    expect(workflow).toContain('gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}"');
+  });
+
+  it("records reproducible Prism and Core source metadata", () => {
+    const workflow = readReleaseWorkflow();
+
+    expect(workflow).toContain("SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}");
+    expect(workflow).toContain("BUILD_METADATA.json");
+    expect(workflow).toContain('"coreContract": core');
+    expect(workflow).toContain('"sourceDateEpoch": int(os.environ["SOURCE_DATE_EPOCH"])');
+  });
+
+  it("checks out the exact Core release pin in CI and Release", () => {
+    const contract = JSON.parse(readFileSync(coreContractPath, "utf8")) as {
+      commit: string;
+      repository: string;
+      tag: string;
+    };
+    const workflows = [readFileSync(ciWorkflowPath, "utf8"), readReleaseWorkflow()];
+
+    expect(contract.tag).toBe("v0.1.0-alpha.19");
+    expect(contract.commit).toMatch(/^[0-9a-f]{40}$/);
+    for (const workflow of workflows) {
+      expect(workflow).toContain(`repository: ${contract.repository}`);
+      expect(workflow).toContain(`ref: ${contract.commit}`);
+      expect(workflow).toContain("fetch-depth: 0");
+      expect(workflow).toContain("npm run test:core-contract");
+    }
   });
 });

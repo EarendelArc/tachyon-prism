@@ -15,9 +15,22 @@ channel; a mismatch fails before tests or builds start. Manual runs check out
 the tag itself, not the branch from which the workflow was started.
 
 Stable releases are marked as GitHub's latest release. Prereleases are marked
-as prereleases and explicitly excluded from latest. Editing an existing release
-also resets both flags from the validated tag, so a rerun cannot retain stale
-channel metadata.
+as prereleases and explicitly excluded from latest.
+
+The prepare job fetches the remote tag into an isolated ref, verifies the tag
+object and peeled commit, and records both full object IDs. Every downstream
+test, build, and publish job checks out that same verified commit SHA. Runs for
+the same tag share one non-cancelling concurrency group, so two publication
+transactions cannot race.
+
+## Core compatibility contract
+
+`core-contract.json` pins the paired Tachyon Core repository, release tag, and
+full commit. CI and Release check out that exact commit with full tag history;
+a missing repository/ref fails the job. The cross-repository test confirms the
+checked-out commit has the pinned tag, builds Core with that release version,
+generates `client.json` through Prism's production generator, and invokes the
+real Core `validate` command. It never copies Core validation rules into Prism.
 
 ## Build matrix
 
@@ -36,10 +49,18 @@ drift. GitHub currently classifies its standard Windows and Linux ARM64 runners
 as public preview, so repository/organization runner availability still needs
 to be confirmed before the first release.
 
-Each build uploads an Actions artifact. The publish job refuses to create or
-update the GitHub Release unless all six artifact directories contain a payload
-and a signing-status record. Release asset names include the platform label,
-and `SHA256SUMS.txt` covers every downloadable package and the release notes.
+Each build uploads an Actions artifact. The publish job refuses to create the
+GitHub Release unless all six artifact directories contain a payload and a
+signing-status record. Release asset names include the platform label, and
+`SHA256SUMS.txt` covers every downloadable package, release notes, and
+`BUILD_METADATA.json`. The metadata records the verified Prism tag object and
+commit, `SOURCE_DATE_EPOCH`, pinned Core contract, and tool versions with stable
+key ordering.
+
+Publication is fail-on-existing: any GitHub Release with the same tag, including
+a draft, stops the workflow. The workflow creates a new draft, uploads the full
+asset set exactly once without `--clobber`, then publishes that draft. It never
+edits or replaces an existing official release.
 
 ## Signing policy
 

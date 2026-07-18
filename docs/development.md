@@ -8,6 +8,8 @@ Tachyon Prism uses `mise` for Node and Rust version management.
 mise install
 npm install
 npm run typecheck
+npm test
+npm run test:core-contract
 ```
 
 The UI should stay decoupled from packet routing. Prism calls Core IPC APIs and
@@ -35,6 +37,6 @@ first, then builds Tauri bundles for Windows x64, Windows ARM64, macOS x64,
 macOS ARM64, Linux x64, and Linux ARM64.
 
 The generated artifacts are uploaded to the GitHub release together with
-`SHA256SUMS.txt`. These packages are unsigned for now; production distribution
-still needs Windows Authenticode signing, Apple Developer ID signing, and macOS
-notarization.
+`SHA256SUMS.txt` and reproducible source metadata. The cross-repository test uses
+the exact Tachyon Core release pin in `core-contract.json`; it fails when that
+source/ref is unavailable instead of skipping validation.

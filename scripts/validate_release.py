@@ -140,15 +140,33 @@ def validate_workflows() -> None:
         fail(f"CI matrix drifted from release contract: {ci_matrix!r}")
 
     release = release_path.read_text(encoding="utf-8")
+    ci = ci_path.read_text(encoding="utf-8")
+    core_contract = json.loads((ROOT / "core-contract.json").read_text(encoding="utf-8"))
+    core_repository = str(core_contract["repository"])
+    core_commit = str(core_contract["commit"])
+    core_tag = str(core_contract["tag"])
+    if not re.fullmatch(r"[0-9a-f]{40}", core_commit):
+        fail("core-contract.json commit must be a full lowercase SHA-1")
+    if not re.fullmatch(r"v[0-9A-Za-z][0-9A-Za-z._-]*", core_tag):
+        fail("core-contract.json tag is invalid")
+
     required_fragments = [
         "python scripts/validate_release.py --check-workflows",
         "--signing-kind ${{ matrix.signing_kind }}",
         "Verify bundle payload exists",
         "tsp = $true",
         "if-no-files-found: error",
-        'gh release edit "${VERSION}"',
-        '--prerelease="${PRERELEASE}"',
-        '--latest="${LATEST}"',
+        "Verify remote tag object and peeled commit",
+        "EXPECTED_TAG_OBJECT: ${{ needs.prepare.outputs.tag_object }}",
+        "ref: ${{ needs.prepare.outputs.commit }}",
+        "group: prism-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}",
+        'gh release create "${VERSION}"',
+        "--draft",
+        'gh release upload "${VERSION}" release/*',
+        "release ${VERSION} already exists",
+        'gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}"',
+        "BUILD_METADATA.json",
+        "SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}",
         "--verify-tag",
         "SHA256SUMS.txt",
         "SIGNING_STATUS",
@@ -156,6 +174,26 @@ def validate_workflows() -> None:
     missing = [fragment for fragment in required_fragments if fragment not in release]
     if missing:
         fail("release workflow is missing contract guards: " + ", ".join(missing))
+    forbidden = ['gh release edit', '--clobber']
+    present = [fragment for fragment in forbidden if fragment in release]
+    if present:
+        fail("release workflow contains replace-in-place operations: " + ", ".join(present))
+    if release.count("ref: ${{ needs.prepare.outputs.commit }}") != 3:
+        fail("release jobs are not all pinned to the verified Prism commit")
+    if release.count('gh release upload "${VERSION}" release/*') != 1:
+        fail("release assets must be uploaded exactly once")
+
+    core_fragments = [
+        f"repository: {core_repository}",
+        f"ref: {core_commit}",
+        "path: tachyon-core",
+        "fetch-depth: 0",
+        "npm run test:core-contract",
+    ]
+    for workflow_name, workflow in (("CI", ci), ("release", release)):
+        missing_core = [fragment for fragment in core_fragments if fragment not in workflow]
+        if missing_core:
+            fail(f"{workflow_name} workflow is missing pinned Core contract: {missing_core!r}")
 
 
 def write_outputs(path: Path, tag: str, channel: str) -> None:

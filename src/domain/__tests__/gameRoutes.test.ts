@@ -28,8 +28,12 @@ beforeEach(() => {
 
 describe("game route CIDRs", () => {
   it("normalizes supported IPv4 and IPv6 CIDRs", () => {
-    expect(normalizeGameRouteCidr(" 203.0.113.0/24 ")).toBe("203.0.113.0/24");
-    expect(normalizeGameRouteCidr("2001:DB8::/48")).toBe("2001:db8::/48");
+    expect(normalizeGameRouteCidr(" 203.0.113.42/24 ")).toBe("203.0.113.0/24");
+    expect(normalizeGameRouteCidr("203.0.113.255/25")).toBe("203.0.113.128/25");
+    expect(normalizeGameRouteCidr("2001:0DB8:0000:0001::1234/48")).toBe("2001:db8::/48");
+    expect(normalizeGameRouteCidr("2001:db8:0:0:ffff::1/65")).toBe(
+      "2001:db8:0:0:8000::/65",
+    );
   });
 
   it.each([
@@ -50,7 +54,9 @@ describe("game route CIDRs", () => {
   });
 
   it("rejects duplicate routes", () => {
-    expect(() => normalizeGameRoutes(["203.0.113.0/24", "203.0.113.0/24"]))
+    expect(() => normalizeGameRoutes(["203.0.113.7/24", "203.0.113.200/24"]))
+      .toThrowError(expect.objectContaining({ code: "duplicate" }));
+    expect(() => normalizeGameRoutes(["2001:db8:0:1::1/48", "2001:0db8::abcd/48"]))
       .toThrowError(expect.objectContaining({ code: "duplicate" }));
   });
 
@@ -64,6 +70,16 @@ describe("game route CIDRs", () => {
 
   it("fails closed to an empty list when stored data is malformed", () => {
     globalThis.localStorage?.setItem("tachyon.prism.gameRoutes.v1", '["not-a-cidr"]');
+    expect(loadGameRoutes()).toEqual([]);
+    globalThis.localStorage?.setItem(
+      "tachyon.prism.gameRoutes.v1",
+      '["203.0.113.0/24",42]',
+    );
+    expect(loadGameRoutes()).toEqual([]);
+    globalThis.localStorage?.setItem(
+      "tachyon.prism.gameRoutes.v1",
+      '["203.0.113.7/24","203.0.113.200/24"]',
+    );
     expect(loadGameRoutes()).toEqual([]);
   });
 });

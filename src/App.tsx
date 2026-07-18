@@ -62,7 +62,6 @@ import {
   startXray,
   stopTachyonCore,
   stopXray,
-  tachyonCorePreflightFallbackMessage,
   tachyonCorePreflightReadinessMessage,
   tachyonCorePreflightStartBlockReason,
   tachyonIpcBaseUrl,
@@ -85,6 +84,7 @@ import {
   type RuntimeStatus,
   type SystemProxyState,
   type TachyonCorePreflightCheck,
+  type TachyonCorePreflightMessages,
   type TachyonCorePreflightResult,
   type TcpLatencyResult,
   type XrayTrafficStats,
@@ -155,7 +155,7 @@ import { invokeDesktop, isTauriRuntime } from "./domain/tauri";
 
 type ConnectionState = "checking" | "connected" | "disconnected";
 type PrismView = "overview" | "configs" | "subscriptions" | "plugins" | "settings";
-type SettingsSection = "general" | "core" | "rules" | "plugins" | "about";
+type SettingsSection = "general" | "core" | "rules" | "about";
 type ReadinessState = "error" | "ok" | "warning";
 type SubscriptionViewMode = "grid" | "list";
 type ValidationResults = Partial<Record<ManagedBinaryKind, ConfigValidationResult>>;
@@ -396,7 +396,6 @@ const zh = {
   useManaged: "使用托管",
   xray: "Xray",
   aboutDescription: "一个支持 Xray Core 与 Tachyon Core 的跨平台代理 GUI。",
-  adminRestart: "以管理员身份运行（重启生效）",
   advancedXrayConfig: "高级 Xray JSON",
   advancedXrayDescription: "直接编辑完整配置；未知字段与未来协议保持原样。保存和启动前会运行 Xray 配置测试。",
   advancedXrayEnable: "使用高级完整配置",
@@ -418,11 +417,7 @@ const zh = {
   xrayConfigGenerationFailed: "Xray 配置生成失败",
   xrayJsonValidationFailed: "Xray JSON 验证失败",
   xraySelectNodeRequired: "生成 Xray 配置前请选择订阅节点",
-  allowPluginNodeAccess: "允许插件读取节点",
-  autoUpdatePlugins: "自动更新插件",
-  behavior: "行为",
   checkUpdates: "检查更新",
-  color: "颜色",
   copyCore: "复制 Core",
   copyXray: "复制 Xray",
   clientDiagnostics: "客户端诊断",
@@ -436,24 +431,18 @@ const zh = {
   exportDiagnostics: "导出诊断",
   validateConfigs: "验证配置",
   validationFailed: "失败",
-  custom: "自定义",
-  dark: "深色",
-  defaultColor: "默认",
   displayName: "显示名称",
   downloadRate: "下载速率",
   executablePath: "可执行文件路径",
   expand: "展开",
   filter: "筛选",
   fixedWindow: "固定 800 × 540 窗口",
-  followSystem: "跟随系统",
   gameMode: "游戏模式",
   globalModeDesc: "仅走 Global 策略组",
   globalBlock: "全球拦截",
   globalDirect: "全球直连",
-  green: "绿色",
   grid: "网格",
   leakFish: "漏网之鱼",
-  light: "浅色",
   liveTelemetry: "实时遥测",
   localProxyProbe: "本地代理验证",
   more: "更多",
@@ -470,11 +459,7 @@ const zh = {
   notConfigured: "未配置",
   notInstalled: "未安装",
   notProbed: "未探测；诊断不会执行已安装的核心",
-  pageVisibility: "页面可见性",
-  personalized: "个性化",
   policyGroups: "策略组",
-  pluginAllowNodeRead: "允许插件读取节点",
-  pluginAutoUpdate: "自动更新插件",
   pluginAllInstalled: "已安装并启用全部内置插件",
   pluginCenter: "插件中心",
   pluginDisabled: "已停用",
@@ -509,7 +494,6 @@ const zh = {
   pluginUnknown: "未知插件",
   pluginUpdatesChecked: "内置插件已是最新版本",
   processName: "进程名",
-  purple: "紫色",
   quickStart: "快速启动",
   ready: "就绪",
   recentRoutes: "最近路由",
@@ -564,7 +548,6 @@ const zh = {
   systemProxyNeedsXray: "启动 Xray 后可用",
   systemProxyOtherActive: "检测到其他系统代理",
   systemProxyUnsupported: "当前平台后端不支持",
-  theme: "主题",
   totalTraffic: "总流量",
   tunMode: "TUN模式",
   tunRuntimeUnavailable: "runtime 尚未暴露启停能力",
@@ -624,6 +607,88 @@ const zh = {
   coreTunMtuUnsafe: "TUN MTU {mtu} 超出安全预算；当前 1352 字节 TGP datagram 的上限为 1284。",
   tachyonTunBudgetDesc: "安全预算：MTU 576-1284；TGP max_datagram_size 固定为 1352。",
   profileNoMatch: "没有匹配条件",
+  generalSettings: "通用设置",
+  readinessOk: "正常",
+  readinessCheck: "检查",
+  readinessFix: "修复",
+  chooseManagedBinary: "请选择托管核心或输入可执行文件路径。",
+  configuredExecutableMissing: "配置的可执行文件不存在：{path}",
+  missingRequiredSidecar: "缺少必需的配套文件：{path}",
+  xrayNodeReadiness: "Xray 节点",
+  xrayNodeUnsupported: "{name} 当前为 {status}：{reason}",
+  xrayNodeRequired: "启动 Xray 前，请导入订阅或选择节点。",
+  tachyonServerReadiness: "Tachyon 服务器",
+  tachyonServerRequired: "启动 Tachyon Core 前，请添加并选择 Tachyon 服务器配置。",
+  xrayConfigReadiness: "Xray 配置",
+  xrayConfigReady: "可以生成 Xray client JSON。",
+  xrayConfigNeedsNode: "Xray 配置需要已选节点。",
+  tachyonConfigReadiness: "Tachyon 配置",
+  tachyonConfigReady: "可以生成 Tachyon Core client JSON。",
+  tachyonConfigNeedsServer: "Tachyon 配置需要服务器地址。",
+  xrayCoreBinary: "Xray Core 可执行文件",
+  tachyonCoreBinary: "Tachyon Core 可执行文件",
+  tachyonCorePreflightLabel: "Tachyon Core 启动前检查",
+  preflightRunRequired: "运行“验证”或“启动”以执行 tachyon-core preflight --json。",
+  tachyonConfigValid: "Tachyon 配置有效",
+  preflightConfigUnconfirmed: "可以生成 client JSON，但 Core 启动前检查尚未确认配置有效。",
+  clientRequiresTun: "客户端需要 TUN",
+  clientRequiresTunDetail: "Tachyon Core 客户端模式通过 TUN 设备加速游戏。",
+  autoRouteDisabled: "auto_route=false",
+  autoRouteDisabledDetail: "auto_route=false 不接管系统默认路由，但 Core 客户端仍需要 TUN 设备能力。",
+  wintunSidecar: "Wintun 配套文件",
+  wintunSidecarPresent: "必需的 Wintun 配套文件已就绪。",
+  wintunSidecarMissing: "Windows 上的 Tachyon Core 要求 wintun.dll 与核心程序位于同一目录。",
+  tunPrivilege: "TUN 设备权限",
+  tunPrivilegeRequired: "Tachyon 游戏加速需要创建或打开 TUN 设备的权限。",
+  xrayIndependent: "Xray 与 Tachyon 相互独立",
+  xrayIndependentDetail: "即使 Tachyon Core 游戏加速被阻止，Xray 本地 HTTP/SOCKS 代理仍可独立使用。",
+  gameAccelerationStartable: "游戏加速可启动",
+  preflightNoStartupBlocker: "Tachyon Core 启动前检查未发现 TUN/Wintun 阻断项。",
+  preflightFallbackUnconfirmed: "Core 版本不支持启动前检查；仅验证配置无法确认 TUN/Wintun 就绪状态。",
+  preflightNotRun: "尚未运行启动前检查；启动 Tachyon Core 前会先检查。",
+  gameProfilesReadiness: "游戏规则",
+  gameProfilesEnabled: "已启用 {count} 条游戏规则。",
+  gameProfilesNone: "没有启用的游戏规则。请添加程序规则或扫描 Steam。",
+  preflightCapabilityUnavailable: "所需能力不可用",
+  preflightFallback: "Core 版本不支持启动前检查；仅验证配置",
+  preflightIssues: "Tachyon Core 启动前检查发现就绪问题：{details}",
+  preflightPassed: "Tachyon Core 启动前检查通过",
+  preflightStartBlocked: "Tachyon Core 游戏加速无法启动：{details}。",
+  preflightWarnings: "Tachyon Core 启动前检查完成，但存在警告：{details}",
+  preflightXrayIndependent: "Xray 本地代理仍可独立运行。",
+  subscriptionUpdateFailed: "订阅更新失败",
+  subscriptionImportFailed: "订阅导入失败",
+  subscriptionSelectionFailed: "订阅选择失败",
+  nodeSelectionFailed: "节点选择失败",
+  subscriptionRemovalFailed: "订阅移除失败",
+  tachyonServerSaveFailed: "Tachyon 服务器保存失败",
+  tachyonServerSelectionFailed: "Tachyon 服务器选择失败",
+  tachyonServerRemovalFailed: "Tachyon 服务器移除失败",
+  pluginRunFailed: "插件运行失败",
+  copyFailed: "复制失败",
+  diagnosticsExportFailed: "诊断信息导出失败",
+  runtimePathsSaved: "运行路径已保存",
+  runtimeSettingsSaveFailed: "运行设置保存失败",
+  sourceBinaryPathRequired: "请输入源核心文件路径",
+  binaryInstalled: "{name} 已安装",
+  binaryInstallFailed: "核心安装失败",
+  binaryNotInstalled: "{name} 尚未安装",
+  binarySelected: "已选择 {name}",
+  binarySelectionFailed: "核心选择失败",
+  releaseCheckFailed: "{name} 版本检查失败",
+  diagnosticsFailed: "{name} 诊断失败",
+  diagnosticsReady: "{name} 已按保存的设置完成诊断",
+  diagnosticsWithError: "{name} 诊断：{details}",
+  latestInstallFailed: "{name} 安装失败",
+  wintunInstalled: "wintun.dll 已安装",
+  wintunInstallFailed: "Wintun 安装失败",
+  runtimeStartedNamed: "{name} 已启动",
+  runtimeStoppedNamed: "{name} 已停止",
+  runtimeStopFailed: "停止失败",
+  windowActionFailed: "窗口操作失败",
+  languageUpdated: "语言已更新",
+  latencyTestFailed: "延迟测试失败",
+  manualSubscriptionName: "手动导入",
 };
 
 const en: typeof zh = {
@@ -745,7 +810,6 @@ const en: typeof zh = {
   useManaged: "Use Managed",
   xray: "Xray",
   aboutDescription: "A cross-platform proxy GUI for Xray Core and Tachyon Core.",
-  adminRestart: "Run as administrator (requires restart)",
   advancedXrayConfig: "Advanced Xray JSON",
   advancedXrayDescription: "Edit the complete config directly. Unknown fields and future protocols remain untouched. Xray config-test runs before save and start.",
   advancedXrayEnable: "Use advanced complete config",
@@ -767,11 +831,7 @@ const en: typeof zh = {
   xrayConfigGenerationFailed: "Xray config generation failed",
   xrayJsonValidationFailed: "Xray JSON validation failed",
   xraySelectNodeRequired: "Select a subscription node before generating Xray config",
-  allowPluginNodeAccess: "Allow plugins to read nodes",
-  autoUpdatePlugins: "Auto-update plugins",
-  behavior: "Behavior",
   checkUpdates: "Check Updates",
-  color: "Color",
   copyCore: "Copy Core",
   copyXray: "Copy Xray",
   clientDiagnostics: "Client Diagnostics",
@@ -785,24 +845,18 @@ const en: typeof zh = {
   exportDiagnostics: "Export diagnostics",
   validateConfigs: "Validate Configs",
   validationFailed: "Failed",
-  custom: "Custom",
-  dark: "Dark",
-  defaultColor: "Default",
   displayName: "Display name",
   downloadRate: "Download rate",
   executablePath: "Executable path",
   expand: "Expand",
   filter: "Filter",
   fixedWindow: "Fixed 800 × 540 window",
-  followSystem: "Follow system",
   gameMode: "Game Mode",
   globalModeDesc: "Use only the Global policy group",
   globalBlock: "Global Block",
   globalDirect: "Global Direct",
-  green: "Green",
   grid: "Grid",
   leakFish: "Final Match",
-  light: "Light",
   liveTelemetry: "Live Telemetry",
   localProxyProbe: "Local Proxy Probe",
   more: "More",
@@ -819,11 +873,7 @@ const en: typeof zh = {
   notConfigured: "Not configured",
   notInstalled: "Not installed",
   notProbed: "Not probed; diagnostics do not execute installed cores",
-  pageVisibility: "Page visibility",
-  personalized: "Personalization",
   policyGroups: "Policy Groups",
-  pluginAllowNodeRead: "Allow plugins to read nodes",
-  pluginAutoUpdate: "Auto-update plugins",
   pluginAllInstalled: "All built-in plugins installed and enabled",
   pluginCenter: "Plugin Center",
   pluginDisabled: "Disabled",
@@ -858,7 +908,6 @@ const en: typeof zh = {
   pluginUnknown: "Unknown plugin",
   pluginUpdatesChecked: "Built-in plugins are up to date",
   processName: "Process name",
-  purple: "Purple",
   quickStart: "Quick Start",
   ready: "Ready",
   recentRoutes: "Recent routes",
@@ -913,7 +962,6 @@ const en: typeof zh = {
   systemProxyNeedsXray: "Available after Xray starts",
   systemProxyOtherActive: "Another system proxy is active",
   systemProxyUnsupported: "Unsupported by this platform backend",
-  theme: "Theme",
   totalTraffic: "Total Traffic",
   tunMode: "TUN Mode",
   tunRuntimeUnavailable: "Runtime start/stop capability is not exposed yet",
@@ -973,6 +1021,88 @@ const en: typeof zh = {
   coreTunMtuUnsafe: "TUN MTU {mtu} exceeds the safe budget; the limit is 1284 for the fixed 1352-byte TGP datagram.",
   tachyonTunBudgetDesc: "Safe budget: MTU 576-1284; TGP max_datagram_size is fixed at 1352.",
   profileNoMatch: "No match rule",
+  generalSettings: "General Settings",
+  readinessOk: "OK",
+  readinessCheck: "Check",
+  readinessFix: "Fix",
+  chooseManagedBinary: "Choose a managed binary or enter an executable path.",
+  configuredExecutableMissing: "Configured executable is missing: {path}",
+  missingRequiredSidecar: "Missing required sidecar: {path}",
+  xrayNodeReadiness: "Xray node",
+  xrayNodeUnsupported: "{name} is {status}: {reason}",
+  xrayNodeRequired: "Import a subscription or select a node before starting Xray.",
+  tachyonServerReadiness: "Tachyon server",
+  tachyonServerRequired: "Add and select a Tachyon server profile before starting Tachyon Core.",
+  xrayConfigReadiness: "Xray config",
+  xrayConfigReady: "Xray client JSON can be generated.",
+  xrayConfigNeedsNode: "Xray config needs a selected node.",
+  tachyonConfigReadiness: "Tachyon config",
+  tachyonConfigReady: "Tachyon Core client JSON can be generated.",
+  tachyonConfigNeedsServer: "Tachyon config needs a server address.",
+  xrayCoreBinary: "Xray Core binary",
+  tachyonCoreBinary: "Tachyon Core binary",
+  tachyonCorePreflightLabel: "Tachyon Core preflight",
+  preflightRunRequired: "Run Validate or Start to execute tachyon-core preflight --json.",
+  tachyonConfigValid: "Tachyon config valid",
+  preflightConfigUnconfirmed: "Client JSON can be generated; preflight has not confirmed Core validation yet.",
+  clientRequiresTun: "Client requires TUN",
+  clientRequiresTunDetail: "Tachyon Core client mode uses a TUN device for game acceleration.",
+  autoRouteDisabled: "auto_route=false",
+  autoRouteDisabledDetail: "auto_route=false avoids taking over the OS default route, but Core client still needs TUN device capability.",
+  wintunSidecar: "Wintun sidecar",
+  wintunSidecarPresent: "Required Wintun sidecar is present.",
+  wintunSidecarMissing: "Windows Tachyon Core requires wintun.dll next to the binary.",
+  tunPrivilege: "TUN device privilege",
+  tunPrivilegeRequired: "Tachyon game acceleration needs permission to create or open a TUN device.",
+  xrayIndependent: "Xray and Tachyon independence",
+  xrayIndependentDetail: "Xray local HTTP/SOCKS proxy can be usable even when Tachyon Core game acceleration is blocked.",
+  gameAccelerationStartable: "Game acceleration startable",
+  preflightNoStartupBlocker: "No preflight TUN/Wintun startup blocker detected for Tachyon Core.",
+  preflightFallbackUnconfirmed: "Core version lacks preflight; validate-only fallback cannot confirm TUN/Wintun readiness.",
+  preflightNotRun: "Preflight has not run yet; Start will check before launching Tachyon Core.",
+  gameProfilesReadiness: "Game profiles",
+  gameProfilesEnabled: "{count} game profile(s) enabled.",
+  gameProfilesNone: "No enabled game profile. Add a program or scan Steam.",
+  preflightCapabilityUnavailable: "required capability is unavailable",
+  preflightFallback: "Core version lacks preflight; validate only",
+  preflightIssues: "Tachyon Core preflight found readiness issues: {details}",
+  preflightPassed: "Tachyon Core preflight passed",
+  preflightStartBlocked: "Tachyon Core game acceleration cannot start: {details}.",
+  preflightWarnings: "Tachyon Core preflight completed with warnings: {details}",
+  preflightXrayIndependent: "Xray local proxy can still run independently.",
+  subscriptionUpdateFailed: "Subscription update failed",
+  subscriptionImportFailed: "Subscription import failed",
+  subscriptionSelectionFailed: "Subscription selection failed",
+  nodeSelectionFailed: "Node selection failed",
+  subscriptionRemovalFailed: "Subscription removal failed",
+  tachyonServerSaveFailed: "Tachyon server save failed",
+  tachyonServerSelectionFailed: "Tachyon server selection failed",
+  tachyonServerRemovalFailed: "Tachyon server removal failed",
+  pluginRunFailed: "Plugin run failed",
+  copyFailed: "Copy failed",
+  diagnosticsExportFailed: "Diagnostics export failed",
+  runtimePathsSaved: "Runtime paths saved",
+  runtimeSettingsSaveFailed: "Runtime settings save failed",
+  sourceBinaryPathRequired: "Source binary path required",
+  binaryInstalled: "{name} installed",
+  binaryInstallFailed: "Binary install failed",
+  binaryNotInstalled: "{name} is not installed",
+  binarySelected: "{name} selected",
+  binarySelectionFailed: "Binary selection failed",
+  releaseCheckFailed: "{name} release check failed",
+  diagnosticsFailed: "{name} diagnostics failed",
+  diagnosticsReady: "{name} diagnostics ready for saved settings",
+  diagnosticsWithError: "{name} diagnostics: {details}",
+  latestInstallFailed: "{name} install failed",
+  wintunInstalled: "wintun.dll installed",
+  wintunInstallFailed: "Wintun install failed",
+  runtimeStartedNamed: "{name} started",
+  runtimeStoppedNamed: "{name} stopped",
+  runtimeStopFailed: "Stop failed",
+  windowActionFailed: "Window action failed",
+  languageUpdated: "Language updated",
+  latencyTestFailed: "Latency test failed",
+  manualSubscriptionName: "Manual",
 };
 
 function selectedNode(snapshot: SubscriptionSnapshot): ProxyNode | undefined {
@@ -1282,18 +1412,27 @@ function runtimeWithTachyonServer(
   };
 }
 
-function readinessText(state: ReadinessState): string {
-  return state === "ok" ? "OK" : state === "warning" ? "Check" : "Fix";
+function preflightMessages(ui: typeof zh): TachyonCorePreflightMessages {
+  return {
+    capabilityUnavailable: ui.preflightCapabilityUnavailable,
+    fallback: ui.preflightFallback,
+    issues: ui.preflightIssues,
+    passed: ui.preflightPassed,
+    startBlocked: ui.preflightStartBlocked,
+    warnings: ui.preflightWarnings,
+    xrayIndependent: ui.preflightXrayIndependent,
+  };
 }
 
 function binaryReadiness(
   label: string,
   path: string,
   binary: ManagedBinaryInfo | undefined,
+  ui: typeof zh,
 ): ReadinessItem {
   if (!path) {
     return {
-      detail: "Choose a managed binary or enter an executable path.",
+      detail: ui.chooseManagedBinary,
       label,
       state: "error",
     };
@@ -1303,7 +1442,7 @@ function binaryReadiness(
   }
   if (binary.configuredPath === path && !binary.configuredExists) {
     return {
-      detail: `Configured executable is missing: ${path}`,
+      detail: templateValue(ui.configuredExecutableMissing, "path", path),
       label,
       state: "error",
     };
@@ -1311,14 +1450,16 @@ function binaryReadiness(
   return { detail: path, label, state: "ok" };
 }
 
-function sidecarReadiness(binary: ManagedBinaryInfo | undefined): ReadinessItem[] {
+function sidecarReadiness(binary: ManagedBinaryInfo | undefined, ui: typeof zh): ReadinessItem[] {
   if (!binary) {
     return [];
   }
   return binary.sidecarDependencies
     .filter((dependency) => dependency.required)
     .map((dependency) => ({
-      detail: dependency.exists ? dependency.path : `Missing required sidecar: ${dependency.path}`,
+      detail: dependency.exists
+        ? dependency.path
+        : templateValue(ui.missingRequiredSidecar, "path", dependency.path),
       label: dependency.name,
       state: dependency.exists ? "ok" : "error",
     }));
@@ -1555,7 +1696,7 @@ export function App() {
   const [validationResults, setValidationResults] = useState<ValidationResults>({});
   const [tachyonPreflight, setTachyonPreflight] = useState<TachyonCorePreflightResult | null>(null);
   const [binaryBusy, setBinaryBusy] = useState(false);
-  const [message, setMessage] = useState("Ready");
+  const [message, setMessage] = useState(() => (loadLanguage() === "zh-CN" ? zh.ready : en.ready));
   const [alwaysOnTop, setAlwaysOnTop] = useState(false);
   const [telemetry, setTelemetry] = useState<TelemetryState>(() => ({
     connection: "disconnected",
@@ -1627,6 +1768,7 @@ export function App() {
   const trafficRates = trafficSamples[trafficSamples.length - 1] ?? emptyTrafficSample();
   const readinessItems = useMemo<ReadinessItem[]>(() => {
     const items: ReadinessItem[] = [];
+    const localizedPreflightMessages = preflightMessages(ui);
     const activeNodeCompatibility = activeNode
       ? xrayOutboundCompatibilityForNode(activeNode)
       : null;
@@ -1642,13 +1784,17 @@ export function App() {
             detail:
               activeNodeCompatibility?.status === "supported"
                 ? `${activeNode.name} (${activeNode.protocol.toUpperCase()})`
-                : `${activeNode.name} is ${activeNodeCompatibility?.status}: ${activeNodeCompatibility?.reason}`,
-            label: "Xray node",
+                : templateValues(ui.xrayNodeUnsupported, {
+                    name: activeNode.name,
+                    reason: activeNodeCompatibility?.reason ?? ui.capabilityUnavailable,
+                    status: activeNodeCompatibility?.status ?? ui.capabilityUnavailable,
+                  }),
+            label: ui.xrayNodeReadiness,
             state: activeNodeCompatibility?.status === "supported" ? "ok" : "error",
           }
         : {
-            detail: "Import a subscription or select a node before starting Xray.",
-            label: "Xray node",
+            detail: ui.xrayNodeRequired,
+            label: ui.xrayNodeReadiness,
             state: "warning",
           },
     );
@@ -1656,7 +1802,7 @@ export function App() {
       currentTachyonServer
         ? {
             detail: `${currentTachyonServer.name} (${tachyonServerEndpoint(currentTachyonServer)})`,
-            label: "Tachyon server",
+            label: ui.tachyonServerReadiness,
             state: "ok",
           }
         : effectiveRuntimeInputs.tachyonServerAddress.trim()
@@ -1664,30 +1810,30 @@ export function App() {
               detail:
                 effectiveRuntimeInputs.tachyonTgpServerAddress.trim() ||
                 effectiveRuntimeInputs.tachyonServerAddress.trim(),
-              label: "Tachyon server",
+              label: ui.tachyonServerReadiness,
               state: "warning",
             }
         : {
-            detail: "Add and select a Tachyon server profile before starting Tachyon Core.",
-            label: "Tachyon server",
+            detail: ui.tachyonServerRequired,
+            label: ui.tachyonServerReadiness,
             state: "error",
           },
     );
     items.push(
       drafts.xray && !drafts.xrayError
-        ? { detail: "Xray client JSON can be generated.", label: "Xray config", state: "ok" }
+        ? { detail: ui.xrayConfigReady, label: ui.xrayConfigReadiness, state: "ok" }
         : {
-            detail: drafts.xrayError || "Xray config needs a selected node.",
-            label: "Xray config",
+            detail: drafts.xrayError || ui.xrayConfigNeedsNode,
+            label: ui.xrayConfigReadiness,
             state: activeNode ? "error" : "warning",
           },
     );
     items.push(
       drafts.core && !drafts.coreError
-        ? { detail: "Tachyon Core client JSON can be generated.", label: "Tachyon config", state: "ok" }
+        ? { detail: ui.tachyonConfigReady, label: ui.tachyonConfigReadiness, state: "ok" }
         : {
-            detail: drafts.coreError || "Tachyon config needs a server address.",
-            label: "Tachyon config",
+            detail: drafts.coreError || ui.tachyonConfigNeedsServer,
+            label: ui.tachyonConfigReadiness,
             state: "error",
           },
     );
@@ -1695,37 +1841,37 @@ export function App() {
     const corePath = runtimeInputs.tachyonCoreBinaryPath.trim();
     const xrayBinary = managedBinaries?.xray;
     const coreBinary = managedBinaries?.tachyonCore;
-    items.push(binaryReadiness("Xray Core binary", xrayPath, xrayBinary));
-    items.push(binaryReadiness("Tachyon Core binary", corePath, coreBinary));
+    items.push(binaryReadiness(ui.xrayCoreBinary, xrayPath, xrayBinary, ui));
+    items.push(binaryReadiness(ui.tachyonCoreBinary, corePath, coreBinary, ui));
     if (coreBinary?.configuredPath === corePath) {
-      items.push(...sidecarReadiness(coreBinary));
+      items.push(...sidecarReadiness(coreBinary, ui));
     }
     items.push(
       tachyonPreflight
         ? {
-            detail: tachyonCorePreflightReadinessMessage(tachyonPreflight),
-            label: "Tachyon Core preflight",
+            detail: tachyonCorePreflightReadinessMessage(tachyonPreflight, localizedPreflightMessages),
+            label: ui.tachyonCorePreflightLabel,
             state: preflightReadinessState(tachyonPreflight),
           }
         : {
-            detail: "Run Validate or Start to execute tachyon-core preflight --json.",
-            label: "Tachyon Core preflight",
+            detail: ui.preflightRunRequired,
+            label: ui.tachyonCorePreflightLabel,
             state: "warning",
           },
     );
     items.push(
       checkReadiness(
         preflightCheckByCode(tachyonPreflight, ["CONFIG_VALID"]),
-        "Tachyon config valid",
+        ui.tachyonConfigValid,
         drafts.core && !drafts.coreError
           ? {
-              detail: "Client JSON can be generated; preflight has not confirmed Core validation yet.",
-              label: "Tachyon config valid",
+              detail: ui.preflightConfigUnconfirmed,
+              label: ui.tachyonConfigValid,
               state: "warning",
             }
           : {
-              detail: drafts.coreError || "Tachyon config needs a server address.",
-              label: "Tachyon config valid",
+              detail: drafts.coreError || ui.tachyonConfigNeedsServer,
+              label: ui.tachyonConfigValid,
               state: "error",
             },
       ),
@@ -1733,10 +1879,10 @@ export function App() {
     items.push(
       checkReadiness(
         preflightCheckByCode(tachyonPreflight, ["CLIENT_REQUIRES_TUN", "TUN_REQUIRED"]),
-        "Client requires TUN",
+        ui.clientRequiresTun,
         {
-          detail: "Tachyon Core client mode uses a TUN device for game acceleration.",
-          label: "Client requires TUN",
+          detail: ui.clientRequiresTunDetail,
+          label: ui.clientRequiresTun,
           state: "warning",
         },
       ),
@@ -1744,10 +1890,10 @@ export function App() {
     items.push(
       checkReadiness(
         preflightCheckByCode(tachyonPreflight, ["AUTO_ROUTE_DISABLED", "AUTO_ROUTE_SEMANTICS"]),
-        "auto_route=false",
+        ui.autoRouteDisabled,
         {
-          detail: "auto_route=false avoids taking over the OS default route, but Core client still needs TUN device capability.",
-          label: "auto_route=false",
+          detail: ui.autoRouteDisabledDetail,
+          label: ui.autoRouteDisabled,
           state: "warning",
         },
       ),
@@ -1755,12 +1901,12 @@ export function App() {
     items.push(
       checkReadiness(
         preflightCheckByCode(tachyonPreflight, ["WINTUN_DLL_PRESENT"]),
-        "Wintun sidecar",
+        ui.wintunSidecar,
         {
           detail: coreBinary?.sidecarDependencies.some((dependency) => dependency.required && dependency.exists)
-            ? "Required Wintun sidecar is present."
-            : "Windows Tachyon Core requires wintun.dll next to the binary.",
-          label: "Wintun sidecar",
+            ? ui.wintunSidecarPresent
+            : ui.wintunSidecarMissing,
+          label: ui.wintunSidecar,
           state: coreBinary?.sidecarDependencies.some((dependency) => dependency.required && dependency.exists)
             ? "ok"
             : "warning",
@@ -1770,56 +1916,57 @@ export function App() {
     items.push(
       checkReadiness(
         preflightCheckByCode(tachyonPreflight, ["TUN_PRIVILEGE", "TUN_DEVICE_PRESENT"]),
-        "TUN device privilege",
+        ui.tunPrivilege,
         runtimePrivilege?.canManageTun
           ? {
               detail: runtimePrivilege.message,
-              label: "TUN device privilege",
+              label: ui.tunPrivilege,
               state: "ok",
             }
           : {
               detail:
                 runtimePrivilege?.message ||
-                "Tachyon game acceleration needs permission to create or open a TUN device.",
-              label: "TUN device privilege",
+                ui.tunPrivilegeRequired,
+              label: ui.tunPrivilege,
               state: "warning",
             },
       ),
     );
     items.push(
       {
-        detail: "Xray local HTTP/SOCKS proxy can be usable even when Tachyon Core game acceleration is blocked.",
-        label: "Xray and Tachyon independence",
+        detail: ui.xrayIndependentDetail,
+        label: ui.xrayIndependent,
         state: "ok",
       },
     );
     items.push(
-      tachyonCorePreflightStartBlockReason(tachyonPreflight)
+      tachyonCorePreflightStartBlockReason(tachyonPreflight, localizedPreflightMessages)
         ? {
-            detail: tachyonCorePreflightStartBlockReason(tachyonPreflight) || "",
-            label: "Game acceleration startable",
+            detail:
+              tachyonCorePreflightStartBlockReason(tachyonPreflight, localizedPreflightMessages) || "",
+            label: ui.gameAccelerationStartable,
             state: "error",
           }
         : {
             detail: tachyonPreflight
               ? tachyonPreflight.supported
-                ? "No preflight TUN/Wintun startup blocker detected for Tachyon Core."
-                : "Core version lacks preflight; validate-only fallback cannot confirm TUN/Wintun readiness."
-              : "Preflight has not run yet; Start will check before launching Tachyon Core.",
-            label: "Game acceleration startable",
+                ? ui.preflightNoStartupBlocker
+                : ui.preflightFallbackUnconfirmed
+              : ui.preflightNotRun,
+            label: ui.gameAccelerationStartable,
             state: tachyonPreflight?.supported ? "ok" : "warning",
           },
     );
     items.push(
       activeProfiles > 0
         ? {
-            detail: `${activeProfiles} game profile${activeProfiles === 1 ? "" : "s"} enabled.`,
-            label: "Game profiles",
+            detail: templateValue(ui.gameProfilesEnabled, "count", String(activeProfiles)),
+            label: ui.gameProfilesReadiness,
             state: "ok",
           }
         : {
-            detail: "No enabled game profile. Add a program or scan Steam.",
-            label: "Game profiles",
+            detail: ui.gameProfilesNone,
+            label: ui.gameProfilesReadiness,
             state: "warning",
           },
     );
@@ -1841,16 +1988,17 @@ export function App() {
     runtimeInputs.xrayBinaryPath,
     tachyonPreflight,
     xrayAdvancedEditor.enabled,
+    language,
   ]);
   const readinessErrors = useMemo(
     () => readinessItems.filter((item) => item.state === "error").length,
     [readinessItems],
   );
   const runtimeRows = [
-    { label: "System Proxy", value: systemProxyLabel(systemProxy) },
-    { label: "TUN Privilege", value: privilegeLabel(runtimePrivilege) },
-    { label: "Xray Core", value: processStatusLabel(runtimeStatus?.xray) },
-    { label: "Tachyon Core", value: processStatusLabel(runtimeStatus?.tachyonCore) },
+    { label: ui.systemProxy, value: systemProxyLabel(systemProxy) },
+    { label: ui.tunPrivilege, value: privilegeLabel(runtimePrivilege) },
+    { label: ui.xrayCoreBinary, value: processStatusLabel(runtimeStatus?.xray) },
+    { label: ui.tachyonCoreBinary, value: processStatusLabel(runtimeStatus?.tachyonCore) },
   ];
   const xrayRunning = runtimeStatus?.xray.state === "running";
   const tachyonRunning = runtimeStatus?.tachyonCore.state === "running";
@@ -2006,7 +2154,7 @@ export function App() {
       setMessage(subscriptionImportMessage(report, ui));
       void refreshNodeLatencies(report.nodes);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Subscription update failed");
+      setMessage(error instanceof Error ? error.message : ui.subscriptionUpdateFailed);
     }
   }
 
@@ -2029,12 +2177,12 @@ export function App() {
         nextSnapshot = createSubscriptionSnapshot(item.sourceUrl, report.nodes, nextSnapshot, item.name);
         updatedNodes.push(...report.nodes);
       } catch (error) {
-        failures.push(`${item.name}: ${error instanceof Error ? error.message : "update failed"}`);
+        failures.push(`${item.name}: ${error instanceof Error ? error.message : ui.subscriptionUpdateFailed}`);
       }
     }
 
     if (updatedNodes.length === 0) {
-      setMessage(failures[0] ?? "Subscription update failed");
+      setMessage(failures[0] ?? ui.subscriptionUpdateFailed);
       return;
     }
 
@@ -2083,7 +2231,7 @@ export function App() {
         return [
           node.id,
           {
-            error: error instanceof Error ? error.message : "latency test failed",
+            error: error instanceof Error ? error.message : ui.latencyTestFailed,
             latencyMs: null,
             ok: false,
           },
@@ -2115,7 +2263,7 @@ export function App() {
         "manual",
         report.nodes,
         subscription,
-        subscriptionName || "Manual",
+        subscriptionName || ui.manualSubscriptionName,
       );
       saveSubscriptionSnapshot(snapshot);
       setSubscription(snapshot);
@@ -2123,7 +2271,7 @@ export function App() {
       setMessage(subscriptionImportMessage(report, ui));
       void refreshNodeLatencies(report.nodes);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Subscription import failed");
+      setMessage(error instanceof Error ? error.message : ui.subscriptionImportFailed);
     }
   }
 
@@ -2134,7 +2282,7 @@ export function App() {
       setSubscription(snapshot);
       setMessage(ui.subscriptionSelected);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Subscription selection failed");
+      setMessage(error instanceof Error ? error.message : ui.subscriptionSelectionFailed);
     }
   }
 
@@ -2147,7 +2295,7 @@ export function App() {
       setXrayProbe({ error: null, report: null, state: "idle" });
       setMessage(ui.nodeSelected);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Node selection failed");
+      setMessage(error instanceof Error ? error.message : ui.nodeSelectionFailed);
     }
   }
 
@@ -2158,7 +2306,7 @@ export function App() {
       setSubscription(snapshot);
       setMessage(ui.subscriptionRemoved);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Subscription removal failed");
+      setMessage(error instanceof Error ? error.message : ui.subscriptionRemovalFailed);
     }
   }
 
@@ -2172,7 +2320,7 @@ export function App() {
       setRuntimeInputs((current) => runtimeWithTachyonServer(current, server));
       setMessage(ui.tachyonServerSaved);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Tachyon server save failed");
+      setMessage(error instanceof Error ? error.message : ui.tachyonServerSaveFailed);
     }
   }
 
@@ -2186,7 +2334,7 @@ export function App() {
       setRuntimeInputs((current) => runtimeWithTachyonServer(current, server));
       setMessage(ui.tachyonServerSelected);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Tachyon server selection failed");
+      setMessage(error instanceof Error ? error.message : ui.tachyonServerSelectionFailed);
     }
   }
 
@@ -2205,7 +2353,7 @@ export function App() {
       setRuntimeInputs((current) => runtimeWithTachyonServer(current, server));
       setMessage(ui.tachyonServerRemoved);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Tachyon server removal failed");
+      setMessage(error instanceof Error ? error.message : ui.tachyonServerRemovalFailed);
     }
   }
 
@@ -2273,7 +2421,10 @@ export function App() {
   }
 
   function installPlugin(pluginId: string, pluginTitle: string) {
-    persistPluginState(installPluginState(pluginState, pluginId), `${pluginTitle} installed`);
+    persistPluginState(
+      installPluginState(pluginState, pluginId),
+      `${pluginTitle}: ${ui.pluginInstalled}`,
+    );
   }
 
   function togglePlugin(pluginId: string, pluginTitle: string) {
@@ -2281,7 +2432,7 @@ export function App() {
     const nextPlugin = nextState[pluginId];
     persistPluginState(
       nextState,
-      nextPlugin?.enabled ? `${pluginTitle} enabled` : `${pluginTitle} disabled`,
+      `${pluginTitle}: ${nextPlugin?.enabled ? ui.pluginEnabled : ui.pluginDisabled}`,
     );
   }
 
@@ -2291,14 +2442,6 @@ export function App() {
       pluginState,
     );
     persistPluginState(nextState, ui.pluginAllInstalled);
-  }
-
-  function checkPluginUpdates() {
-    setMessage(ui.pluginUpdatesChecked);
-  }
-
-  function showPluginSource(pluginTitle: string) {
-    setMessage(`${pluginTitle}: ${ui.pluginSourceBundled}`);
   }
 
   async function runPlugin(pluginId: string, pluginTitle: string) {
@@ -2370,7 +2513,7 @@ export function App() {
       const result = templateValue(ui.pluginRunCompleted, "title", pluginTitle);
       persistPluginState(recordPluginRun(pluginState, pluginId, { result }), result);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Plugin run failed");
+      setMessage(error instanceof Error ? error.message : ui.pluginRunFailed);
     }
   }
 
@@ -2392,7 +2535,7 @@ export function App() {
       await navigator.clipboard.writeText(value);
       setMessage(templateValue(ui.labelCopied, "label", label));
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Copy failed");
+      setMessage(error instanceof Error ? error.message : ui.copyFailed);
     }
   }
 
@@ -2430,7 +2573,7 @@ export function App() {
       );
       setMessage(ui.diagnosticsExported);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Diagnostics export failed");
+      setMessage(error instanceof Error ? error.message : ui.diagnosticsExportFailed);
     }
   }
 
@@ -2512,7 +2655,7 @@ export function App() {
     }
     if (announce) {
       const preflight = await runTachyonCorePreflight(paths, settings);
-      setMessage(tachyonCorePreflightReadinessMessage(preflight));
+      setMessage(tachyonCorePreflightReadinessMessage(preflight, preflightMessages(ui)));
     }
     return result;
   }
@@ -2531,7 +2674,7 @@ export function App() {
     settings: RuntimeSettings,
   ): Promise<TachyonCorePreflightResult> {
     const result = await runTachyonCorePreflight(paths, settings);
-    const blocker = tachyonCorePreflightStartBlockReason(result);
+    const blocker = tachyonCorePreflightStartBlockReason(result, preflightMessages(ui));
     if (blocker) {
       throw new Error(blocker);
     }
@@ -2548,7 +2691,7 @@ export function App() {
       if (drafts.core) {
         results.push(await runTachyonConfigValidation(paths, settings, false));
         const preflight = await runTachyonCorePreflight(paths, settings);
-        preflightFallback = tachyonCorePreflightReadinessMessage(preflight);
+        preflightFallback = tachyonCorePreflightReadinessMessage(preflight, preflightMessages(ui));
       }
       const ok = Boolean(drafts.xray || results.length > 0) && results.every((result) => result.ok);
       setMessage(preflightFallback || (ok ? ui.configsValidated : ui.configsValidationErrors));
@@ -2561,9 +2704,9 @@ export function App() {
     try {
       const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
       setRuntimeInputs(settings);
-      setMessage("Runtime paths saved");
+      setMessage(ui.runtimePathsSaved);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Runtime settings save failed");
+      setMessage(error instanceof Error ? error.message : ui.runtimeSettingsSaveFailed);
     }
   }
 
@@ -2587,7 +2730,7 @@ export function App() {
   async function installBinary(kind: ManagedBinaryKind) {
     const sourcePath = binarySourceInputs[kind].trim();
     if (!sourcePath) {
-      setMessage("Source binary path required");
+      setMessage(ui.sourceBinaryPathRequired);
       return;
     }
     try {
@@ -2595,20 +2738,20 @@ export function App() {
       setManagedBinaries(inventory);
       setRuntimeInputs(inventory.runtimeSettings);
       const installed = kind === "xray" ? inventory.xray : inventory.tachyonCore;
-      setMessage(`${installed.displayName} installed`);
+      setMessage(templateValue(ui.binaryInstalled, "name", installed.displayName));
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Binary install failed");
+      setMessage(error instanceof Error ? error.message : ui.binaryInstallFailed);
     }
   }
 
   async function useManagedBinary(kind: ManagedBinaryKind) {
     const binary = binaryInfo(kind);
     if (!binary) {
-      setMessage("Binary inventory unavailable");
+      setMessage(ui.binaryInventoryUnavailable);
       return;
     }
     if (!binary.managedExists) {
-      setMessage(`${binary.displayName} is not installed`);
+      setMessage(templateValue(ui.binaryNotInstalled, "name", binary.displayName));
       return;
     }
     try {
@@ -2619,9 +2762,9 @@ export function App() {
       const settings = await saveRuntimeSettings(nextSettings);
       setRuntimeInputs(settings);
       await refreshManagedBinaries();
-      setMessage(`${binary.displayName} selected`);
+      setMessage(templateValue(ui.binarySelected, "name", binary.displayName));
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Binary selection failed");
+      setMessage(error instanceof Error ? error.message : ui.binarySelectionFailed);
     }
   }
 
@@ -2650,7 +2793,9 @@ export function App() {
       setMessage(`${releaseChannelForKind(settings, kind)} ${managedBinaryDisplayName(kind)} ${release.tagName}`);
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : `${managedBinaryDisplayName(kind)} release check failed`;
+        error instanceof Error
+          ? error.message
+          : templateValue(ui.releaseCheckFailed, "name", managedBinaryDisplayName(kind));
       setReleaseDiagnostics((current) => ({
         ...current,
         [kind]: {
@@ -2685,12 +2830,17 @@ export function App() {
       }
       setMessage(
         diagnostics.lastError
-          ? `${managedBinaryDisplayName(kind)} diagnostics: ${diagnostics.lastError}`
-          : `${managedBinaryDisplayName(kind)} diagnostics ready for saved settings`,
+          ? templateValues(ui.diagnosticsWithError, {
+              details: diagnostics.lastError,
+              name: managedBinaryDisplayName(kind),
+            })
+          : templateValue(ui.diagnosticsReady, "name", managedBinaryDisplayName(kind)),
       );
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : `${managedBinaryDisplayName(kind)} diagnostics failed`;
+        error instanceof Error
+          ? error.message
+          : templateValue(ui.diagnosticsFailed, "name", managedBinaryDisplayName(kind));
       setReleaseDiagnostics((current) => ({
         ...current,
         [kind]: {
@@ -2734,7 +2884,11 @@ export function App() {
       }));
       setMessage(`${managedBinaryDisplayName(kind)} ${result.release.tagName} installed`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : `${managedBinaryDisplayName(kind)} install failed`);
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : templateValue(ui.latestInstallFailed, "name", managedBinaryDisplayName(kind)),
+      );
     } finally {
       setBinaryBusy(false);
     }
@@ -2748,9 +2902,9 @@ export function App() {
       const inventory = await installWintunSidecar();
       setManagedBinaries(inventory);
       setRuntimeInputs(inventory.runtimeSettings);
-      setMessage("wintun.dll installed");
+      setMessage(ui.wintunInstalled);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Wintun install failed");
+      setMessage(error instanceof Error ? error.message : ui.wintunInstallFailed);
     } finally {
       setBinaryBusy(false);
     }
@@ -2845,7 +2999,7 @@ export function App() {
       if (kind === "tachyonCore") {
         await runTachyonConfigValidation(paths, settings, false);
         const preflight = await assertTachyonCoreStartable(paths, settings);
-        setMessage(tachyonCorePreflightReadinessMessage(preflight));
+        setMessage(tachyonCorePreflightReadinessMessage(preflight, preflightMessages(ui)));
       }
       const status =
         kind === "xray"
@@ -2875,7 +3029,7 @@ export function App() {
                 state: "stopped",
               },
       }));
-      setMessage(`${managedBinaryDisplayName(kind)} started`);
+      setMessage(templateValue(ui.runtimeStartedNamed, "name", managedBinaryDisplayName(kind)));
       return { error: null, ok: true };
     } catch (error) {
       const message = error instanceof Error ? error.message : ui.runtimeFailed;
@@ -2911,9 +3065,9 @@ export function App() {
                 state: "stopped",
               },
       }));
-      setMessage(`${managedBinaryDisplayName(kind)} stopped`);
+      setMessage(templateValue(ui.runtimeStoppedNamed, "name", managedBinaryDisplayName(kind)));
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Stop failed");
+      setMessage(error instanceof Error ? error.message : ui.runtimeStopFailed);
     }
   }
 
@@ -2933,7 +3087,7 @@ export function App() {
       const paths = await writeDrafts("all");
       await runTachyonConfigValidation(paths, settings, false);
       const preflight = await assertTachyonCoreStartable(paths, settings);
-      setMessage(tachyonCorePreflightReadinessMessage(preflight));
+      setMessage(tachyonCorePreflightReadinessMessage(preflight, preflightMessages(ui)));
       const result = await invokeDesktop<StartAllResult>("start_all", {
         tachyonCoreBinaryPath: settings.tachyonCoreBinaryPath,
         tachyonCoreConfigPath: paths.coreConfigPath,
@@ -2988,7 +3142,7 @@ export function App() {
       }
       await invokeDesktop<void>("window_close");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Window action failed");
+      setMessage(error instanceof Error ? error.message : ui.windowActionFailed);
     }
   }
 
@@ -3012,7 +3166,7 @@ export function App() {
   function changeLanguage(nextLanguage: Language) {
     saveLanguage(nextLanguage);
     setLanguage(nextLanguage);
-    setMessage(nextLanguage === "zh-CN" ? "语言已更新" : "Language updated");
+    setMessage(nextLanguage === "zh-CN" ? zh.languageUpdated : en.languageUpdated);
   }
 
   function navigateView(view: PrismView) {
@@ -3445,11 +3599,9 @@ export function App() {
 
         {activeView === "plugins" ? (
           <PluginsView
-            onCheckUpdates={checkPluginUpdates}
             onInstallAll={installAllPlugins}
             onInstall={installPlugin}
             onRun={runPlugin}
-            onSource={showPluginSource}
             onToggle={togglePlugin}
             pluginState={pluginState}
             ui={ui}
@@ -4047,13 +4199,9 @@ function ConfigsView({
               <span className={sortByDelay ? "toggle-dot active" : "toggle-dot"} />
               {ui.sortByDelay}
             </button>
-            <button className="toolbar-square" type="button" title={ui.more}>
-              ...
-            </button>
           </div>
         </div>
         <div className="strip-actions">
-          <button type="button" title={ui.filter}>⌯</button>
           <button type="button" title={ui.refreshLatency} onClick={onRefreshLatency}>↻</button>
           <button type="button" title={ui.collapseAll} onClick={() => onExpandGroup("")}>⌄</button>
         </div>
@@ -4312,20 +4460,16 @@ function SubscriptionsView({
 }
 
 function PluginsView({
-  onCheckUpdates,
   onInstall,
   onInstallAll,
   onRun,
-  onSource,
   onToggle,
   pluginState,
   ui,
 }: {
-  onCheckUpdates: () => void;
   onInstall: (pluginId: string, pluginTitle: string) => void;
   onInstallAll: () => void;
   onRun: (pluginId: string, pluginTitle: string) => void;
-  onSource: (pluginTitle: string) => void;
   onToggle: (pluginId: string, pluginTitle: string) => void;
   pluginState: PluginStateSnapshot;
   ui: typeof zh;
@@ -4336,28 +4480,28 @@ function PluginsView({
       badge: "",
       desc: ui.pluginRollingDesc,
       id: pluginCatalogIds[0],
-      tags: [ui.pluginTriggerManual, ui.pluginTriggerApp],
+      tags: [ui.pluginTriggerManual],
       title: ui.pluginRollingTitle,
     },
     {
       badge: "",
       desc: ui.pluginTransformDesc,
       id: pluginCatalogIds[1],
-      tags: [ui.pluginTriggerManual, ui.pluginTriggerUpdate],
+      tags: [ui.pluginTriggerManual],
       title: ui.pluginTransformTitle,
     },
     {
       badge: "Dev",
       desc: ui.pluginStatsDesc,
       id: pluginCatalogIds[2],
-      tags: [ui.pluginTriggerManual, ui.pluginTriggerApp],
+      tags: [ui.pluginTriggerManual],
       title: ui.pluginStatsTitle,
     },
     {
       badge: "●",
       desc: ui.pluginSwitchDesc,
       id: pluginCatalogIds[3],
-      tags: [ui.pluginTriggerManual, ui.pluginTriggerNode],
+      tags: [ui.pluginTriggerManual],
       title: ui.pluginSwitchTitle,
     },
   ];
@@ -4394,7 +4538,6 @@ function PluginsView({
           </div>
         </div>
         <div className="toolbar-actions">
-          <button type="button" onClick={onCheckUpdates}>{ui.checkUpdates}</button>
           <button className="primary-action" type="button" onClick={onInstallAll}>
             + {ui.add}
           </button>
@@ -4422,7 +4565,6 @@ function PluginsView({
                   {plugin.badge === "●" ? <span className="green-dot" /> : null}
                   {plugin.title}
                 </h2>
-                <button type="button" title={ui.more}>...</button>
               </header>
               <div className="tag-row">
                 {plugin.tags.map((tag) => (
@@ -4440,9 +4582,6 @@ function PluginsView({
                 <strong>{state.lastResult || ui.pluginNoResult}</strong>
               </div>
               <footer>
-                <button className="link-button" type="button" onClick={() => onSource(plugin.title)}>
-                  {ui.source}
-                </button>
                 <div className="row-actions">
                   {state.installed ? (
                     <button type="button" onClick={() => onToggle(plugin.id, plugin.title)}>
@@ -4636,7 +4775,6 @@ function SettingsView({
     { id: "general", label: ui.settingsGeneral },
     { id: "core", label: ui.coreSettings },
     { id: "rules", label: ui.rulesMode },
-    { id: "plugins", label: ui.plugins },
     { id: "about", label: ui.settingsAbout },
   ];
   const coreRuntimeItems: Array<{
@@ -4675,22 +4813,7 @@ function SettingsView({
       <section className="settings-content">
         {section === "general" ? (
           <article className="settings-card">
-            <h1>{ui.personalized}</h1>
-            <SettingRow label={ui.theme}>
-              <div className="segmented">
-                <button className="active" type="button">{ui.dark}</button>
-                <button type="button">{ui.light}</button>
-                <button type="button">{ui.followSystem}</button>
-              </div>
-            </SettingRow>
-            <SettingRow label={ui.color}>
-              <div className="segmented">
-                <button className="active" type="button">{ui.defaultColor}</button>
-                <button type="button">{ui.green}</button>
-                <button type="button">{ui.purple}</button>
-                <button type="button">{ui.custom}</button>
-              </div>
-            </SettingRow>
+            <h1>{ui.generalSettings}</h1>
             <SettingRow label={ui.language}>
               <div className="segmented">
                 <button
@@ -4708,22 +4831,6 @@ function SettingsView({
                   English
                 </button>
               </div>
-            </SettingRow>
-            <SettingRow label={ui.pageVisibility}>
-              <div className="segmented wide">
-                <button className="active" type="button">{ui.overview}</button>
-                <button className="active" type="button">{ui.configs}</button>
-                <button className="active" type="button">{ui.subscriptions}</button>
-                <button type="button">{ui.ruleSets}</button>
-                <button className="active" type="button">{ui.plugins}</button>
-                <button type="button">{ui.scheduledTasks}</button>
-              </div>
-            </SettingRow>
-            <SettingRow label={ui.behavior}>
-              <label className="switch-line">
-                <span>{ui.adminRestart}</span>
-                <input type="checkbox" />
-              </label>
             </SettingRow>
           </article>
         ) : null}
@@ -5326,8 +5433,8 @@ function SettingsView({
                 <div className="row-actions">
                   <button type="button" onClick={onSaveDrafts}>{ui.save}</button>
                   <button type="button" onClick={onValidateConfigs}>{ui.validateConfigs}</button>
-                  <button type="button" onClick={() => void copyDraft("Xray config", drafts.xray)}>{ui.copyXray}</button>
-                  <button type="button" onClick={() => void copyDraft("Core config", drafts.core)}>{ui.copyCore}</button>
+                  <button type="button" onClick={() => void copyDraft(ui.xrayConfigReadiness, drafts.xray)}>{ui.copyXray}</button>
+                  <button type="button" onClick={() => void copyDraft(ui.tachyonConfigReadiness, drafts.core)}>{ui.copyCore}</button>
                 </div>
               </header>
               {drafts.error ? <div className="inline-error">{drafts.error}</div> : null}
@@ -5533,18 +5640,6 @@ function SettingsView({
           </div>
         ) : null}
 
-        {section === "plugins" ? (
-          <article className="settings-card">
-            <h1>{ui.pluginSettings}</h1>
-            <SettingRow label={ui.pluginAutoUpdate}>
-              <input type="checkbox" />
-            </SettingRow>
-            <SettingRow label={ui.pluginAllowNodeRead}>
-              <input type="checkbox" />
-            </SettingRow>
-          </article>
-        ) : null}
-
         {section === "about" ? (
           <article className="settings-card">
             <h1>Tachyon Prism</h1>
@@ -5574,7 +5669,7 @@ function ValidationSummary({ results, ui }: { results: ValidationResults; ui: ty
         return (
           <div className={result.ok ? "ok" : "error"} key={kind}>
             <span>{label}</span>
-            <strong>{result.ok ? "OK" : ui.validationFailed}</strong>
+            <strong>{result.ok ? ui.readinessOk : ui.validationFailed}</strong>
             <small title={result.command}>{result.error || result.details}</small>
           </div>
         );

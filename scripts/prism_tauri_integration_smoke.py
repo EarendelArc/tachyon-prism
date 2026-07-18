@@ -541,13 +541,13 @@ def screenshot_pages(
             "overview": "工作模式",
             "subscriptions": "更新全部",
             "plugins": "插件中心",
-            "settings": "个性化",
+            "settings": "通用设置",
         },
         "en": {
             "overview": "Work Mode",
             "subscriptions": "Update All",
             "plugins": "Plugin Center",
-            "settings": "Personalization",
+            "settings": "General Settings",
         },
     }[language]
     record = context.result["screenshots"][language]
