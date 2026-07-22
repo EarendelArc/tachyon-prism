@@ -502,6 +502,7 @@ export async function preflightTachyonCore(
 }
 
 const tachyonCoreStartBlockCodes = new Set([
+  "SELECTIVE_ROUTES_SUPPORTED",
   "WINTUN_DLL_PRESENT",
   "TUN_PRIVILEGE",
   "TUN_DEVICE_PRESENT",
@@ -637,7 +638,7 @@ export function tachyonCorePreflightFallbackMessage(
   result: TachyonCorePreflightResult,
   messages: TachyonCorePreflightMessages = defaultTachyonCorePreflightMessages,
 ): string | null {
-  return result.supported ? null : messages.fallback;
+  return result.supported || !result.ok ? null : messages.fallback;
 }
 
 export function tachyonCorePreflightReadinessMessage(
@@ -680,7 +681,7 @@ export function tachyonCorePreflightStartBlockReason(
   result: TachyonCorePreflightResult | null,
   messages: TachyonCorePreflightMessages = defaultTachyonCorePreflightMessages,
 ): string | null {
-  if (!result?.supported) {
+  if (!result) {
     return null;
   }
   const blockingChecks = result.checks.filter(

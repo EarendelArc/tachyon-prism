@@ -51,6 +51,11 @@ Prism generates two JSON files from the selected node and user settings:
 The generated configs are written to the Tauri app config directory and can also
 be copied to clipboard from the Config panel.
 
+Core preflight code `SELECTIVE_ROUTES_SUPPORTED` is a game-acceleration startup
+gate. Prism also synthesizes that check when a legacy Core lacks preflight and
+the generated config has non-empty `game_routes`; empty routes keep the legacy
+validate-only fallback.
+
 ## Binary Management
 
 The Binaries panel manages Xray Core and Tachyon Core executables:

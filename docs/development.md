@@ -12,6 +12,13 @@ npm test
 npm run test:core-contract
 ```
 
+`npm test` excludes every `*.live.test.ts` file. The Core live contract runs
+only through `npm run test:core-contract`, requires the pinned Core source, and
+is executed by CI/Release on Linux, macOS, and Windows. It does not enable TUN:
+Linux/macOS assert the real Core process rejects non-empty selective routes
+before the `TUN device ready` point, while Windows parses `go test -json` and
+requires every named in-memory route simulation to emit its own run/pass events.
+
 The UI should stay decoupled from packet routing. Prism calls Core IPC APIs and
 renders state; it does not implement routing decisions locally.
 
@@ -39,4 +46,7 @@ macOS ARM64, Linux x64, and Linux ARM64.
 The generated artifacts are uploaded to the GitHub release together with
 `SHA256SUMS.txt` and reproducible source metadata. The cross-repository test uses
 the exact Tachyon Core release pin in `core-contract.json`; it fails when that
-source/ref is unavailable instead of skipping validation.
+source/ref is unavailable instead of skipping validation. The current contract
+is the annotated `v0.1.0-alpha.21` tag object
+`26ac54b682c7d0e3a65f8a35662c6d7f11724001`, peeled to commit
+`12df9c561a921bed7fc5f63a2ea166e7227d773f`.

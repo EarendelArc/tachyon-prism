@@ -645,8 +645,8 @@ const zh = {
   xrayIndependent: "Xray 与 Tachyon 相互独立",
   xrayIndependentDetail: "即使 Tachyon Core 游戏加速被阻止，Xray 本地 HTTP/SOCKS 代理仍可独立使用。",
   gameAccelerationStartable: "游戏加速可启动",
-  preflightNoStartupBlocker: "Tachyon Core 启动前检查未发现 TUN/Wintun 阻断项。",
-  preflightFallbackUnconfirmed: "Core 版本不支持启动前检查；仅验证配置无法确认 TUN/Wintun 就绪状态。",
+  preflightNoStartupBlocker: "Tachyon Core 启动前检查未发现 TUN、Wintun 或选择性路由阻断项。",
+  preflightFallbackUnconfirmed: "Core 版本不支持启动前检查；空游戏路由仅验证配置，无法确认 TUN/Wintun 就绪状态。",
   preflightNotRun: "尚未运行启动前检查；启动 Tachyon Core 前会先检查。",
   gameProfilesReadiness: "游戏规则",
   gameProfilesEnabled: "已启用 {count} 条游戏规则。",
@@ -1052,8 +1052,8 @@ const en: typeof zh = {
   xrayIndependent: "Xray and Tachyon independence",
   xrayIndependentDetail: "Xray local HTTP/SOCKS proxy can be usable even when Tachyon Core game acceleration is blocked.",
   gameAccelerationStartable: "Game acceleration startable",
-  preflightNoStartupBlocker: "No preflight TUN/Wintun startup blocker detected for Tachyon Core.",
-  preflightFallbackUnconfirmed: "Core version lacks preflight; validate-only fallback cannot confirm TUN/Wintun readiness.",
+  preflightNoStartupBlocker: "No preflight TUN, Wintun, or selective-route startup blocker detected for Tachyon Core.",
+  preflightFallbackUnconfirmed: "Core version lacks preflight; empty game routes use validate-only fallback without confirming TUN/Wintun readiness.",
   preflightNotRun: "Preflight has not run yet; Start will check before launching Tachyon Core.",
   gameProfilesReadiness: "Game profiles",
   gameProfilesEnabled: "{count} game profile(s) enabled.",
@@ -1474,7 +1474,7 @@ function checkReadiness(
 
 function preflightReadinessState(preflight: TachyonCorePreflightResult): ReadinessState {
   if (!preflight.supported) {
-    return "warning";
+    return preflight.ok ? "warning" : "error";
   }
   if (!preflight.ok) {
     return preflight.overall.toLowerCase() === "error" ? "error" : "warning";

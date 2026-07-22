@@ -27,10 +27,17 @@ prepare job 会把远端标签取到隔离 ref，验证 tag object 与 peeled co
 
 ## Core 兼容契约
 
-`core-contract.json` 固定配套 Tachyon Core 的仓库、发布标签和完整 commit。CI 与 Release
-会带完整标签历史检出该精确 commit；仓库或 ref 缺失会直接失败。跨仓测试会确认检出 commit
-具有固定标签，用该发布版本构建 Core，通过 Prism 的生产生成器产生 `client.json`，再调用
-真实 Core 的 `validate` 命令。测试不会在 Prism 中复制一份 Core 校验规则。
+`core-contract.json` 固定配套 Tachyon Core 的仓库、annotated release tag、完整 tag object
+ID 和 peeled commit。当前 pin 是 `v0.1.0-alpha.21`，tag object 为
+`26ac54b682c7d0e3a65f8a35662c6d7f11724001`，peel 后 commit 为
+`12df9c561a921bed7fc5f63a2ea166e7227d773f`。CI 与 Release 会带完整标签历史检出该
+精确 commit，并验证 annotated tag peel；仓库/ref 缺失或发生变化会直接失败。
+
+显式跨仓 job 会在 Linux、macOS 和 Windows 上运行。它从固定源码构建 Core，通过 Prism
+生产生成器产生 `client.json`，调用真实 validator，并注入 `not-a-cidr`，要求 Core 非零拒绝
+且定位 `client.tun.game_routes[0]`。Linux/macOS 会运行带有效非空路由的配置，并要求在 TUN
+ready 前失败；Windows 只执行固定源码中指定的路由模拟测试，再解析 `go test -json`，证明
+每个测试确实运行。测试不会复制 Core 校验规则，也不会选择加入真实路由或 TUN 集成测试。
 
 ## 构建矩阵
 

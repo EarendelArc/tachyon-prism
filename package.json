@@ -11,7 +11,7 @@
         "build:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
         "typecheck": "tsc --noEmit",
         "test": "vitest run",
-        "test:core-contract": "vitest run src/domain/__tests__/coreConfigContract.live.test.ts --reporter=verbose",
+        "test:core-contract": "vitest run --config vitest.contract.config.ts --reporter=verbose",
         "test:ui": "python scripts/prism_ui_smoke.py",
         "test:native-window": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prism_native_window_smoke.ps1"
     },

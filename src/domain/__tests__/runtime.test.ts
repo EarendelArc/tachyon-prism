@@ -287,6 +287,68 @@ describe("tachyonCore preflight helpers", () => {
     expect(tachyonCorePreflightReadinessMessage(result)).toContain("preflight found readiness issues");
   });
 
+  it("blocks unsupported selective routes reported by current Core", () => {
+    const result: TachyonCorePreflightResult = {
+      checks: [
+        {
+          code: "SELECTIVE_ROUTES_SUPPORTED",
+          details: "Clear client.tun.game_routes on this platform.",
+          message: "Selective routes are unsupported before TUN creation.",
+          raw: null,
+          status: "error",
+        },
+      ],
+      command: "tachyon-core preflight --config client.json --json",
+      error: "SELECTIVE_ROUTES_SUPPORTED: unsupported",
+      exitCode: 0,
+      ok: false,
+      overall: "error",
+      structuredReport: null,
+      stderr: "",
+      stderrTruncated: false,
+      stdout: "",
+      stdoutTruncated: false,
+      supported: true,
+    };
+
+    expect(tachyonCorePreflightStartBlockReason(result)).toContain(
+      "Selective game routes: not ready",
+    );
+  });
+
+  it("fails closed when a legacy Core cannot preflight non-empty game routes", () => {
+    const result: TachyonCorePreflightResult = {
+      checks: [
+        {
+          code: "SELECTIVE_ROUTES_SUPPORTED",
+          details: "Upgrade Core or clear client.tun.game_routes.",
+          message: "Installed Core cannot preflight selective game routes.",
+          raw: null,
+          status: "error",
+        },
+      ],
+      command: "tachyon-core preflight --config client.json --json",
+      error: "SELECTIVE_ROUTES_SUPPORTED: preflight unavailable",
+      exitCode: 2,
+      ok: false,
+      overall: "error",
+      structuredReport: null,
+      stderr: "unrecognized subcommand",
+      stderrTruncated: false,
+      stdout: "",
+      stdoutTruncated: false,
+      supported: false,
+    };
+
+    expect(tachyonCorePreflightFallbackMessage(result)).toBeNull();
+    expect(tachyonCorePreflightReadinessMessage(result)).toContain(
+      "Selective game routes: not ready",
+    );
+    expect(tachyonCorePreflightStartBlockReason(result)).toContain(
+      "game acceleration cannot start",
+    );
+  });
+
   it("keeps non-empty English Core diagnostics out of zh-CN primary summaries", () => {
     const result: TachyonCorePreflightResult = {
       checks: [

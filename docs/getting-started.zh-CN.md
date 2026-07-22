@@ -54,6 +54,9 @@ Windows 上 Prism 还会检查 Tachyon Core 所需的 `wintun.dll` sidecar。Pri
 进入 **设置 > 核心**，找到 **配置草稿**：
 
 - Prism 会根据当前节点、Tachyon 服务器档案、游戏配置、启动器设置、运行端口、TGP 本地绑定地址、连接迁移和多路径开关生成 `xray-client.json` 与 `client.json`。
+- 显式游戏服务器 CIDR 会单独写入 `client.tun.game_routes`。空列表明确表示 Core 不安装
+  游戏目的路由。配套 Core 目前只在 Windows 支持非空选择性路由；Linux/macOS 会在创建
+  TUN 前 fail-closed，直到具备等价事务能力。
 - 点击 **保存** 把配置写入 Prism 配置目录。
 - 点击 **验证配置**，启动前运行 `xray run -test -config` 和 `tachyon-core validate --config`。
 - 也可以把任意一份配置复制到剪贴板。
@@ -67,10 +70,12 @@ Windows 上 Prism 还会检查 Tachyon Core 所需的 `wintun.dll` sidecar。Pri
 1. Prism 写入最新配置文件。
 2. Prism 使用 Xray 原生测试模式验证 `xray-client.json`。
 3. Prism 使用 Tachyon Core 验证器验证 `client.json`。
-4. Prism 启动 Xray Core，并等待本地 Xray readiness。
-5. 只有 Xray 就绪后才启动 Tachyon Core，然后等待本地 Core `/v1/health` readiness。
-6. 任一启动或 readiness 失败都会回滚 **Start All** 本次已经启动的核心。
-7. 概览页显示两个核心的实时状态。
+4. Prism 执行 Core preflight；`SELECTIVE_ROUTES_SUPPORTED` 错误会阻止游戏加速。旧 Core
+   若不支持 preflight，则在 `game_routes` 非空时同样 fail-closed；空列表仍保留仅验证兼容路径。
+5. Prism 启动 Xray Core，并等待本地 Xray readiness。
+6. 只有 Xray 就绪后才启动 Tachyon Core，然后等待本地 Core `/v1/health` readiness。
+7. 任一启动或 readiness 失败都会回滚 **Start All** 本次已经启动的核心。
+8. 概览页显示两个核心的实时状态。
 
 匹配游戏配置的 UDP 流量可以通过 TGP 加速。其他代理流量正常走 Xray。
 

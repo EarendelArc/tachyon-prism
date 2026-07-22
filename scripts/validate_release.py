@@ -147,8 +147,11 @@ def validate_workflows() -> None:
     core_repository = str(core_contract["repository"])
     core_commit = str(core_contract["commit"])
     core_tag = str(core_contract["tag"])
+    core_tag_object = str(core_contract["tag_object"])
     if not re.fullmatch(r"[0-9a-f]{40}", core_commit):
         fail("core-contract.json commit must be a full lowercase SHA-1")
+    if not re.fullmatch(r"[0-9a-f]{40}", core_tag_object):
+        fail("core-contract.json tag_object must be a full lowercase SHA-1")
     if not re.fullmatch(r"v[0-9A-Za-z][0-9A-Za-z._-]*", core_tag):
         fail("core-contract.json tag is invalid")
 
@@ -197,7 +200,7 @@ def validate_workflows() -> None:
     present = [fragment for fragment in forbidden if fragment in release or fragment in publication]
     if present:
         fail("release workflow contains replace-in-place operations: " + ", ".join(present))
-    if release.count("ref: ${{ needs.prepare.outputs.commit }}") != 3:
+    if release.count("ref: ${{ needs.prepare.outputs.commit }}") != 4:
         fail("release jobs are not all pinned to the verified Prism commit")
     if publication.count('release upload "${VERSION}" "${release_dir}"/*') != 1:
         fail("release assets must be uploaded exactly once")
@@ -208,6 +211,7 @@ def validate_workflows() -> None:
         "path: tachyon-core",
         "fetch-depth: 0",
         "npm run test:core-contract",
+        "python .github/scripts/verify-core-contract.py tachyon-core",
     ]
     for workflow_name, workflow in (("CI", ci), ("release", release)):
         missing_core = [fragment for fragment in core_fragments if fragment not in workflow]

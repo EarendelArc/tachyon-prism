@@ -57,6 +57,10 @@ acceleration with the generated alpha configs.
 Go to **Settings > Core** and find **Config Drafts**:
 
 - Prism generates `xray-client.json` and `client.json` from your selected Xray node, Tachyon server profile, game profiles, launcher settings, runtime ports, TGP local bind addresses, connection migration, and the multipath switch.
+- Explicit game server CIDRs are stored separately as `client.tun.game_routes`.
+  An empty list means Core installs no game destination routes. Non-empty
+  selective routes are supported by the paired Core on Windows; Linux and
+  macOS fail closed before creating TUN until equivalent transactions exist.
 - Click **Save** to write them to the Prism config directory.
 - Click **Validate Configs** to run `xray run -test -config` and `tachyon-core validate --config` before launching.
 - You can also **Copy** either config to the clipboard.
@@ -68,11 +72,14 @@ Use the Overview quick actions or **Settings > Core** runtime buttons:
 1. Prism writes the latest config files.
 2. Prism validates `xray-client.json` with Xray's native test mode.
 3. Prism validates `client.json` with Tachyon Core's validator.
-4. Prism starts Xray Core and waits for local Xray readiness.
-5. Prism starts Tachyon Core only after Xray is ready, then waits for the local
+4. Prism runs Core preflight. `SELECTIVE_ROUTES_SUPPORTED` errors block game
+   acceleration. A legacy Core without preflight is also blocked when
+   `game_routes` is non-empty, but retains validate-only behavior for an empty list.
+5. Prism starts Xray Core and waits for local Xray readiness.
+6. Prism starts Tachyon Core only after Xray is ready, then waits for the local
    Core `/v1/health` readiness endpoint.
-6. Any start or readiness failure rolls back the cores started by **Start All**.
-7. The dashboard shows live status for both cores.
+7. Any start or readiness failure rolls back the cores started by **Start All**.
+8. The dashboard shows live status for both cores.
 
 Game UDP traffic matching your profiles will be accelerated through TGP. Other proxy traffic flows through Xray.
 

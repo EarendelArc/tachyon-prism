@@ -1269,7 +1269,45 @@ fn preflight_tachyon_core_config_file(
         command.current_dir(work_dir);
     }
     let output = command_output_with_timeout(command, Duration::from_secs(8));
-    Ok(tachyon_core_preflight_result(command_line, output))
+    let result = tachyon_core_preflight_result(command_line, output);
+    if result.supported {
+        return Ok(result);
+    }
+    let has_game_routes = prism_config_has_non_empty_game_routes(config)?;
+    Ok(fail_closed_legacy_selective_routes(result, has_game_routes))
+}
+
+fn prism_config_has_non_empty_game_routes(config: &Path) -> Result<bool, String> {
+    let bytes = std::fs::read(config)
+        .map_err(|error| format!("read Tachyon Core config for preflight fallback: {error}"))?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("parse Tachyon Core config for preflight fallback: {error}"))?;
+    Ok(value
+        .pointer("/client/tun/game_routes")
+        .and_then(Value::as_array)
+        .is_some_and(|routes| !routes.is_empty()))
+}
+
+fn fail_closed_legacy_selective_routes(
+    mut result: TachyonCorePreflightResult,
+    has_game_routes: bool,
+) -> TachyonCorePreflightResult {
+    if !has_game_routes {
+        return result;
+    }
+    let message = "Installed Core cannot preflight selective game routes.".to_string();
+    let details = "Upgrade to the paired Tachyon Core release or clear client.tun.game_routes before starting game acceleration.".to_string();
+    result.ok = false;
+    result.overall = "error".to_string();
+    result.checks = vec![TachyonCorePreflightCheck {
+        code: "SELECTIVE_ROUTES_SUPPORTED".to_string(),
+        status: "error".to_string(),
+        message: message.clone(),
+        details,
+        raw: Value::Null,
+    }];
+    result.error = Some(format!("SELECTIVE_ROUTES_SUPPORTED: {message}"));
+    result
 }
 
 fn validate_config_with_command(
@@ -8393,6 +8431,57 @@ stat: <
             result.error.as_deref(),
             Some("Core version lacks preflight; validate only"),
         );
+    }
+
+    #[test]
+    fn legacy_core_preflight_fails_closed_for_non_empty_game_routes() {
+        let output = test_output(2, b"", b"error: unrecognized subcommand 'preflight'\n");
+        let fallback = tachyon_core_preflight_result(
+            "tachyon-core preflight --config client.json --json".to_string(),
+            Ok(output),
+        );
+
+        let result = fail_closed_legacy_selective_routes(fallback, true);
+
+        assert!(!result.supported);
+        assert!(!result.ok);
+        assert_eq!(result.overall, "error");
+        assert_eq!(result.checks.len(), 1);
+        assert_eq!(result.checks[0].code, "SELECTIVE_ROUTES_SUPPORTED");
+        assert_eq!(result.checks[0].status, "error");
+    }
+
+    #[test]
+    fn legacy_core_preflight_keeps_empty_game_routes_in_validate_only_mode() {
+        let output = test_output(2, b"", b"error: unrecognized subcommand 'preflight'\n");
+        let fallback = tachyon_core_preflight_result(
+            "tachyon-core preflight --config client.json --json".to_string(),
+            Ok(output),
+        );
+
+        let result = fail_closed_legacy_selective_routes(fallback, false);
+
+        assert!(!result.supported);
+        assert!(result.ok);
+        assert_eq!(result.overall, "unsupported");
+        assert!(result.checks.is_empty());
+    }
+
+    #[test]
+    fn preflight_fallback_reads_non_empty_game_routes_from_prism_json() {
+        let dir = unique_temp_dir("tachyon-preflight-game-routes");
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("client.json");
+        std::fs::write(
+            &config,
+            br#"{"client":{"tun":{"game_routes":["203.0.113.0/24"]}}}"#,
+        )
+        .unwrap();
+        assert!(prism_config_has_non_empty_game_routes(&config).unwrap());
+
+        std::fs::write(&config, br#"{"client":{"tun":{"game_routes":[]}}}"#).unwrap();
+        assert!(!prism_config_has_non_empty_game_routes(&config).unwrap());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(unix)]

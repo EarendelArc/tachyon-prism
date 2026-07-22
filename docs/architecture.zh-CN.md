@@ -41,6 +41,10 @@ Prism 根据选中的节点和用户设置生成两个 JSON 文件：
 
 生成的配置写入 Tauri 应用配置目录，也可从 Config 面板复制到剪贴板。
 
+Core preflight 的 `SELECTIVE_ROUTES_SUPPORTED` 是游戏加速启动门禁。若旧 Core 不支持
+preflight 且生成配置的 `game_routes` 非空，Prism 会合成相同 code 的失败检查；空路由仍
+保留旧 Core 的仅验证回退。
+
 ## 二进制管理
 
 Binaries 面板管理 Xray Core 和 Tachyon Core 可执行文件：

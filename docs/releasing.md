@@ -32,12 +32,22 @@ check is defense in depth, not a replacement for an immutable-tag policy.
 
 ## Core compatibility contract
 
-`core-contract.json` pins the paired Tachyon Core repository, release tag, and
-full commit. CI and Release check out that exact commit with full tag history;
-a missing repository/ref fails the job. The cross-repository test confirms the
-checked-out commit has the pinned tag, builds Core with that release version,
-generates `client.json` through Prism's production generator, and invokes the
-real Core `validate` command. It never copies Core validation rules into Prism.
+`core-contract.json` pins the paired Tachyon Core repository, annotated release
+tag, full tag-object ID, and peeled commit. The current pin is
+`v0.1.0-alpha.21`, tag object
+`26ac54b682c7d0e3a65f8a35662c6d7f11724001`, peeled commit
+`12df9c561a921bed7fc5f63a2ea166e7227d773f`. CI and Release check out that exact
+commit with full tag history and verify the annotated tag peel; a missing or
+changed repository/ref fails the job.
+
+The explicit cross-repository job runs on Linux, macOS, and Windows. It builds
+Core from the pinned source, generates `client.json` through Prism's production
+generator, invokes the real validator, and fault-injects `not-a-cidr` to require
+Core to reject `client.tun.game_routes[0]`. Linux/macOS run the valid non-empty
+route config and require failure before TUN readiness. Windows executes only
+the pinned source's named route simulations and parses `go test -json` to prove
+every test actually ran. It never copies Core validation rules into Prism and
+never opts into real-route or TUN integration tests.
 
 ## Build matrix
 

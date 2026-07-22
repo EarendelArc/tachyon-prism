@@ -11,6 +11,13 @@ const ciWorkflowPath = fileURLToPath(
 const coreContractPath = fileURLToPath(
   new URL("../../../core-contract.json", import.meta.url),
 );
+const packagePath = fileURLToPath(new URL("../../../package.json", import.meta.url));
+const vitestConfigPath = fileURLToPath(
+  new URL("../../../vitest.config.ts", import.meta.url),
+);
+const contractVitestConfigPath = fileURLToPath(
+  new URL("../../../vitest.contract.config.ts", import.meta.url),
+);
 const publicationScriptPath = fileURLToPath(
   new URL("../../../.github/scripts/publish-release.sh", import.meta.url),
 );
@@ -117,7 +124,7 @@ describe("release workflow checksum assets", () => {
 
     expect(workflow).toContain("Verify remote tag object and peeled commit");
     expect(workflow).toContain("EXPECTED_TAG_OBJECT: ${{ needs.prepare.outputs.tag_object }}");
-    expect(workflow.match(/ref: \$\{\{ needs\.prepare\.outputs\.commit \}\}/g)).toHaveLength(3);
+    expect(workflow.match(/ref: \$\{\{ needs\.prepare\.outputs\.commit \}\}/g)).toHaveLength(4);
     expect(workflow.match(/bash \.github\/scripts\/verify-release-tag\.sh/g)).toHaveLength(1);
     expect(publication).toContain('bash "${tag_verify_script}" "${VERSION}" "${COMMIT}" origin "${EXPECTED_TAG_OBJECT}"');
     expect(publication.indexOf('bash "${tag_verify_script}"')).toBeLessThan(
@@ -158,16 +165,40 @@ describe("release workflow checksum assets", () => {
       commit: string;
       repository: string;
       tag: string;
+      tag_object: string;
     };
     const workflows = [readFileSync(ciWorkflowPath, "utf8"), readReleaseWorkflow()];
 
-    expect(contract.tag).toBe("v0.1.0-alpha.19");
-    expect(contract.commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(contract.tag).toBe("v0.1.0-alpha.21");
+    expect(contract.tag_object).toBe("26ac54b682c7d0e3a65f8a35662c6d7f11724001");
+    expect(contract.commit).toBe("12df9c561a921bed7fc5f63a2ea166e7227d773f");
     for (const workflow of workflows) {
       expect(workflow).toContain(`repository: ${contract.repository}`);
       expect(workflow).toContain(`ref: ${contract.commit}`);
       expect(workflow).toContain("fetch-depth: 0");
+      expect(workflow).toContain("Verify pinned Core annotated tag and peeled commit");
+      expect(workflow).toContain("python .github/scripts/verify-core-contract.py tachyon-core");
       expect(workflow).toContain("npm run test:core-contract");
+      for (const runner of ["ubuntu-22.04", "macos-15", "windows-latest"]) {
+        expect(workflow).toContain(`os: ${runner}`);
+      }
     }
+  });
+
+  it("keeps live contracts out of ordinary npm test collection", () => {
+    const packageJson = JSON.parse(readFileSync(packagePath, "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    const normalConfig = readFileSync(vitestConfigPath, "utf8");
+    const contractConfig = readFileSync(contractVitestConfigPath, "utf8");
+
+    expect(normalConfig).toContain('exclude: ["src/**/*.live.test.ts"]');
+    expect(contractConfig).toContain(
+      'include: ["src/domain/__tests__/coreConfigContract.live.test.ts"]',
+    );
+    expect(packageJson.scripts.test).toBe("vitest run");
+    expect(packageJson.scripts["test:core-contract"]).toContain(
+      "--config vitest.contract.config.ts",
+    );
   });
 });
