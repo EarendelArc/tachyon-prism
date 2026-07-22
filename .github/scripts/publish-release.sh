@@ -2,8 +2,9 @@
 
 set -euo pipefail
 
-release_notes=${1:-release/RELEASE_NOTES.md}
-release_dir=${2:-release}
+release_notes_en=${1:-release/RELEASE_NOTES.md}
+release_notes_zh=${2:-release/RELEASE_NOTES.zh-CN.md}
+release_dir=${3:-release}
 gh_cli=${GH_CLI:-gh}
 tag_verify_script=${TAG_VERIFY_SCRIPT:-.github/scripts/verify-release-tag.sh}
 
@@ -17,15 +18,31 @@ tag_verify_script=${TAG_VERIFY_SCRIPT:-.github/scripts/verify-release-tag.sh}
   echo "PRERELEASE must be true or false" >&2
   exit 1
 }
-[[ -s "${release_notes}" ]] || { echo "release notes are missing: ${release_notes}" >&2; exit 1; }
+[[ -s "${release_notes_en}" ]] || { echo "English release notes are missing: ${release_notes_en}" >&2; exit 1; }
+[[ -s "${release_notes_zh}" ]] || { echo "Chinese release notes are missing: ${release_notes_zh}" >&2; exit 1; }
 [[ -d "${release_dir}" ]] || { echo "release asset directory is missing: ${release_dir}" >&2; exit 1; }
 
+python .github/scripts/verify-published-release.py \
+  --release-dir "${release_dir}" \
+  --tag "${VERSION}" \
+  --commit "${COMMIT}"
+
+release_body="$(<"${release_notes_en}")
+
+---
+
+$(<"${release_notes_zh}")"
+
 release_id=""
+readback_file=""
 
 cleanup_failed_draft() {
   local status=$1
   local release_state current_id current_draft current_tag
   trap - EXIT
+  if [[ -n "${readback_file}" ]]; then
+    rm -f "${readback_file}"
+  fi
 
   if [[ ${status} -eq 0 || -z "${release_id}" ]]; then
     exit "${status}"
@@ -69,7 +86,7 @@ release_id=$("${gh_cli}" api --method POST \
   -f tag_name="${VERSION}" \
   -f target_commitish="${COMMIT}" \
   -f name="Tachyon Prism ${VERSION}" \
-  -f body="$(<"${release_notes}")" \
+  -f body="${release_body}" \
   -F draft=true \
   -F prerelease="${PRERELEASE}" \
   --jq '.id')
@@ -91,4 +108,23 @@ fi
   -F prerelease="${PRERELEASE}" \
   -f make_latest="${make_latest}" >/dev/null
 
+readback_file=$(mktemp)
+"${gh_cli}" api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "${readback_file}"
+if latest_tag=$("${gh_cli}" api \
+  "repos/${GITHUB_REPOSITORY}/releases/latest" \
+  --jq '.tag_name' 2>/dev/null); then
+  :
+else
+  latest_tag="__NONE__"
+fi
+python .github/scripts/verify-published-release.py \
+  --release-dir "${release_dir}" \
+  --tag "${VERSION}" \
+  --commit "${COMMIT}" \
+  --release-json "${readback_file}" \
+  --prerelease "${PRERELEASE}" \
+  --latest-tag "${latest_tag}"
+
 release_id=""
+rm -f "${readback_file}"
+readback_file=""

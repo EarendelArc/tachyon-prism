@@ -133,6 +133,9 @@ def validate_workflows() -> None:
     release_path = ROOT / ".github" / "workflows" / "release.yml"
     ci_path = ROOT / ".github" / "workflows" / "ci.yml"
     publication_path = ROOT / ".github" / "scripts" / "publish-release.sh"
+    tag_verification_path = ROOT / ".github" / "scripts" / "verify-release-tag.sh"
+    published_verification_path = ROOT / ".github" / "scripts" / "verify-published-release.py"
+    core_contract_test_path = ROOT / "src" / "domain" / "__tests__" / "coreConfigContract.live.test.ts"
     release_matrix = extract_matrix(release_path, "build")
     ci_matrix = extract_matrix(ci_path, "rust")
     if release_matrix != EXPECTED_MATRIX:
@@ -143,11 +146,30 @@ def validate_workflows() -> None:
     release = release_path.read_text(encoding="utf-8")
     ci = ci_path.read_text(encoding="utf-8")
     publication = publication_path.read_text(encoding="utf-8")
+    tag_verification = tag_verification_path.read_text(encoding="utf-8")
+    published_verification = published_verification_path.read_text(encoding="utf-8")
+    core_contract_test = core_contract_test_path.read_text(encoding="utf-8")
     core_contract = json.loads((ROOT / "core-contract.json").read_text(encoding="utf-8"))
     core_repository = str(core_contract["repository"])
     core_commit = str(core_contract["commit"])
     core_tag = str(core_contract["tag"])
     core_tag_object = str(core_contract["tag_object"])
+    if core_repository != "EarendelArc/tachyon-core":
+        fail(f"core-contract.json repository must be EarendelArc/tachyon-core, found {core_repository}")
+    obsolete_core_owner = "tachyon-space" + "/tachyon-core"
+    scan_roots = [ROOT / ".github", ROOT / "docs", ROOT / "scripts", ROOT / "src"]
+    stale_owner_paths = []
+    for scan_root in scan_roots:
+        for path in scan_root.rglob("*"):
+            if not path.is_file() or "node_modules" in path.parts or "__pycache__" in path.parts:
+                continue
+            try:
+                if obsolete_core_owner in path.read_text(encoding="utf-8"):
+                    stale_owner_paths.append(str(path.relative_to(ROOT)))
+            except UnicodeDecodeError:
+                continue
+    if stale_owner_paths:
+        fail("obsolete Core repository owner remains in: " + ", ".join(sorted(stale_owner_paths)))
     if not re.fullmatch(r"[0-9a-f]{40}", core_commit):
         fail("core-contract.json commit must be a full lowercase SHA-1")
     if not re.fullmatch(r"[0-9a-f]{40}", core_tag_object):
@@ -165,9 +187,14 @@ def validate_workflows() -> None:
         "EXPECTED_TAG_OBJECT: ${{ needs.prepare.outputs.tag_object }}",
         "ref: ${{ needs.prepare.outputs.commit }}",
         "group: prism-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}",
-        "bash .github/scripts/publish-release.sh release/RELEASE_NOTES.md release",
+        "release/RELEASE_NOTES.zh-CN.md",
+        "bash .github/scripts/publish-release.sh",
+        "release payload must contain exactly 7 installers",
+        "verify-published-release.py",
         'python .github/scripts/normalize-release-timestamps.py release "${SOURCE_DATE_EPOCH}"',
         "BUILD_METADATA.json",
+        '"schemaVersion": 1',
+        '"artifactDigests": artifact_digests',
         '"installerByteReproducibilityGuaranteed": False',
         '"stagedAssetTimestampsNormalized": True',
         "SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}",
@@ -180,12 +207,16 @@ def validate_workflows() -> None:
     publication_fragments = [
         "trap 'cleanup_failed_draft $?' EXIT",
         'bash "${tag_verify_script}" "${VERSION}" "${COMMIT}" origin "${EXPECTED_TAG_OBJECT}"',
+        '[[ -s "${release_notes_zh}" ]]',
         'release_id=$("${gh_cli}" api --method POST',
         '-F draft=true',
         '"${gh_cli}" release upload "${VERSION}" "${release_dir}"/*',
         '"${gh_cli}" api --method PATCH',
         '"${gh_cli}" api --method DELETE',
         '"${current_draft}" != "true"',
+        '"repos/${GITHUB_REPOSITORY}/releases/latest"',
+        '--release-json "${readback_file}"',
+        '--latest-tag "${latest_tag}"',
         "release ${VERSION} already exists",
     ]
     missing_publication = [fragment for fragment in publication_fragments if fragment not in publication]
@@ -204,6 +235,34 @@ def validate_workflows() -> None:
         fail("release jobs are not all pinned to the verified Prism commit")
     if publication.count('release upload "${VERSION}" "${release_dir}"/*') != 1:
         fail("release assets must be uploaded exactly once")
+    if '[[ "${tag_type}" == "tag" ]]' not in tag_verification:
+        fail("release tag verification must require an annotated tag object")
+    if '[[ "${tag_type}" == "commit" ]]' in tag_verification:
+        fail("release tag verification still accepts lightweight tags")
+    published_guards = [
+        '"immutable": True',
+        'len(names) != 11',
+        'len(installers) != 7',
+        'len(manifest) != 10',
+        'latest_tag == tag',
+        'remote[name] != expected_digest',
+    ]
+    missing_published = [guard for guard in published_guards if guard not in published_verification]
+    if missing_published:
+        fail("published release verification is missing guards: " + ", ".join(missing_published))
+    windows_contract_tests = [
+        "TestParseGameRoutePrefixesNormalizesHostBits",
+        "TestPlanSelectiveRoutesNormalizesAndDeduplicates",
+        "TestWindowsRouteRowsRequireExactIdentityAndAttributes",
+        "TestInstallRouteTransactionRollsBackInReverseOrder",
+        "TestWindowsRouteJournalRecordFailureRollsBackCreatedRouteUnderLock",
+    ]
+    missing_windows_tests = [name for name in windows_contract_tests if name not in core_contract_test]
+    if missing_windows_tests:
+        fail("Windows Core contract is missing tests: " + ", ".join(missing_windows_tests))
+    for fragment in ('event.Action === "run"', 'event.Action === "pass"', '["fail", "skip"]'):
+        if fragment not in core_contract_test:
+            fail(f"Windows Core JSON event proof is missing {fragment!r}")
 
     core_fragments = [
         f"repository: {core_repository}",

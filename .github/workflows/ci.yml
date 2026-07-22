@@ -62,7 +62,7 @@ jobs:
       - name: Checkout pinned Tachyon Core contract
         uses: actions/checkout@v6.0.3
         with:
-          repository: tachyon-space/tachyon-core
+          repository: EarendelArc/tachyon-core
           ref: 12df9c561a921bed7fc5f63a2ea166e7227d773f
           path: tachyon-core
           fetch-depth: 0

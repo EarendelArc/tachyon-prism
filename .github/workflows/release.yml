@@ -151,7 +151,7 @@ jobs:
       - name: Checkout pinned Tachyon Core contract
         uses: actions/checkout@v6.0.3
         with:
-          repository: tachyon-space/tachyon-core
+          repository: EarendelArc/tachyon-core
           ref: 12df9c561a921bed7fc5f63a2ea166e7227d773f
           path: tachyon-core
           fetch-depth: 0
@@ -458,6 +458,7 @@ jobs:
           SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
         run: |
           set -euo pipefail
+          export LC_ALL=C
           expected=(windows-x64 windows-arm64 macos-x64 macos-arm64 linux-x64 linux-arm64)
           mkdir -p release
           for target in "${expected[@]}"; do
@@ -480,44 +481,17 @@ jobs:
             exit 1
           fi
 
+          [[ $(find release -maxdepth 1 -type f | wc -l) -eq 7 ]] || {
+            echo "release payload must contain exactly 7 installers" >&2
+            find release -maxdepth 1 -type f -printf '%f\n' >&2
+            exit 1
+          }
+
           unsigned_desktop=false
           for target in windows-x64 windows-arm64 macos-x64 macos-arm64; do
             status="$(<"artifacts/tachyon-prism-${target}/release-status/${target}.txt")"
             [[ "${status}" == "unsigned-no-credentials" ]] && unsigned_desktop=true
           done
-
-          python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          root = Path.cwd()
-          core = json.loads((root / "core-contract.json").read_text(encoding="utf-8"))
-          tools = {}
-          for line in (root / ".tool-versions").read_text(encoding="utf-8").splitlines():
-              name, version = line.split(maxsplit=1)
-              tools[name] = version
-          metadata = {
-              "coreContract": core,
-              "prism": {
-                  "commit": os.environ["PRISM_COMMIT"],
-                  "sourceDateEpoch": int(os.environ["SOURCE_DATE_EPOCH"]),
-                  "tag": os.environ["VERSION"],
-                  "tagObject": os.environ["PRISM_TAG_OBJECT"],
-                  "tagVerification": os.environ["TAG_VERIFICATION"],
-              },
-              "reproducibility": {
-                  "installerByteReproducibilityGuaranteed": False,
-                  "stagedAssetTimestampsNormalized": True,
-              },
-              "tools": tools,
-          }
-          (root / "release" / "BUILD_METADATA.json").write_text(
-              json.dumps(metadata, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-              newline="\n",
-          )
-          PY
 
           {
             echo "# Tachyon Prism ${VERSION}"
@@ -551,14 +525,109 @@ jobs:
             fi
             echo "Linux packages are not GPG-signed; verify every download with SHA256SUMS.txt."
             echo
-            echo "## Artifacts"
-            for file in release/*; do
+            echo "## Installers"
+            for file in release/tachyon-prism-*; do
               echo "- $(basename "${file}")"
             done
             echo
             echo "Verify downloads with SHA256SUMS.txt."
           } > release/RELEASE_NOTES.md
+
+          {
+            echo "# Tachyon Prism ${VERSION}"
+            echo
+            echo "通道：${CHANNEL}"
+            echo "Prism 提交：${PRISM_COMMIT}"
+            echo "兼容 Tachyon Core：$(python -c 'import json; c=json.load(open("core-contract.json")); print(c["tag"] + " (" + c["commit"] + ")")')"
+            echo
+            if [[ "${VERSION}" == *-alpha* ]]; then
+              echo "这是 Tachyon Prism 桌面端 Alpha 版本。"
+              echo "当前版本尚未达到稳定或完整状态。"
+              echo
+              echo "Alpha 限制："
+              echo "- 默认不启用系统代理一键接管。"
+              echo "- 默认不启用 Tachyon TUN 一键接管。"
+              echo "- 真实 VPS、真实客户端和真实游戏 UDP 加速链路仍需现场测试。"
+            elif [[ "${CHANNEL}" == "prerelease" ]]; then
+              echo "这是预发布版本，功能可能不完整或不稳定。"
+            else
+              echo "这是稳定通道版本。"
+            fi
+            echo
+            echo "## 签名状态"
+            for target in "${expected[@]}"; do
+              status="$(<"artifacts/tachyon-prism-${target}/release-status/${target}.txt")"
+              echo "- ${target}: ${status}"
+            done
+            echo
+            if [[ "${unsigned_desktop}" == "true" ]]; then
+              echo "桌面安装包未签名且未经公证；Windows SmartScreen 或 macOS Gatekeeper 可能发出警告。"
+            fi
+            echo "Linux 软件包当前没有 GPG 签名；请使用 SHA256SUMS.txt 校验每个下载文件。"
+            echo
+            echo "## 安装包"
+            for file in release/tachyon-prism-*; do
+              echo "- $(basename "${file}")"
+            done
+            echo
+            echo "请使用 SHA256SUMS.txt 校验下载文件。"
+          } > release/RELEASE_NOTES.zh-CN.md
+
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path.cwd()
+          release = root / "release"
+          core = json.loads((root / "core-contract.json").read_text(encoding="utf-8"))
+          tools = {}
+          for line in (root / ".tool-versions").read_text(encoding="utf-8").splitlines():
+              name, version = line.split(maxsplit=1)
+              tools[name] = version
+
+          def sha256(path):
+              digest = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          artifact_digests = {
+              path.name: "sha256:" + sha256(path)
+              for path in sorted(release.glob("tachyon-prism-*"))
+              if path.is_file()
+          }
+          metadata = {
+              "artifactDigests": artifact_digests,
+              "coreContract": core,
+              "prism": {
+                  "commit": os.environ["PRISM_COMMIT"],
+                  "sourceDateEpoch": int(os.environ["SOURCE_DATE_EPOCH"]),
+                  "tag": os.environ["VERSION"],
+                  "tagObject": os.environ["PRISM_TAG_OBJECT"],
+                  "tagVerification": os.environ["TAG_VERIFICATION"],
+              },
+              "reproducibility": {
+                  "installerByteReproducibilityGuaranteed": False,
+                  "stagedAssetTimestampsNormalized": True,
+              },
+              "schemaVersion": 1,
+              "tools": tools,
+          }
+          (release / "BUILD_METADATA.json").write_text(
+              json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+              newline="\n",
+          )
+          PY
+
           (cd release && sha256sum * > SHA256SUMS.txt && sha256sum --check SHA256SUMS.txt)
+          python .github/scripts/verify-published-release.py \
+            --release-dir release \
+            --tag "${VERSION}" \
+            --commit "${PRISM_COMMIT}"
           python .github/scripts/normalize-release-timestamps.py release "${SOURCE_DATE_EPOCH}"
 
       - name: Publish release
@@ -569,4 +638,7 @@ jobs:
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
           COMMIT: ${{ needs.prepare.outputs.commit }}
           EXPECTED_TAG_OBJECT: ${{ needs.prepare.outputs.tag_object }}
-        run: bash .github/scripts/publish-release.sh release/RELEASE_NOTES.md release
+        run: bash .github/scripts/publish-release.sh \
+          release/RELEASE_NOTES.md \
+          release/RELEASE_NOTES.zh-CN.md \
+          release

@@ -25,9 +25,10 @@ const contract = JSON.parse(
   readFileSync(resolve(process.cwd(), "core-contract.json"), "utf8"),
 ) as CoreContract;
 const windowsSimulationTests = [
-  "TestWindowsRouteIdentitySurvivesInterfaceRename",
-  "TestWindowsRouteJournalReconcilesOnlyExactStableIdentity",
-  "TestWindowsRouteJournalRejectsDestinationOwnedByDifferentLUID",
+  "TestParseGameRoutePrefixesNormalizesHostBits",
+  "TestPlanSelectiveRoutesNormalizesAndDeduplicates",
+  "TestWindowsRouteRowsRequireExactIdentityAndAttributes",
+  "TestInstallRouteTransactionRollsBackInReverseOrder",
   "TestWindowsRouteJournalRecordFailureRollsBackCreatedRouteUnderLock",
 ] as const;
 
@@ -75,7 +76,7 @@ describe("pinned Tachyon Core release contract", () => {
   let actualPeeledCommit = "";
 
   beforeAll(() => {
-    expect(contract.repository).toBe("tachyon-space/tachyon-core");
+    expect(contract.repository).toBe("EarendelArc/tachyon-core");
     expect(contract.tag).toBe("v0.1.0-alpha.21");
     expect(contract.commit).toMatch(/^[0-9a-f]{40}$/);
     expect(contract.tag_object).toMatch(/^[0-9a-f]{40}$/);
@@ -199,9 +200,10 @@ describe("pinned Tachyon Core release contract", () => {
           "test",
           "-json",
           "-count=1",
-          "./internal/tun",
           "-run",
           pattern,
+          "./internal/app",
+          "./internal/tun",
         ],
         { cwd: coreSourceDir, encoding: "utf8", timeout: 120_000 },
       );

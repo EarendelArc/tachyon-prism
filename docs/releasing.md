@@ -17,6 +17,7 @@ the tag itself, not the branch from which the workflow was started.
 Stable releases are marked as GitHub's latest release. Prereleases are marked
 as prereleases and explicitly excluded from latest.
 
+Release tags must be annotated Git tag objects; lightweight tags fail validation.
 The prepare job fetches the remote tag into an isolated ref, verifies the tag
 object and peeled commit, and records both full object IDs. Every downstream
 test, build, and publish job checks out that same verified commit SHA. Runs for
@@ -32,7 +33,7 @@ check is defense in depth, not a replacement for an immutable-tag policy.
 
 ## Core compatibility contract
 
-`core-contract.json` pins the paired Tachyon Core repository, annotated release
+`core-contract.json` pins the paired `EarendelArc/tachyon-core` repository, annotated release
 tag, full tag-object ID, and peeled commit. The current pin is
 `v0.1.0-alpha.21`, tag object
 `26ac54b682c7d0e3a65f8a35662c6d7f11724001`, peeled commit
@@ -48,6 +49,15 @@ route config and require failure before TUN readiness. Windows executes only
 the pinned source's named route simulations and parses `go test -json` to prove
 every test actually ran. It never copies Core validation rules into Prism and
 never opts into real-route or TUN integration tests.
+
+The Windows proof requires exactly one `run` and one `pass`, with no `fail` or
+`skip`, for each of these tests:
+
+- `TestParseGameRoutePrefixesNormalizesHostBits`
+- `TestPlanSelectiveRoutesNormalizesAndDeduplicates`
+- `TestWindowsRouteRowsRequireExactIdentityAndAttributes`
+- `TestInstallRouteTransactionRollsBackInReverseOrder`
+- `TestWindowsRouteJournalRecordFailureRollsBackCreatedRouteUnderLock`
 
 ## Build matrix
 
@@ -69,11 +79,14 @@ to be confirmed before the first release.
 Each build uploads an Actions artifact. The publish job refuses to create the
 GitHub Release unless all six artifact directories contain a payload and a
 signing-status record. Release asset names include the platform label, and
-`SHA256SUMS.txt` covers every downloadable package, release notes, and
-`BUILD_METADATA.json`. The metadata records the verified Prism tag object and
-commit, `SOURCE_DATE_EPOCH`, pinned Core contract, and tool versions with stable
-key ordering. Before upload, Prism normalizes the staged files and directories
-to `SOURCE_DATE_EPOCH` without rewriting package contents.
+the final release must contain exactly 11 assets: seven installers, English and
+Chinese release notes, `BUILD_METADATA.json`, and `SHA256SUMS.txt`.
+`SHA256SUMS.txt` contains exactly ten entries and covers every other asset.
+The schema-versioned metadata records the verified full Prism tag object and
+commit, `SOURCE_DATE_EPOCH`, the exact Core tag object and peeled commit, tool
+versions, and a deterministic SHA-256 map for all seven installers. Before
+upload, Prism normalizes staged file and directory timestamps to
+`SOURCE_DATE_EPOCH` without rewriting package contents.
 
 This is best-effort timestamp normalization, not a claim that installers are
 byte-for-byte reproducible. Authenticode timestamps, Apple signing and
@@ -86,6 +99,15 @@ edits or replaces an existing official release. An EXIT trap handles upload or
 publish failures by querying only the numeric release ID returned by this
 transaction. It deletes that ID only when the API still reports the same tag and
 `draft=true`; a release that has become official is never deleted by cleanup.
+
+The GitHub Release body is the complete English note followed by the complete
+Chinese note. After publication, the transaction reads the release back through
+the API and fails closed unless the tag, full target commit, draft/prerelease
+flags, immutable state, latest-release semantics, bilingual body, exact asset
+set, and every remote asset digest match the staged contract. Repositories must
+enable GitHub immutable releases and an active `refs/tags/v*` ruleset that
+prevents tag update, deletion, and non-fast-forward changes before dispatching
+the release workflow.
 
 ## Signing policy
 

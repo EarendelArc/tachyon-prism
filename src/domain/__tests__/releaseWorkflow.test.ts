@@ -21,6 +21,9 @@ const contractVitestConfigPath = fileURLToPath(
 const publicationScriptPath = fileURLToPath(
   new URL("../../../.github/scripts/publish-release.sh", import.meta.url),
 );
+const tagVerificationScriptPath = fileURLToPath(
+  new URL("../../../.github/scripts/verify-release-tag.sh", import.meta.url),
+);
 
 const readReleaseWorkflow = () => readFileSync(releaseWorkflowPath, "utf8");
 const readPublicationScript = () => readFileSync(publicationScriptPath, "utf8");
@@ -90,6 +93,8 @@ describe("release workflow checksum assets", () => {
     expect(notesIndex).toBeGreaterThan(-1);
     expect(checksumsIndex).toBeGreaterThan(-1);
     expect(notesIndex).toBeLessThan(checksumsIndex);
+    expect(workflow).toContain("} > release/RELEASE_NOTES.zh-CN.md");
+    expect(workflow.indexOf("} > release/RELEASE_NOTES.zh-CN.md")).toBeLessThan(checksumsIndex);
     const publication = readPublicationScript();
     expect(publication).toContain('"${gh_cli}" release upload "${VERSION}" "${release_dir}"/*');
     expect(publication).not.toContain("--clobber");
@@ -99,7 +104,9 @@ describe("release workflow checksum assets", () => {
     const publication = readPublicationScript();
 
     expect(publication).toContain('"${gh_cli}" api --method POST');
-    expect(publication).toContain('-f body="$(<"${release_notes}")"');
+    expect(publication).toContain('$(<"${release_notes_en}")');
+    expect(publication).toContain('$(<"${release_notes_zh}")');
+    expect(publication).toContain('-f body="${release_body}"');
     expect(publication).toContain("-F draft=true");
     expect(publication).not.toContain("gh release edit");
     expect(publication).not.toContain("--clobber");
@@ -130,6 +137,9 @@ describe("release workflow checksum assets", () => {
     expect(publication.indexOf('bash "${tag_verify_script}"')).toBeLessThan(
       publication.indexOf('release_id=$("${gh_cli}" api --method POST'),
     );
+    const tagVerification = readFileSync(tagVerificationScriptPath, "utf8");
+    expect(tagVerification).toContain('[[ "${tag_type}" == "tag" ]]');
+    expect(tagVerification).not.toContain('[[ "${tag_type}" == "commit" ]]');
   });
 
   it("uses same-tag concurrency and a fail-on-existing draft publication transaction", () => {
@@ -152,12 +162,27 @@ describe("release workflow checksum assets", () => {
     expect(workflow).toContain("SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}");
     expect(workflow).toContain("BUILD_METADATA.json");
     expect(workflow).toContain('"coreContract": core');
+    expect(workflow).toContain('"schemaVersion": 1');
+    expect(workflow).toContain('"artifactDigests": artifact_digests');
     expect(workflow).toContain('"sourceDateEpoch": int(os.environ["SOURCE_DATE_EPOCH"])');
     expect(workflow).toContain('"installerByteReproducibilityGuaranteed": False');
     expect(workflow).toContain('"stagedAssetTimestampsNormalized": True');
     expect(workflow).toContain(
       'python .github/scripts/normalize-release-timestamps.py release "${SOURCE_DATE_EPOCH}"',
     );
+  });
+
+  it("enforces the exact bilingual immutable release readback contract", () => {
+    const workflow = readReleaseWorkflow();
+    const publication = readPublicationScript();
+
+    expect(workflow).toContain("release payload must contain exactly 7 installers");
+    expect(workflow).toContain("RELEASE_NOTES.zh-CN.md");
+    expect(workflow).toContain("verify-published-release.py");
+    expect(publication).toContain('"repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "${readback_file}"');
+    expect(publication).toContain('"repos/${GITHUB_REPOSITORY}/releases/latest"');
+    expect(publication).toContain("verify-published-release.py");
+    expect(publication).toContain('--latest-tag "${latest_tag}"');
   });
 
   it("checks out the exact Core release pin in CI and Release", () => {
@@ -170,6 +195,7 @@ describe("release workflow checksum assets", () => {
     const workflows = [readFileSync(ciWorkflowPath, "utf8"), readReleaseWorkflow()];
 
     expect(contract.tag).toBe("v0.1.0-alpha.21");
+    expect(contract.repository).toBe("EarendelArc/tachyon-core");
     expect(contract.tag_object).toBe("26ac54b682c7d0e3a65f8a35662c6d7f11724001");
     expect(contract.commit).toBe("12df9c561a921bed7fc5f63a2ea166e7227d773f");
     for (const workflow of workflows) {

@@ -36,6 +36,7 @@ git fetch --quiet --no-tags "${remote}" "refs/tags/${release_tag}:${FETCH_REF}" 
 tag_object=$(git rev-parse --verify "${FETCH_REF}") || die "fetched tag object is unavailable"
 tag_type=$(git cat-file -t "${tag_object}") || die "cannot inspect fetched tag object"
 tag_commit=$(git rev-parse --verify "${FETCH_REF}^{commit}") || die "tag does not peel to a commit"
+[[ "${tag_type}" == "tag" ]] || die "release tag ${release_tag} must be an annotated tag object"
 
 if [[ -n "${expected_tag_object}" ]]; then
   if [[ ! "${expected_tag_object}" =~ ^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$ ]]; then
@@ -55,9 +56,7 @@ if verify_output=$(git verify-tag "${FETCH_REF}" 2>&1); then
   [[ -z "${verify_output}" ]] || printf '%s\n' "${verify_output}"
   echo "release tag ${release_tag}: cryptographic signature verified with git verify-tag"
 else
-  if [[ "${tag_type}" == "commit" ]]; then
-    verification="ref-commit"
-  elif [[ "${tag_type}" == "tag" && "${verify_output}" == *"no signature found"* ]]; then
+  if [[ "${verify_output}" == *"no signature found"* ]]; then
     verification="ref-commit"
   else
     printf '%s\n' "${verify_output}" >&2
