@@ -8,14 +8,14 @@ const appSource = readFileSync(
 );
 
 describe("settings controls", () => {
-  it("keeps only the persisted language control in General settings", () => {
+  it("keeps General settings limited to real persisted controls", () => {
     const general = /\{section === "general"[\s\S]*?\) : null\}/.exec(appSource)?.[0] ?? "";
 
     expect(general).toContain('onClick={() => changeLanguage("zh-CN")}');
     expect(general).toContain('onClick={() => changeLanguage("en")}');
-    expect(general).not.toContain("ui.theme");
-    expect(general).not.toContain("ui.color");
-    expect(general).not.toContain("ui.pageVisibility");
+    expect(general).toContain("appearance.theme");
+    expect(general).toContain("appearance.density");
+    expect(general).toContain("appearance.motion");
     expect(general).not.toContain("ui.adminRestart");
   });
 

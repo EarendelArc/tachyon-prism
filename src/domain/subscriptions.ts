@@ -1,5 +1,43 @@
 import { invokeDesktop, isTauriRuntime } from "./tauri";
 
+export type SubscriptionErrorCode =
+  | "fetch-failed"
+  | "name-required"
+  | "no-supported-nodes"
+  | "no-remote-subscriptions"
+  | "node-missing"
+  | "outbound-missing"
+  | "subscription-missing"
+  | "update-failed"
+  | "unsupported-outbound"
+  | "url-required";
+
+export class SubscriptionError extends Error {
+  constructor(
+    public readonly code: SubscriptionErrorCode,
+    public readonly detail = "",
+    message = subscriptionErrorDefaultMessage(code),
+  ) {
+    super(message);
+    this.name = "SubscriptionError";
+  }
+}
+
+function subscriptionErrorDefaultMessage(code: SubscriptionErrorCode): string {
+  return {
+    "fetch-failed": "Subscription fetch failed",
+    "name-required": "Subscription name is required",
+    "no-supported-nodes": "No supported nodes found",
+    "no-remote-subscriptions": "No remote subscriptions to update",
+    "node-missing": "Selected node no longer exists",
+    "outbound-missing": "Node does not contain an Xray outbound draft",
+    "subscription-missing": "Subscription no longer exists",
+    "update-failed": "Subscription update failed",
+    "unsupported-outbound": "unsupported-by-xray",
+    "url-required": "Subscription URL is required",
+  }[code];
+}
+
 export type XrayOutboundProtocol =
   | "blackhole"
   | "dns"
@@ -133,7 +171,7 @@ export const emptySubscriptionSnapshot: SubscriptionSnapshot = {
 export async function fetchSubscriptionNodes(sourceUrl: string): Promise<ProxyNode[]> {
   const url = sourceUrl.trim();
   if (!url) {
-    throw new Error("Subscription URL is required");
+    throw new SubscriptionError("url-required");
   }
 
   return parseSubscription(await fetchSubscriptionText(url));
@@ -142,14 +180,17 @@ export async function fetchSubscriptionNodes(sourceUrl: string): Promise<ProxyNo
 export async function fetchSubscriptionText(sourceUrl: string): Promise<string> {
   const url = sourceUrl.trim();
   if (!url) {
-    throw new Error("Subscription URL is required");
+    throw new SubscriptionError("url-required");
   }
 
   try {
     return await invokeDesktop<string>("fetch_subscription_text", { sourceUrl: url });
   } catch (error) {
     if (isTauriRuntime()) {
-      throw error;
+      throw new SubscriptionError(
+        "fetch-failed",
+        error instanceof Error ? error.message : String(error),
+      );
     }
     const response = await fetch(url, {
       headers: {
@@ -157,7 +198,7 @@ export async function fetchSubscriptionText(sourceUrl: string): Promise<string> 
       },
     });
     if (!response.ok) {
-      throw new Error(`Subscription fetch failed: ${response.status}`);
+      throw new SubscriptionError("fetch-failed", String(response.status));
     }
     return response.text();
   }
@@ -214,7 +255,7 @@ export function createSubscriptionSnapshot(
   name = "",
 ): SubscriptionSnapshot {
   if (nodes.length === 0) {
-    throw new Error("No supported nodes found");
+    throw new SubscriptionError("no-supported-nodes");
   }
 
   const normalizedSource = sourceUrl.trim();
@@ -261,7 +302,7 @@ export function selectSubscription(
 ): SubscriptionSnapshot {
   const subscription = snapshot.subscriptions.find((item) => item.id === subscriptionId);
   if (!subscription) {
-    throw new Error("Subscription no longer exists");
+    throw new SubscriptionError("subscription-missing");
   }
   const selectedNodeId = subscription.nodes.some((node) => node.id === snapshot.selectedNodeId)
     ? snapshot.selectedNodeId
@@ -292,7 +333,7 @@ export function selectSubscriptionNode(
         item.nodes.some((node) => node.id === nodeId),
       );
   if (!subscription) {
-    throw new Error("Selected node no longer exists");
+    throw new SubscriptionError("node-missing");
   }
   return snapshotFromProfiles(snapshot.subscriptions, subscription.id, nodeId);
 }
@@ -334,7 +375,9 @@ export function xrayOutboundCompatibilityForNode(
 export function assertXrayOutboundSupported(node: ProxyNode): void {
   const compatibility = xrayOutboundCompatibilityForNode(node);
   if (compatibility.status !== "supported") {
-    throw new Error(
+    throw new SubscriptionError(
+      "unsupported-outbound",
+      node.name,
       `${node.name} is ${compatibility.status}: ${compatibility.reason ?? "cannot be used as an active Xray outbound"}`,
     );
   }
@@ -349,7 +392,7 @@ export function buildXrayOutboundDraft(node: ProxyNode): XrayOutboundObject {
   if (node.outbound) {
     return cloneRecord(node.outbound) as XrayOutboundObject;
   }
-  throw new Error("Node does not contain an Xray outbound draft");
+  throw new SubscriptionError("outbound-missing", node.name);
 }
 
 export function xrayConfigTemplateForNode(

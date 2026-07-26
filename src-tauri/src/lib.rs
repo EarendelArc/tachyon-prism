@@ -401,8 +401,11 @@ mod native_titlebar {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumChildWindows, GetClientRect, GetCursorPos, GetParent, SendMessageW, HTCAPTION,
-        WM_LBUTTONDOWN, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+        EnumChildWindows, EnumWindows, GetAncestor, GetClientRect, GetCursorPos, GetParent,
+        GetWindowLongPtrW, GetWindowThreadProcessId, IsWindowVisible, SendMessageW,
+        SetWindowLongPtrW, SetWindowPos, GA_ROOT, GWL_STYLE, HTCAPTION, SC_MOVE, SWP_FRAMECHANGED,
+        SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, WM_LBUTTONDOWN, WM_NCHITTEST,
+        WM_SYSCOMMAND, WS_CAPTION, WS_THICKFRAME,
     };
 
     const TITLEBAR_HEIGHT_PX: i32 = 42;
@@ -410,15 +413,56 @@ mod native_titlebar {
     const TITLEBAR_SUBCLASS_ID: usize = 1;
 
     pub fn install(window: &tauri::WebviewWindow) -> Result<(), String> {
-        let hwnd = window
-            .hwnd()
-            .map_err(|error| format!("get native window handle: {error}"))?
-            .0 as HWND;
+        let raw_hwnd = match window.hwnd() {
+            Ok(handle) => handle.0 as HWND,
+            Err(_) => find_process_window()?,
+        };
+        let root = unsafe { GetAncestor(raw_hwnd, GA_ROOT) };
+        let hwnd = if root.is_null() { raw_hwnd } else { root };
+        remove_native_frame(hwnd)?;
         install_subclass(hwnd, hwnd)?;
         unsafe {
             EnumChildWindows(hwnd, Some(enum_child_window), hwnd as LPARAM);
         }
         Ok(())
+    }
+
+    fn find_process_window() -> Result<HWND, String> {
+        let mut found: HWND = std::ptr::null_mut();
+        for _ in 0..40 {
+            unsafe {
+                EnumWindows(
+                    Some(find_process_window_proc),
+                    &mut found as *mut HWND as LPARAM,
+                );
+            }
+            if !found.is_null() {
+                return Ok(found);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        Err("get native window handle: no visible process window".to_string())
+    }
+
+    unsafe extern "system" fn find_process_window_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
+        let mut process_id = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut process_id);
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if process_id == std::process::id()
+            && IsWindowVisible(hwnd) != 0
+            && GetClientRect(hwnd, &mut rect) != 0
+            && rect.right - rect.left >= 700
+            && rect.bottom - rect.top >= 480
+        {
+            *(lparam as *mut HWND) = hwnd;
+            return 0;
+        }
+        1
     }
 
     fn install_subclass(hwnd: HWND, parent: HWND) -> Result<(), String> {
@@ -462,11 +506,76 @@ mod native_titlebar {
             };
             if !parent.is_null() {
                 let _ = ReleaseCapture();
-                SendMessageW(parent, WM_NCLBUTTONDOWN, HTCAPTION as WPARAM, lparam);
+                let mut point = POINT { x: 0, y: 0 };
+                if GetCursorPos(&mut point) != 0 {
+                    SendMessageW(
+                        parent,
+                        WM_SYSCOMMAND,
+                        (SC_MOVE | HTCAPTION as u32) as WPARAM,
+                        screen_point_lparam(point),
+                    );
+                }
                 return 0;
             }
         }
         DefSubclassProc(hwnd, umsg, wparam, lparam)
+    }
+
+    fn borderless_style(style: isize) -> isize {
+        style & !((WS_CAPTION | WS_THICKFRAME) as isize)
+    }
+
+    fn screen_point_lparam(point: POINT) -> LPARAM {
+        let x = point.x as u16 as usize;
+        let y = point.y as u16 as usize;
+        (x | (y << 16)) as LPARAM
+    }
+
+    fn remove_native_frame(hwnd: HWND) -> Result<(), String> {
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
+        let borderless = borderless_style(style);
+        unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, borderless) };
+        let updated = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
+        if updated & ((WS_CAPTION | WS_THICKFRAME) as isize) != 0 {
+            return Err("remove native window caption/frame failed".to_string());
+        }
+        let ok = unsafe {
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER,
+            )
+        };
+        if ok == 0 {
+            return Err("refresh borderless window frame failed".to_string());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn borderless_style_removes_caption_and_resize_frame_only() {
+            let unrelated = 0x0008_0000isize;
+            let style = unrelated | WS_CAPTION as isize | WS_THICKFRAME as isize;
+            let result = borderless_style(style);
+            assert_eq!(result & WS_CAPTION as isize, 0);
+            assert_eq!(result & WS_THICKFRAME as isize, 0);
+            assert_eq!(result & unrelated, unrelated);
+        }
+
+        #[test]
+        fn screen_point_lparam_packs_signed_win32_coordinates() {
+            let packed = screen_point_lparam(POINT { x: -20, y: 320 });
+            assert_eq!(packed as usize & 0xffff, (-20i16) as u16 as usize);
+            assert_eq!((packed as usize >> 16) & 0xffff, 320);
+        }
     }
 
     unsafe fn is_draggable_titlebar_point(hwnd: HWND) -> bool {
@@ -8616,7 +8725,7 @@ pub fn run() {
 
             let window =
                 tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?.build()?;
-            native_titlebar::install(&window)?;
+            let _ = window;
             Ok(())
         })
         .manage(RuntimeState::default())
@@ -8690,6 +8799,8 @@ pub fn run() {
                     let _ = window.center();
                     let _ = window.show();
                     let _ = window.set_focus();
+                    native_titlebar::install(&window)
+                        .expect("failed to install native borderless titlebar");
                 }
             }
             if matches!(

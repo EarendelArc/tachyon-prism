@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  loadAppearancePreferences,
+  saveAppearancePreferences,
+  type AppearancePreferences,
+} from "./domain/appearance";
+import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
   CoreClientConfigError,
@@ -103,6 +108,7 @@ import {
   selectSubscriptionNode,
   totalSubscriptionNodes,
   xrayOutboundCompatibilityForNode,
+  SubscriptionError,
 } from "./domain/subscriptions";
 import {
   activeTachyonServer,
@@ -130,6 +136,7 @@ import {
 } from "./domain/trafficMetrics";
 import type {
   ProxyNode,
+  SubscriptionErrorCode,
   SubscriptionParseReport,
   SubscriptionProfile,
   SubscriptionSnapshot,
@@ -149,6 +156,7 @@ import {
   recordPluginRun,
   savePluginState,
   togglePluginEnabled,
+  PluginStateError,
   type PluginStateSnapshot,
 } from "./domain/plugins";
 import { TelemetryClient } from "./domain/telemetry";
@@ -163,6 +171,18 @@ type SubscriptionViewMode = "grid" | "list";
 type ValidationResults = Partial<Record<ManagedBinaryKind, ConfigValidationResult>>;
 type ProbeState = "error" | "idle" | "ok" | "running";
 type PluginFilter = "all" | "enabled" | "installed";
+
+interface SubscriptionFieldErrors {
+  general: SubscriptionErrorCode | null;
+  name: SubscriptionErrorCode | null;
+  url: SubscriptionErrorCode | null;
+}
+
+interface SubscriptionBatchFeedback {
+  code: SubscriptionErrorCode;
+  failed: number;
+  total: number;
+}
 
 interface TimedTrafficSample extends TrafficSample {
   at: number;
@@ -473,6 +493,10 @@ const zh = {
   pluginNoMatches: "当前筛选下没有插件",
   pluginNoResult: "暂无结果",
   pluginNotInstalled: "未安装",
+  pluginNotRunnable: "请先安装并启用插件",
+  pluginCatalog: "插件目录",
+  pluginCatalogHint: "选择需要安装的内置插件；第三方来源将在签名与权限模型完成后开放。",
+  closeCatalog: "关闭目录",
   pluginRunCompleted: "{title} 运行完成",
   pluginRollingDesc: "提升 Prism 升级体验，获取更快更新通道。",
   pluginRollingApplied: "已切换 Xray 与 Tachyon Core 到预览通道",
@@ -523,10 +547,17 @@ const zh = {
   subscriptionDuplicates: "重复节点 {count}",
   subscriptionImportResult: "已导入 {count} 个节点",
   subscriptionName: "订阅名称",
+  subscriptionNameRequired: "请输入订阅名称",
   subscriptionPayload: "粘贴订阅内容",
   subscriptionSkipped: "跳过 {count} 条",
   subscriptionUnsupported: "不支持协议：{protocols}",
   subscriptionUrl: "订阅地址",
+  subscriptionUpdating: "正在更新...",
+  subscriptionsUpdatingAll: "正在更新全部...",
+  subscriptionUrlRequired: "请输入订阅地址",
+  subscriptionFetchFailed: "订阅获取失败，请检查地址与网络连接",
+  subscriptionNoSupportedNodes: "订阅中没有可支持的节点",
+  noSubscriptionGroups: "还没有订阅组，请填写名称和地址后更新。",
   xrayRetainedOnly: "仅保留，Xray 不支持",
   xraySupported: "Xray 支持",
   xrayUnsupported: "Xray 不支持",
@@ -610,6 +641,16 @@ const zh = {
   tachyonTunBudgetDesc: "安全预算：MTU 576-1284；TGP max_datagram_size 固定为 1352。",
   profileNoMatch: "没有匹配条件",
   generalSettings: "通用设置",
+  appearance: "外观",
+  theme: "主题",
+  themeDark: "深色",
+  themeContrast: "高对比度",
+  density: "界面密度",
+  densityComfortable: "舒适",
+  densityCompact: "紧凑",
+  motion: "界面动画",
+  motionOn: "开启",
+  motionOff: "关闭",
   readinessOk: "正常",
   readinessCheck: "检查",
   readinessFix: "修复",
@@ -880,6 +921,10 @@ const en: typeof zh = {
   pluginNoMatches: "No plugins match this filter",
   pluginNoResult: "No result yet",
   pluginNotInstalled: "Not installed",
+  pluginNotRunnable: "Install and enable the plugin before running it",
+  pluginCatalog: "Plugin Catalog",
+  pluginCatalogHint: "Choose a bundled plugin to install. Third-party sources stay closed until signing and permissions are available.",
+  closeCatalog: "Close Catalog",
   pluginRunCompleted: "{title} run completed",
   pluginRollingDesc: "Improve Prism update experience with faster preview channels.",
   pluginRollingApplied: "Xray and Tachyon Core switched to preview channels",
@@ -930,10 +975,17 @@ const en: typeof zh = {
   subscriptionDuplicates: "{count} duplicates",
   subscriptionImportResult: "{count} nodes imported",
   subscriptionName: "Subscription name",
+  subscriptionNameRequired: "Enter a subscription name",
   subscriptionPayload: "Paste subscription payload",
   subscriptionSkipped: "{count} skipped",
   subscriptionUnsupported: "unsupported: {protocols}",
   subscriptionUrl: "Subscription URL",
+  subscriptionUpdating: "Updating...",
+  subscriptionsUpdatingAll: "Updating all...",
+  subscriptionUrlRequired: "Enter a subscription URL",
+  subscriptionFetchFailed: "Could not fetch the subscription; check the URL and network",
+  subscriptionNoSupportedNodes: "The subscription contains no supported nodes",
+  noSubscriptionGroups: "No subscription groups yet. Enter a name and URL to add one.",
   xrayRetainedOnly: "Retained only, unsupported by Xray",
   xraySupported: "Xray supported",
   xrayUnsupported: "Unsupported by Xray",
@@ -1017,6 +1069,16 @@ const en: typeof zh = {
   tachyonTunBudgetDesc: "Safe budget: MTU 576-1284; TGP max_datagram_size is fixed at 1352.",
   profileNoMatch: "No match rule",
   generalSettings: "General Settings",
+  appearance: "Appearance",
+  theme: "Theme",
+  themeDark: "Dark",
+  themeContrast: "High Contrast",
+  density: "Interface density",
+  densityComfortable: "Comfortable",
+  densityCompact: "Compact",
+  motion: "Interface motion",
+  motionOn: "On",
+  motionOff: "Off",
   readinessOk: "OK",
   readinessCheck: "Check",
   readinessFix: "Fix",
@@ -1592,6 +1654,29 @@ function subscriptionImportMessage(report: SubscriptionParseReport, ui: typeof z
   return parts.join(" / ");
 }
 
+function subscriptionErrorCode(
+  error: unknown,
+  fallback: SubscriptionErrorCode = "update-failed",
+): SubscriptionErrorCode {
+  return error instanceof SubscriptionError ? error.code : fallback;
+}
+
+function subscriptionErrorMessage(code: SubscriptionErrorCode, ui: typeof zh): string {
+  const messages = {
+    "fetch-failed": ui.subscriptionFetchFailed,
+    "name-required": ui.subscriptionNameRequired,
+    "no-supported-nodes": ui.subscriptionNoSupportedNodes,
+    "no-remote-subscriptions": ui.noRemoteSubscriptions,
+    "node-missing": ui.nodeSelectionFailed,
+    "outbound-missing": ui.xrayConfigGenerationFailed,
+    "subscription-missing": ui.subscriptionSelectionFailed,
+    "update-failed": ui.subscriptionUpdateFailed,
+    "unsupported-outbound": ui.xrayUnsupported,
+    "url-required": ui.subscriptionUrlRequired,
+  } as const;
+  return messages[code];
+}
+
 function templateValue(template: string, key: string, value: string): string {
   return template.replace(`{${key}}`, value);
 }
@@ -1633,6 +1718,14 @@ export function App() {
   const [subscriptionName, setSubscriptionName] = useState("");
   const [subscriptionUrl, setSubscriptionUrl] = useState("");
   const [subscriptionText, setSubscriptionText] = useState("");
+  const [subscriptionBusy, setSubscriptionBusy] = useState(false);
+  const [subscriptionUpdateAllBusy, setSubscriptionUpdateAllBusy] = useState(false);
+  const [subscriptionFieldErrors, setSubscriptionFieldErrors] =
+    useState<SubscriptionFieldErrors>({ general: null, name: null, url: null });
+  const [subscriptionOperationError, setSubscriptionOperationError] =
+    useState<SubscriptionErrorCode | null>(null);
+  const [subscriptionBatchFeedback, setSubscriptionBatchFeedback] =
+    useState<SubscriptionBatchFeedback | null>(null);
   const [subscriptionViewMode, setSubscriptionViewMode] = useState<SubscriptionViewMode>("grid");
   const [tachyonServers, setTachyonServers] = useState<TachyonServerSnapshot>(
     loadTachyonServerSnapshot,
@@ -1675,6 +1768,7 @@ export function App() {
   const [binaryBusy, setBinaryBusy] = useState(false);
   const [message, setMessage] = useState(() => (loadLanguage() === "zh-CN" ? zh.ready : en.ready));
   const [alwaysOnTop, setAlwaysOnTop] = useState(false);
+  const [appearance, setAppearance] = useState(loadAppearancePreferences);
   const [telemetry, setTelemetry] = useState<TelemetryState>(() => ({
     connection: "disconnected",
     hello: null,
@@ -1700,6 +1794,7 @@ export function App() {
   const [trafficSamples, setTrafficSamples] = useState<TimedTrafficSample[]>([]);
   const previousTrafficRef = useRef<{ at: number; totals: TrafficTotals } | null>(null);
   const subscriptionNameInputRef = useRef<HTMLInputElement | null>(null);
+  const subscriptionMutationRef = useRef(false);
   const t = useMemo(() => createTranslator(language), [language]);
   const ui = language === "zh-CN" ? zh : en;
   const currentSubscription = useMemo(() => activeSubscription(subscription), [subscription]);
@@ -1977,10 +2072,10 @@ export function App() {
     [readinessItems],
   );
   const runtimeRows = [
-    { label: ui.systemProxy, value: systemProxyLabel(systemProxy) },
-    { label: ui.tunPrivilege, value: privilegeLabel(runtimePrivilege) },
-    { label: ui.xrayCoreBinary, value: processStatusLabel(runtimeStatus?.xray) },
-    { label: ui.tachyonCoreBinary, value: processStatusLabel(runtimeStatus?.tachyonCore) },
+    { id: "system-proxy", label: ui.systemProxy, value: systemProxyLabel(systemProxy) },
+    { id: "tun-privilege", label: ui.tunPrivilege, value: privilegeLabel(runtimePrivilege) },
+    { id: "xray-core", label: ui.xrayCoreBinary, value: processStatusLabel(runtimeStatus?.xray) },
+    { id: "tachyon-core", label: ui.tachyonCoreBinary, value: processStatusLabel(runtimeStatus?.tachyonCore) },
   ];
   const xrayRunning = runtimeStatus?.xray.state === "running";
   const tachyonRunning = runtimeStatus?.tachyonCore.state === "running";
@@ -2123,6 +2218,24 @@ export function App() {
   }
 
   async function updateSubscriptionFromUrl() {
+    if (subscriptionMutationRef.current || subscriptionBusy || subscriptionUpdateAllBusy) return;
+    const nameMissing = !subscriptionName.trim();
+    const urlMissing = !subscriptionUrl.trim();
+    if (nameMissing || urlMissing) {
+      setSubscriptionFieldErrors({
+        general: null,
+        name: nameMissing ? "name-required" : null,
+        url: urlMissing ? "url-required" : null,
+      });
+      const code: SubscriptionErrorCode = nameMissing ? "name-required" : "url-required";
+      setMessage(subscriptionErrorMessage(code, ui));
+      return;
+    }
+    subscriptionMutationRef.current = true;
+    setSubscriptionBusy(true);
+    setSubscriptionFieldErrors({ general: null, name: null, url: null });
+    setSubscriptionOperationError(null);
+    setSubscriptionBatchFeedback(null);
     try {
       const report = await fetchSubscriptionReport(subscriptionUrl);
       const snapshot = createSubscriptionSnapshot(
@@ -2136,65 +2249,94 @@ export function App() {
       setMessage(subscriptionImportMessage(report, ui));
       void refreshNodeLatencies(report.nodes);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : ui.subscriptionUpdateFailed);
+      const code = subscriptionErrorCode(error);
+      setSubscriptionFieldErrors({
+        general: code === "fetch-failed" || code === "url-required" ? null : code,
+        name: code === "name-required" ? code : null,
+        url: code === "fetch-failed" || code === "url-required" ? code : null,
+      });
+      setMessage(subscriptionErrorMessage(code, ui));
+    } finally {
+      subscriptionMutationRef.current = false;
+      setSubscriptionBusy(false);
     }
   }
 
   async function updateAllSubscriptions() {
+    if (subscriptionMutationRef.current || subscriptionBusy || subscriptionUpdateAllBusy) return;
+    subscriptionMutationRef.current = true;
+    setSubscriptionUpdateAllBusy(true);
+    setSubscriptionOperationError(null);
+    setSubscriptionBatchFeedback(null);
     const remoteSubscriptions = subscription.subscriptions.filter(
       (item) => item.sourceUrl && item.sourceUrl !== "manual",
     );
-    if (remoteSubscriptions.length === 0) {
-      setMessage(ui.noRemoteSubscriptions);
-      return;
-    }
-
-    let nextSnapshot = subscription;
-    const updatedNodes: ProxyNode[] = [];
-    const failures: string[] = [];
-
-    for (const item of remoteSubscriptions) {
-      try {
-        const report = await fetchSubscriptionReport(item.sourceUrl);
-        nextSnapshot = createSubscriptionSnapshot(item.sourceUrl, report.nodes, nextSnapshot, item.name);
-        updatedNodes.push(...report.nodes);
-      } catch (error) {
-        failures.push(`${item.name}: ${error instanceof Error ? error.message : ui.subscriptionUpdateFailed}`);
-      }
-    }
-
-    if (updatedNodes.length === 0) {
-      setMessage(failures[0] ?? ui.subscriptionUpdateFailed);
-      return;
-    }
-
     try {
-      if (nextSnapshot.subscriptions.some((item) => item.id === subscription.selectedSubscriptionId)) {
-        nextSnapshot = selectSubscription(nextSnapshot, subscription.selectedSubscriptionId);
-        if (nextSnapshot.nodes.some((node) => node.id === subscription.selectedNodeId)) {
-          nextSnapshot = selectSubscriptionNode(nextSnapshot, subscription.selectedNodeId);
+      if (remoteSubscriptions.length === 0) {
+        setSubscriptionOperationError("no-remote-subscriptions");
+        setMessage(subscriptionErrorMessage("no-remote-subscriptions", ui));
+        return;
+      }
+
+      let nextSnapshot = subscription;
+      const updatedNodes: ProxyNode[] = [];
+      const failures: SubscriptionErrorCode[] = [];
+
+      for (const item of remoteSubscriptions) {
+        try {
+          const report = await fetchSubscriptionReport(item.sourceUrl);
+          nextSnapshot = createSubscriptionSnapshot(item.sourceUrl, report.nodes, nextSnapshot, item.name);
+          updatedNodes.push(...report.nodes);
+        } catch (error) {
+          failures.push(subscriptionErrorCode(error));
         }
       }
-    } catch {
-      // Keep the freshly updated snapshot if the previous selection disappeared.
-    }
 
-    saveSubscriptionSnapshot(nextSnapshot);
-    setSubscription(nextSnapshot);
-    setMessage(
-      failures.length > 0
-        ? templateValue(
-            templateValue(
-              ui.subscriptionsUpdatedPartial,
-              "ok",
-              String(remoteSubscriptions.length - failures.length),
-            ),
-            "total",
-            String(remoteSubscriptions.length),
-          )
-        : templateValue(ui.subscriptionsUpdated, "count", String(remoteSubscriptions.length)),
-    );
-    void refreshNodeLatencies(updatedNodes, false);
+      if (updatedNodes.length === 0) {
+        const code = failures[0] ?? "update-failed";
+        setSubscriptionOperationError(code);
+        setMessage(subscriptionErrorMessage(code, ui));
+        return;
+      }
+
+      try {
+        if (nextSnapshot.subscriptions.some((item) => item.id === subscription.selectedSubscriptionId)) {
+          nextSnapshot = selectSubscription(nextSnapshot, subscription.selectedSubscriptionId);
+          if (nextSnapshot.nodes.some((node) => node.id === subscription.selectedNodeId)) {
+            nextSnapshot = selectSubscriptionNode(nextSnapshot, subscription.selectedNodeId);
+          }
+        }
+      } catch {
+        // Keep the freshly updated snapshot if the previous selection disappeared.
+      }
+
+      saveSubscriptionSnapshot(nextSnapshot);
+      setSubscription(nextSnapshot);
+      if (failures.length > 0) {
+        setSubscriptionBatchFeedback({
+          code: failures[0] ?? "update-failed",
+          failed: failures.length,
+          total: remoteSubscriptions.length,
+        });
+      }
+      setMessage(
+        failures.length > 0
+          ? templateValue(
+              templateValue(
+                ui.subscriptionsUpdatedPartial,
+                "ok",
+                String(remoteSubscriptions.length - failures.length),
+              ),
+              "total",
+              String(remoteSubscriptions.length),
+            )
+          : templateValue(ui.subscriptionsUpdated, "count", String(remoteSubscriptions.length)),
+      );
+      void refreshNodeLatencies(updatedNodes, false);
+    } finally {
+      subscriptionMutationRef.current = false;
+      setSubscriptionUpdateAllBusy(false);
+    }
   }
 
   async function refreshNodeLatencies(nodes = subscription.nodes, announce = true): Promise<NodeLatencyMap> {
@@ -2239,6 +2381,8 @@ export function App() {
   }
 
   function importSubscriptionText() {
+    setSubscriptionFieldErrors((current) => ({ ...current, general: null }));
+    setSubscriptionOperationError(null);
     try {
       const report = parseSubscriptionWithReport(subscriptionText);
       const snapshot = createSubscriptionSnapshot(
@@ -2253,22 +2397,28 @@ export function App() {
       setMessage(subscriptionImportMessage(report, ui));
       void refreshNodeLatencies(report.nodes);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : ui.subscriptionImportFailed);
+      const code = subscriptionErrorCode(error);
+      setSubscriptionFieldErrors((current) => ({ ...current, general: code }));
+      setMessage(subscriptionErrorMessage(code, ui));
     }
   }
 
   function chooseSubscription(subscriptionId: string) {
+    setSubscriptionOperationError(null);
     try {
       const snapshot = selectSubscription(subscription, subscriptionId);
       saveSubscriptionSnapshot(snapshot);
       setSubscription(snapshot);
       setMessage(ui.subscriptionSelected);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : ui.subscriptionSelectionFailed);
+      const code = subscriptionErrorCode(error, "subscription-missing");
+      setSubscriptionOperationError(code);
+      setMessage(subscriptionErrorMessage(code, ui));
     }
   }
 
   function chooseNode(nodeId: string) {
+    setSubscriptionOperationError(null);
     try {
       const snapshot = selectSubscriptionNode(subscription, nodeId);
       saveSubscriptionSnapshot(snapshot);
@@ -2277,19 +2427,39 @@ export function App() {
       setXrayProbe({ error: null, report: null, state: "idle" });
       setMessage(ui.nodeSelected);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : ui.nodeSelectionFailed);
+      const code = subscriptionErrorCode(error, "node-missing");
+      setSubscriptionOperationError(code);
+      setMessage(subscriptionErrorMessage(code, ui));
     }
   }
 
   function deleteSubscription(subscriptionId: string) {
+    setSubscriptionOperationError(null);
     try {
       const snapshot = removeSubscription(subscription, subscriptionId);
       saveSubscriptionSnapshot(snapshot);
       setSubscription(snapshot);
       setMessage(ui.subscriptionRemoved);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : ui.subscriptionRemovalFailed);
+      const code = subscriptionErrorCode(error, "subscription-missing");
+      setSubscriptionOperationError(code);
+      setMessage(subscriptionErrorMessage(code, ui));
     }
+  }
+
+  function changeSubscriptionName(value: string) {
+    setSubscriptionName(value);
+    setSubscriptionFieldErrors((current) => ({ ...current, name: null }));
+  }
+
+  function changeSubscriptionUrl(value: string) {
+    setSubscriptionUrl(value);
+    setSubscriptionFieldErrors((current) => ({ ...current, url: null }));
+  }
+
+  function changeSubscriptionText(value: string) {
+    setSubscriptionText(value);
+    setSubscriptionFieldErrors((current) => ({ ...current, general: null }));
   }
 
   function saveTachyonServerProfile() {
@@ -2418,14 +2588,6 @@ export function App() {
     );
   }
 
-  function installAllPlugins() {
-    const nextState = pluginCatalogIds.reduce<PluginStateSnapshot>(
-      (current, pluginId) => installPluginState(current, pluginId),
-      pluginState,
-    );
-    persistPluginState(nextState, ui.pluginAllInstalled);
-  }
-
   async function runPlugin(pluginId: string, pluginTitle: string) {
     try {
       if (pluginId === "rolling-release") {
@@ -2495,7 +2657,7 @@ export function App() {
       const result = templateValue(ui.pluginRunCompleted, "title", pluginTitle);
       persistPluginState(recordPluginRun(pluginState, pluginId, { result }), result);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : ui.pluginRunFailed);
+      setMessage(error instanceof PluginStateError ? ui.pluginNotRunnable : ui.pluginRunFailed);
     }
   }
 
@@ -2504,6 +2666,9 @@ export function App() {
     setSubscriptionName("");
     setSubscriptionUrl("");
     setSubscriptionText("");
+    setSubscriptionFieldErrors({ general: null, name: null, url: null });
+    setSubscriptionOperationError(null);
+    setSubscriptionBatchFeedback(null);
     setMessage(ui.readyAddSubscription);
     globalThis.setTimeout?.(() => subscriptionNameInputRef.current?.focus(), 50);
   }
@@ -3172,6 +3337,20 @@ export function App() {
     setMessage(nextLanguage === "zh-CN" ? zh.languageUpdated : en.languageUpdated);
   }
 
+  function updateAppearance(patch: Partial<AppearancePreferences>) {
+    setAppearance((current) => {
+      const next = { ...current, ...patch };
+      saveAppearancePreferences(next);
+      return next;
+    });
+  }
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = appearance.theme;
+    document.documentElement.dataset.density = appearance.density;
+    document.documentElement.dataset.motion = appearance.motion ? "on" : "off";
+  }, [appearance]);
+
   function navigateView(view: PrismView) {
     setActiveView(view);
     const nextHash = `#${view}`;
@@ -3289,6 +3468,45 @@ export function App() {
       telemetryClient.disconnect();
     };
   }, [telemetryClient]);
+
+  useEffect(() => {
+    if (isTauriRuntime()) return;
+    const injectTraffic = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        tachyonDown: number;
+        tachyonUp: number;
+        xrayDown: number;
+        xrayUp: number;
+      }>).detail;
+      if (!detail) return;
+      setTelemetry((current) => ({
+        ...current,
+        connection: "connected",
+        latestTelemetry: {
+          bytes_drop: 0,
+          bytes_tgp: detail.tachyonUp,
+          decided_direct: 0,
+          decided_drop: 0,
+          decided_tgp: 1,
+          goroutines: 1,
+          handler_errors: 0,
+          lookup_errors: 0,
+          packets_read: 1,
+          tgp_bytes_received: detail.tachyonDown,
+          tgp_bytes_sent: detail.tachyonUp,
+          tgp_sessions: 1,
+          unsupported: 0,
+        },
+      }));
+      setXrayTrafficStats({
+        bytesReceived: detail.xrayDown,
+        bytesSent: detail.xrayUp,
+        queriedAt: Date.now(),
+      });
+    };
+    globalThis.addEventListener("tachyon-prism:test-traffic", injectTraffic);
+    return () => globalThis.removeEventListener("tachyon-prism:test-traffic", injectTraffic);
+  }, []);
 
   useEffect(() => {
     const xrayRunning = runtimeStatus?.xray.state === "running";
@@ -3583,18 +3801,23 @@ export function App() {
             onChooseSubscription={chooseSubscription}
             onDeleteSubscription={deleteSubscription}
             onImportText={importSubscriptionText}
-            onNameChange={setSubscriptionName}
+            onNameChange={changeSubscriptionName}
             onPrepareAdd={prepareSubscriptionAdd}
             onRefreshLatency={() => void refreshNodeLatencies()}
-            onTextChange={setSubscriptionText}
+            onTextChange={changeSubscriptionText}
             onUpdate={() => void updateSubscriptionFromUrl()}
             onUpdateAll={() => void updateAllSubscriptions()}
-            onUrlChange={setSubscriptionUrl}
+            onUrlChange={changeSubscriptionUrl}
             setViewMode={setSubscriptionViewMode}
             subscription={subscription}
             subscriptionName={subscriptionName}
             subscriptionText={subscriptionText}
             subscriptionUrl={subscriptionUrl}
+            busy={subscriptionBusy}
+            batchFeedback={subscriptionBatchFeedback}
+            fieldErrors={subscriptionFieldErrors}
+            operationError={subscriptionOperationError}
+            updateAllBusy={subscriptionUpdateAllBusy}
             ui={ui}
             viewMode={subscriptionViewMode}
           />
@@ -3602,7 +3825,6 @@ export function App() {
 
         {activeView === "plugins" ? (
           <PluginsView
-            onInstallAll={installAllPlugins}
             onInstall={installPlugin}
             onRun={runPlugin}
             onToggle={togglePlugin}
@@ -3613,11 +3835,13 @@ export function App() {
 
         {activeView === "settings" ? (
           <SettingsView
+            appearance={appearance}
             binaryBusy={binaryBusy}
             binaryInfo={binaryInfo}
             binaryReleases={binaryReleases}
             binarySourceInputs={binarySourceInputs}
             changeLanguage={changeLanguage}
+            changeAppearance={updateAppearance}
             canonicalXrayAvailable={Boolean(canonicalXrayText)}
             canonicalXrayReadError={canonicalXrayLoadState === "error"}
             configPaths={configPaths}
@@ -4286,6 +4510,9 @@ function ConfigsView({
 }
 
 function SubscriptionsView({
+  busy,
+  batchFeedback,
+  fieldErrors,
   activeNode,
   currentSubscription,
   latencyMap,
@@ -4302,14 +4529,19 @@ function SubscriptionsView({
   onUpdate,
   onUpdateAll,
   onUrlChange,
+  operationError,
   setViewMode,
   subscription,
   subscriptionName,
   subscriptionText,
   subscriptionUrl,
   ui,
+  updateAllBusy,
   viewMode,
 }: {
+  busy: boolean;
+  batchFeedback: SubscriptionBatchFeedback | null;
+  fieldErrors: SubscriptionFieldErrors;
   activeNode: ProxyNode | undefined;
   currentSubscription: SubscriptionProfile | undefined;
   latencyMap: NodeLatencyMap;
@@ -4326,14 +4558,31 @@ function SubscriptionsView({
   onUpdate: () => void;
   onUpdateAll: () => void;
   onUrlChange: (value: string) => void;
+  operationError: SubscriptionErrorCode | null;
   setViewMode: (mode: SubscriptionViewMode) => void;
   subscription: SubscriptionSnapshot;
   subscriptionName: string;
   subscriptionText: string;
   subscriptionUrl: string;
   ui: typeof zh;
+  updateAllBusy: boolean;
   viewMode: SubscriptionViewMode;
 }) {
+  const batchMessage = batchFeedback
+    ? `${templateValue(
+        templateValue(
+          ui.subscriptionsUpdatedPartial,
+          "ok",
+          String(batchFeedback.total - batchFeedback.failed),
+        ),
+        "total",
+        String(batchFeedback.total),
+      )}: ${subscriptionErrorMessage(batchFeedback.code, ui)}`
+    : null;
+  const operationMessage = operationError
+    ? subscriptionErrorMessage(operationError, ui)
+    : batchMessage;
+  const controlsBusy = busy || updateAllBusy;
   return (
     <div className="subscriptions-page page-enter">
       <div className="section-toolbar">
@@ -4360,40 +4609,70 @@ function SubscriptionsView({
           </div>
         </div>
         <div className="toolbar-actions">
-          <button type="button" onClick={onUpdateAll}>
-            {ui.updateAll}
+          <button
+            data-testid="subscription-update-all"
+            disabled={controlsBusy}
+            type="button"
+            onClick={onUpdateAll}
+          >
+            {updateAllBusy ? ui.subscriptionsUpdatingAll : ui.updateAll}
           </button>
-          <button className="primary-action" type="button" onClick={onPrepareAdd}>
+          <button className="primary-action" disabled={controlsBusy} type="button" onClick={onPrepareAdd}>
             + {ui.add}
           </button>
         </div>
       </div>
+
+      {operationMessage ? (
+        <p className="subscription-operation-feedback form-error" data-testid="subscription-operation-error" role="alert">
+          {operationMessage}
+        </p>
+      ) : null}
 
       <div className="subscription-layout">
         <aside className="subscription-column">
           <article className="glass-card add-sub-card">
             <h2>{ui.subscriptions}</h2>
             <input
+              aria-describedby={fieldErrors.name ? "subscription-name-error" : undefined}
+              aria-invalid={Boolean(fieldErrors.name)}
               ref={nameInputRef}
               placeholder={ui.subscriptionName}
               value={subscriptionName}
               onChange={(event) => onNameChange(event.target.value)}
             />
+            {fieldErrors.name ? (
+              <p className="field-error" id="subscription-name-error" role="alert">
+                {subscriptionErrorMessage(fieldErrors.name, ui)}
+              </p>
+            ) : null}
             <input
+              aria-describedby={fieldErrors.url ? "subscription-url-error" : undefined}
+              aria-invalid={Boolean(fieldErrors.url)}
               placeholder={ui.subscriptionUrl}
               value={subscriptionUrl}
               onChange={(event) => onUrlChange(event.target.value)}
             />
+            {fieldErrors.url ? (
+              <p className="field-error" id="subscription-url-error" role="alert">
+                {subscriptionErrorMessage(fieldErrors.url, ui)}
+              </p>
+            ) : null}
             <textarea
               placeholder={ui.subscriptionPayload}
               value={subscriptionText}
               onChange={(event) => onTextChange(event.target.value)}
             />
+            {fieldErrors.general ? (
+              <p className="form-error" role="alert">
+                {subscriptionErrorMessage(fieldErrors.general, ui)}
+              </p>
+            ) : null}
             <div className="row-actions">
-              <button className="primary-action" type="button" onClick={onUpdate}>
-                {ui.update}
+              <button className="primary-action" data-testid="subscription-update" disabled={controlsBusy} type="button" onClick={onUpdate}>
+                {busy ? ui.subscriptionUpdating : ui.update}
               </button>
-              <button type="button" onClick={onImportText}>
+              <button disabled={controlsBusy} type="button" onClick={onImportText}>
                 {ui.import}
               </button>
             </div>
@@ -4420,6 +4699,9 @@ function SubscriptionsView({
               </article>
             ))}
           </div>
+          {subscription.subscriptions.length === 0 ? (
+            <div className="empty-note subscription-groups-empty">{ui.noSubscriptionGroups}</div>
+          ) : null}
         </aside>
 
         <article className="glass-card nodes-panel">
@@ -4464,20 +4746,19 @@ function SubscriptionsView({
 
 function PluginsView({
   onInstall,
-  onInstallAll,
   onRun,
   onToggle,
   pluginState,
   ui,
 }: {
   onInstall: (pluginId: string, pluginTitle: string) => void;
-  onInstallAll: () => void;
   onRun: (pluginId: string, pluginTitle: string) => void;
   onToggle: (pluginId: string, pluginTitle: string) => void;
   pluginState: PluginStateSnapshot;
   ui: typeof zh;
 }) {
   const [filter, setFilter] = useState<PluginFilter>("all");
+  const [catalogOpen, setCatalogOpen] = useState(false);
   const plugins = [
     {
       badge: "",
@@ -4541,11 +4822,31 @@ function PluginsView({
           </div>
         </div>
         <div className="toolbar-actions">
-          <button className="primary-action" type="button" onClick={onInstallAll}>
-            + {ui.add}
+          <button className="primary-action" data-testid="open-plugin-catalog" type="button" onClick={() => setCatalogOpen((value) => !value)}>
+            {catalogOpen ? ui.closeCatalog : `+ ${ui.add}`}
           </button>
         </div>
       </div>
+      {catalogOpen ? (
+        <section className="plugin-catalog" data-testid="plugin-catalog">
+          <header>
+            <div><h2>{ui.pluginCatalog}</h2><p>{ui.pluginCatalogHint}</p></div>
+          </header>
+          <div className="plugin-catalog-list">
+            {plugins.map((plugin) => {
+              const state = pluginState[plugin.id] ?? emptyPluginState();
+              return (
+                <div key={plugin.id}>
+                  <span><strong>{plugin.title}</strong><small>{plugin.desc}</small></span>
+                  <button disabled={state.installed} type="button" onClick={() => onInstall(plugin.id, plugin.title)}>
+                    {state.installed ? ui.installed : ui.install}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
       <div className="plugin-card-grid">
         {visiblePlugins.map((plugin) => {
           const state = pluginState[plugin.id] ?? emptyPluginState();
@@ -4615,11 +4916,13 @@ function PluginsView({
 }
 
 function SettingsView({
+  appearance,
   binaryBusy,
   binaryInfo,
   binaryReleases,
   binarySourceInputs,
   changeLanguage,
+  changeAppearance,
   canonicalXrayAvailable,
   canonicalXrayReadError,
   configPaths,
@@ -4691,11 +4994,13 @@ function SettingsView({
   xrayAdvancedEditor,
   setTachyonServerDraft,
 }: {
+  appearance: AppearancePreferences;
   binaryBusy: boolean;
   binaryInfo: (kind: ManagedBinaryKind) => ManagedBinaryInfo | null;
   binaryReleases: Partial<Record<ManagedBinaryKind, RuntimeReleaseInfo>>;
   binarySourceInputs: Record<ManagedBinaryKind, string>;
   changeLanguage: (language: Language) => void;
+  changeAppearance: (patch: Partial<AppearancePreferences>) => void;
   canonicalXrayAvailable: boolean;
   canonicalXrayReadError: boolean;
   configPaths: ConfigDraftPaths | null;
@@ -4747,7 +5052,7 @@ function SettingsView({
   releaseDiagnostics: Partial<Record<ManagedBinaryKind, CoreReleaseDiagnostics>>;
   runtimeInputs: RuntimeSettings;
   runtimePaths: RuntimePaths | null;
-  runtimeRows: Array<{ label: string; value: string }>;
+  runtimeRows: Array<{ id: string; label: string; value: string }>;
   runtimeStatus: RuntimeStatus | null;
   section: SettingsSection;
   setBinarySourceInputs: React.Dispatch<React.SetStateAction<typeof emptyBinarySourceInputs>>;
@@ -4833,6 +5138,24 @@ function SettingsView({
                 >
                   English
                 </button>
+              </div>
+            </SettingRow>
+            <SettingRow label={ui.theme}>
+              <div className="segmented" data-testid="theme-setting">
+                <button className={appearance.theme === "dark" ? "active" : ""} type="button" onClick={() => changeAppearance({ theme: "dark" })}>{ui.themeDark}</button>
+                <button className={appearance.theme === "contrast" ? "active" : ""} type="button" onClick={() => changeAppearance({ theme: "contrast" })}>{ui.themeContrast}</button>
+              </div>
+            </SettingRow>
+            <SettingRow label={ui.density}>
+              <div className="segmented" data-testid="density-setting">
+                <button className={appearance.density === "comfortable" ? "active" : ""} type="button" onClick={() => changeAppearance({ density: "comfortable" })}>{ui.densityComfortable}</button>
+                <button className={appearance.density === "compact" ? "active" : ""} type="button" onClick={() => changeAppearance({ density: "compact" })}>{ui.densityCompact}</button>
+              </div>
+            </SettingRow>
+            <SettingRow label={ui.motion}>
+              <div className="segmented" data-testid="motion-setting">
+                <button className={appearance.motion ? "active" : ""} type="button" onClick={() => changeAppearance({ motion: true })}>{ui.motionOn}</button>
+                <button className={!appearance.motion ? "active" : ""} type="button" onClick={() => changeAppearance({ motion: false })}>{ui.motionOff}</button>
               </div>
             </SettingRow>
           </article>
@@ -4937,7 +5260,7 @@ function SettingsView({
               ) : null}
               <div className="runtime-list-mini">
                 {runtimeRows.map((row) => (
-                  <div key={row.label}><span>{row.label}</span><strong>{row.value}</strong></div>
+                  <div data-testid={`runtime-row-${row.id}`} key={row.id}><span>{row.label}</span><strong>{row.value}</strong></div>
                 ))}
               </div>
               <div className="tachyon-server-panel">

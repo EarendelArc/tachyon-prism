@@ -31,8 +31,22 @@ SMOKE_URL_SUBSCRIPTION = "\n".join(
 
 
 class QuietHandler(SimpleHTTPRequestHandler):
+    request_counts: dict[str, int] = {}
+    request_counts_lock = threading.Lock()
+
     def do_GET(self) -> None:
-        if self.path.split("?", 1)[0] == "/smoke-subscription":
+        path = self.path.split("?", 1)[0]
+        if path in {"/smoke-subscription", "/smoke-subscription-slow", "/smoke-subscription-error"}:
+            with self.request_counts_lock:
+                self.request_counts[path] = self.request_counts.get(path, 0) + 1
+        if path == "/smoke-subscription-error":
+            self.send_response(502)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            return
+        if path in {"/smoke-subscription", "/smoke-subscription-slow"}:
+            if path.endswith("-slow"):
+                time.sleep(0.8)
             data = SMOKE_URL_SUBSCRIPTION.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -42,6 +56,11 @@ class QuietHandler(SimpleHTTPRequestHandler):
             self.wfile.write(data)
             return
         super().do_GET()
+
+    @classmethod
+    def request_count(cls, path: str) -> int:
+        with cls.request_counts_lock:
+            return cls.request_counts.get(path, 0)
 
     def log_message(self, format: str, *args: Any) -> None:
         return
@@ -429,6 +448,25 @@ def assert_desktop_interaction_polish(cdp: CDP) -> None:
         raise AssertionError(f"custom scrollbar style rule missing: {polish}")
 
 
+def inject_dual_core_traffic(cdp: CDP) -> None:
+    cdp.evaluate(
+        """
+        new Promise((resolve) => {
+          const send = (tachyonUp, tachyonDown, xrayUp, xrayDown) =>
+            window.dispatchEvent(new CustomEvent('tachyon-prism:test-traffic', {
+              detail: { tachyonUp, tachyonDown, xrayUp, xrayDown }
+            }));
+          send(1000, 2000, 3000, 4000);
+          setTimeout(() => {
+            send(7000, 10000, 14000, 19000);
+            setTimeout(resolve, 250);
+          }, 150);
+        })
+        """,
+        await_promise=True,
+    )
+
+
 def assert_dual_core_chart(cdp: CDP) -> None:
     chart = cdp.evaluate(
         """
@@ -437,7 +475,11 @@ def assert_dual_core_chart(cdp: CDP) -> None:
             .map((item) => item.textContent.trim()),
           emptyText: document.querySelector('.chart-empty')?.textContent.trim() ?? '',
           seriesClasses: Array.from(document.querySelectorAll('.legend-item'))
-            .map((item) => item.className)
+            .map((item) => item.className),
+          rates: Array.from(document.querySelectorAll('.legend-item b'))
+            .map((item) => item.textContent.trim()),
+          points: Array.from(document.querySelectorAll('.traffic-line'))
+            .map((item) => item.getAttribute('points') ?? '')
         }))()
         """,
     )
@@ -450,8 +492,38 @@ def assert_dual_core_chart(cdp: CDP) -> None:
     for class_name in ["tachyon-up", "tachyon-down", "xray-up", "xray-down"]:
         if not any(class_name in item for item in chart["seriesClasses"]):
             raise AssertionError(f"dual-core traffic class missing {class_name}: {chart}")
-    if not chart["emptyText"]:
-        raise AssertionError(f"chart empty state missing: {chart}")
+    if chart["emptyText"]:
+        raise AssertionError(f"chart stayed in empty state after non-zero injection: {chart}")
+    if len(chart["points"]) != 4 or any(not points for points in chart["points"]):
+        raise AssertionError(f"four real SVG traffic lines were not rendered: {chart}")
+    if any(rate.startswith("0 ") for rate in chart["rates"]):
+        raise AssertionError(f"dual-core rates did not become non-zero: {chart}")
+
+
+def assert_visible_custom_scrollbar(cdp: CDP) -> None:
+    result = cdp.evaluate(
+        """
+        (() => {
+          const content = document.querySelector('.prism-content');
+          if (!content) return null;
+          content.scrollTop = Math.max(1, content.scrollHeight - content.clientHeight);
+          const style = getComputedStyle(content);
+          return {
+            clientHeight: content.clientHeight,
+            scrollHeight: content.scrollHeight,
+            scrollTop: content.scrollTop,
+            overflowY: style.overflowY,
+            scrollbarColor: style.scrollbarColor
+          };
+        })()
+        """,
+    )
+    if not result or result["scrollHeight"] <= result["clientHeight"]:
+        raise AssertionError(f"long settings page did not expose a scrollbar: {result}")
+    if result["scrollTop"] <= 0 or result["overflowY"] != "auto":
+        raise AssertionError(f"settings scrollbar is not interactive: {result}")
+    if result["scrollbarColor"] in ("auto", ""):
+        raise AssertionError(f"custom scrollbar color is not visible: {result}")
 
 
 def import_sample_subscription(cdp: CDP) -> str:
@@ -565,6 +637,191 @@ def update_all_subscriptions(cdp: CDP) -> str:
             await_promise=True,
         ),
     )
+
+
+def set_subscription_form(cdp: CDP, name: str | None = None, source_url: str | None = None) -> None:
+    cdp.evaluate(
+        f"""
+        (() => {{
+          const card = document.querySelector('.add-sub-card');
+          if (!card) throw new Error('subscription add card missing');
+          const inputs = card.querySelectorAll('input');
+          const setValue = (element, value) => {{
+            const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value');
+            descriptor.set.call(element, value);
+            element.dispatchEvent(new Event('input', {{ bubbles: true }}));
+          }};
+          const name = {json.dumps(name)};
+          const sourceUrl = {json.dumps(source_url)};
+          if (name !== null) setValue(inputs[0], name);
+          if (sourceUrl !== null) setValue(inputs[1], sourceUrl);
+        }})()
+        """,
+    )
+
+
+def subscription_interaction_state(cdp: CDP) -> dict[str, Any]:
+    return cdp.evaluate(
+        """
+        (() => {
+          const card = document.querySelector('.add-sub-card');
+          const inputs = card?.querySelectorAll('input') ?? [];
+          const update = document.querySelector('[data-testid="subscription-update"]');
+          const updateAll = document.querySelector('[data-testid="subscription-update-all"]');
+          return {
+            nameInvalid: inputs[0]?.getAttribute('aria-invalid') === 'true',
+            urlInvalid: inputs[1]?.getAttribute('aria-invalid') === 'true',
+            updateDisabled: Boolean(update?.disabled),
+            updateText: update?.textContent?.trim() ?? '',
+            updateAllDisabled: Boolean(updateAll?.disabled),
+            updateAllText: updateAll?.textContent?.trim() ?? '',
+            fieldErrors: Array.from(card?.querySelectorAll('[role="alert"]') ?? [])
+              .map((item) => item.textContent?.trim() ?? ''),
+            operationError: document.querySelector('[data-testid="subscription-operation-error"]')
+              ?.textContent?.trim() ?? '',
+            emptyGroups: document.querySelector('.subscription-groups-empty')?.textContent?.trim() ?? ''
+          };
+        })()
+        """,
+    )
+
+
+def wait_for_subscription_idle(cdp: CDP, timeout_ms: int = 4000) -> dict[str, Any]:
+    return cdp.evaluate(
+        f"""
+        new Promise((resolve, reject) => {{
+          const deadline = Date.now() + {timeout_ms};
+          const poll = () => {{
+            const update = document.querySelector('[data-testid="subscription-update"]');
+            const updateAll = document.querySelector('[data-testid="subscription-update-all"]');
+            if (update && updateAll && !update.disabled && !updateAll.disabled) {{
+              resolve({{
+                text: document.body.innerText,
+                operationError: document.querySelector('[data-testid="subscription-operation-error"]')
+                  ?.textContent?.trim() ?? '',
+                fieldErrors: Array.from(document.querySelectorAll('.add-sub-card [role="alert"]'))
+                  .map((item) => item.textContent?.trim() ?? '')
+              }});
+              return;
+            }}
+            if (Date.now() >= deadline) {{
+              reject(new Error('subscription operation did not become idle'));
+              return;
+            }}
+            setTimeout(poll, 50);
+          }};
+          poll();
+        }})
+        """,
+        await_promise=True,
+    )
+
+
+def switch_to_chinese(cdp: CDP) -> str:
+    return str(
+        cdp.evaluate(
+            """
+            new Promise((resolve) => {
+              const button = document.querySelector('.settings-card .segmented button:first-child');
+              if (!button) throw new Error('Chinese language button missing');
+              button.click();
+              setTimeout(() => resolve(document.body.innerText), 450);
+            })
+            """,
+            await_promise=True,
+        ),
+    )
+
+
+def assert_subscription_interaction_contract(cdp: CDP, port: int) -> str:
+    text = navigate_hash(cdp, "subscriptions")
+    state = subscription_interaction_state(cdp)
+    if not state["emptyGroups"]:
+        raise AssertionError(f"empty subscription-group state missing: {state}")
+
+    cdp.evaluate("document.querySelector('[data-testid=\"subscription-update\"]')?.click()")
+    time.sleep(0.15)
+    state = subscription_interaction_state(cdp)
+    if not state["nameInvalid"] or not state["urlInvalid"] or len(state["fieldErrors"]) != 2:
+        raise AssertionError(f"subscription fields were not validated independently: {state}")
+
+    set_subscription_form(cdp, name="Smoke URL")
+    state = subscription_interaction_state(cdp)
+    if state["nameInvalid"] or not state["urlInvalid"]:
+        raise AssertionError(f"editing the name did not clear only the name error: {state}")
+
+    slow_path = "/smoke-subscription-slow"
+    set_subscription_form(cdp, source_url=f"http://127.0.0.1:{port}{slow_path}")
+    before_single = QuietHandler.request_count(slow_path)
+    cdp.evaluate(
+        """
+        (() => {
+          const button = document.querySelector('[data-testid="subscription-update"]');
+          button?.click();
+          button?.click();
+        })()
+        """,
+    )
+    time.sleep(0.15)
+    state = subscription_interaction_state(cdp)
+    if not state["updateDisabled"] or not state["updateAllDisabled"]:
+        raise AssertionError(f"single subscription pending state did not lock both actions: {state}")
+    if "正在更新" not in state["updateText"]:
+        raise AssertionError(f"single subscription pending label is not localized: {state}")
+    idle = wait_for_subscription_idle(cdp)
+    if QuietHandler.request_count(slow_path) - before_single != 1:
+        raise AssertionError("single subscription double click issued more than one request")
+    assert_contains(str(idle["text"]), "Smoke URL VLESS", "Smoke URL Trojan")
+
+    error_path = "/smoke-subscription-error"
+    set_subscription_form(cdp, source_url=f"http://127.0.0.1:{port}{error_path}")
+    cdp.evaluate("document.querySelector('[data-testid=\"subscription-update\"]')?.click()")
+    idle = wait_for_subscription_idle(cdp)
+    state = subscription_interaction_state(cdp)
+    if state["nameInvalid"] or not state["urlInvalid"]:
+        raise AssertionError(f"fetch failure was not attached only to the URL field: {state}")
+    if not any("订阅获取失败" in item for item in state["fieldErrors"]):
+        raise AssertionError(f"Chinese subscription error is not local to the form: {state}")
+
+    navigate_hash(cdp, "settings")
+    select_settings_section(cdp, 0)
+    switch_to_english(cdp)
+    navigate_hash(cdp, "subscriptions")
+    state = subscription_interaction_state(cdp)
+    if not any("Could not fetch the subscription" in item for item in state["fieldErrors"]):
+        raise AssertionError(f"subscription error did not relocalize to English: {state}")
+
+    set_subscription_form(cdp, source_url=f"http://127.0.0.1:{port}{slow_path}")
+    state = subscription_interaction_state(cdp)
+    if state["urlInvalid"] or state["fieldErrors"]:
+        raise AssertionError(f"editing the URL did not clear its local error: {state}")
+
+    before_batch = QuietHandler.request_count(slow_path)
+    cdp.evaluate(
+        """
+        (() => {
+          const button = document.querySelector('[data-testid="subscription-update-all"]');
+          button?.click();
+          button?.click();
+        })()
+        """,
+    )
+    time.sleep(0.15)
+    state = subscription_interaction_state(cdp)
+    if not state["updateDisabled"] or not state["updateAllDisabled"]:
+        raise AssertionError(f"batch subscription pending state did not lock both actions: {state}")
+    if "Updating all" not in state["updateAllText"]:
+        raise AssertionError(f"batch subscription pending label is not localized: {state}")
+    idle = wait_for_subscription_idle(cdp)
+    if QuietHandler.request_count(slow_path) - before_batch != 1:
+        raise AssertionError("batch subscription double click issued more than one request")
+    if idle["operationError"]:
+        raise AssertionError(f"successful batch update left a local error: {idle}")
+
+    navigate_hash(cdp, "settings")
+    select_settings_section(cdp, 0)
+    switch_to_chinese(cdp)
+    return navigate_hash(cdp, "subscriptions")
 
 
 def click_add_subscription(cdp: CDP) -> dict[str, Any]:
@@ -1177,6 +1434,114 @@ def install_and_run_plugin(cdp: CDP, plugin_title: str) -> str:
     )
 
 
+def assert_only_selected_plugin_installed(cdp: CDP, expected_plugin_id: str) -> None:
+    state = cdp.evaluate(
+        """
+        (() => {
+          const snapshot = JSON.parse(localStorage.getItem('tachyon.prism.plugins.v1') || '{}');
+          return {
+            installed: Object.entries(snapshot)
+              .filter(([, value]) => Boolean(value?.installed))
+              .map(([id]) => id),
+            enabled: Object.entries(snapshot)
+              .filter(([, value]) => Boolean(value?.installed && value?.enabled))
+              .map(([id]) => id)
+          };
+        })()
+        """,
+    )
+    if state["installed"] != [expected_plugin_id] or state["enabled"] != [expected_plugin_id]:
+        raise AssertionError(f"plugin catalog installed more than the selected plugin: {state}")
+
+
+def assert_focus_visible(cdp: CDP) -> None:
+    state = cdp.evaluate(
+        """
+        (() => {
+          const button = document.querySelector('.top-nav-item');
+          if (!button) throw new Error('focus target missing');
+          button.focus();
+          const style = getComputedStyle(button);
+          return {
+            focused: document.activeElement === button,
+            focusVisible: button.matches(':focus-visible'),
+            outlineStyle: style.outlineStyle,
+            outlineWidth: style.outlineWidth
+          };
+        })()
+        """,
+    )
+    if not state["focused"] or not state["focusVisible"]:
+        raise AssertionError(f"keyboard focus is not visible: {state}")
+    if state["outlineStyle"] == "none" or state["outlineWidth"] in {"0px", ""}:
+        raise AssertionError(f"focus-visible outline is missing: {state}")
+
+
+def assert_appearance_persistence(cdp: CDP) -> str:
+    state = cdp.evaluate(
+        """
+        new Promise((resolve) => {
+          const clickSecond = (selector) => {
+            const button = document.querySelector(`${selector} button:nth-child(2)`);
+            if (!button) throw new Error('appearance button missing: ' + selector);
+            button.click();
+          };
+          clickSecond('[data-testid="theme-setting"]');
+          clickSecond('[data-testid="density-setting"]');
+          clickSecond('[data-testid="motion-setting"]');
+          setTimeout(() => resolve({
+            theme: document.documentElement.dataset.theme,
+            density: document.documentElement.dataset.density,
+            motion: document.documentElement.dataset.motion
+          }), 250);
+        })
+        """,
+        await_promise=True,
+    )
+    if state != {"theme": "contrast", "density": "compact", "motion": "off"}:
+        raise AssertionError(f"appearance controls did not apply: {state}")
+
+    cdp.call("Page.reload", {"ignoreCache": True})
+    text = wait_for_shell(cdp)
+    persisted = cdp.evaluate(
+        """
+        (() => ({
+          theme: document.documentElement.dataset.theme,
+          density: document.documentElement.dataset.density,
+          motion: document.documentElement.dataset.motion,
+          stored: JSON.parse(localStorage.getItem('tachyon.prism.appearance.v1') || '{}'),
+          activeTheme: document.querySelector('[data-testid="theme-setting"] button.active')?.textContent?.trim() ?? '',
+          activeDensity: document.querySelector('[data-testid="density-setting"] button.active')?.textContent?.trim() ?? '',
+          activeMotion: document.querySelector('[data-testid="motion-setting"] button.active')?.textContent?.trim() ?? ''
+        }))()
+        """,
+    )
+    expected = {"density": "compact", "motion": False, "theme": "contrast"}
+    if persisted["stored"] != expected:
+        raise AssertionError(f"appearance preferences were not persisted: {persisted}")
+    if (persisted["theme"], persisted["density"], persisted["motion"]) != ("contrast", "compact", "off"):
+        raise AssertionError(f"appearance dataset was not restored: {persisted}")
+    if (persisted["activeTheme"], persisted["activeDensity"], persisted["activeMotion"]) != (
+        "High Contrast",
+        "Compact",
+        "Off",
+    ):
+        raise AssertionError(f"appearance controls did not restore their active state: {persisted}")
+    return str(
+        cdp.evaluate(
+            """
+            new Promise((resolve) => {
+              document.querySelector('[data-testid="theme-setting"] button:first-child')?.click();
+              document.querySelector('[data-testid="density-setting"] button:first-child')?.click();
+              document.querySelector('[data-testid="motion-setting"] button:first-child')?.click();
+              setTimeout(() => resolve(document.body.innerText), 250);
+            })
+            """,
+            await_promise=True,
+        ),
+    )
+
+
 def run(edge_path: Path, port: int, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     server = start_server(port)
@@ -1199,7 +1564,6 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
                 "--disable-extensions",
                 "--disable-gpu",
                 "--disable-gpu-sandbox",
-                "--hide-scrollbars",
                 "--no-default-browser-check",
                 "--no-first-run",
                 "--no-sandbox",
@@ -1231,6 +1595,8 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         assert_desktop_viewport(cdp)
         assert_custom_window_chrome(cdp)
         assert_desktop_interaction_polish(cdp)
+        assert_focus_visible(cdp)
+        inject_dual_core_traffic(cdp)
         assert_dual_core_chart(cdp)
         cdp.screenshot(output_dir / "overview-desktop.png")
         text = open_and_close_controller(cdp)
@@ -1243,15 +1609,8 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         add_state = click_add_subscription(cdp)
         if add_state["activeTag"] != "INPUT":
             raise AssertionError(f"add subscription did not focus the form: {add_state}")
-        text = update_subscription_url(
-            cdp,
-            "Smoke URL",
-            f"http://127.0.0.1:{port}/smoke-subscription",
-        )
+        text = assert_subscription_interaction_contract(cdp, port)
         assert_contains(text, "Smoke URL", "Smoke URL VLESS", "Smoke URL Trojan")
-        text = update_all_subscriptions(cdp)
-        assert_contains_any(text, "1 subscriptions updated", "1 个订阅已更新")
-        assert_contains(text, "Smoke URL VLESS", "Smoke URL Trojan")
         text = import_sample_subscription(cdp)
         assert_contains(text, "Smoke", "Smoke VLESS", "Smoke Trojan", "Smoke Hysteria")
         text = import_clash_subscription(cdp)
@@ -1299,10 +1658,27 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         cdp.screenshot(output_dir / "routing-modes-desktop.png")
 
         text = navigate_hash(cdp, "plugins")
+        catalog = cdp.evaluate(
+            """
+            new Promise((resolve) => {
+              document.querySelector('[data-testid="open-plugin-catalog"]')?.click();
+              setTimeout(() => resolve({
+                open: Boolean(document.querySelector('[data-testid="plugin-catalog"]')),
+                installButtons: Array.from(document.querySelectorAll('[data-testid="plugin-catalog"] button'))
+                  .filter((button) => !button.disabled).length
+              }), 200);
+            })
+            """,
+            await_promise=True,
+        )
+        if not catalog["open"] or catalog["installButtons"] < 2:
+            raise AssertionError(f"plugin catalog did not open as a selective installer: {catalog}")
+        cdp.evaluate("document.querySelector('[data-testid=\"open-plugin-catalog\"]')?.click()")
         assert_contains(text, "插件中心", "滚动发行", "节点转换")
         assert_no_runtime_error(text)
         text = install_and_run_plugin(cdp, "节点智能切换")
         assert_contains(text, "已启用", "运行次数: 1", "->")
+        assert_only_selected_plugin_installed(cdp, "smart-node-switch")
         assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "plugins-desktop.png")
         capture_fixed_window_pages(cdp, output_dir, "zh-CN")
@@ -1323,6 +1699,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
             "Preview mode / Xray Core",
             "Resolved tag",
         )
+        assert_visible_custom_scrollbar(cdp)
         cdp.evaluate(
             """
             new Promise((resolve) => {
@@ -1346,6 +1723,8 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         cdp.screenshot(output_dir / "settings-xray-json-editor-800x540-zh-CN.png")
         text = select_settings_section(cdp, 0)
         text = switch_to_english(cdp)
+        assert_contains(text, "General Settings", "Language")
+        text = assert_appearance_persistence(cdp)
         assert_contains(text, "General Settings", "Language")
         assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "settings-desktop-en.png")
@@ -1432,13 +1811,14 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
             "TGP Multipath",
             "Xray SOCKS",
             "Xray Stats API",
-            "TUN Privilege",
             "Tachyon IPC",
             "Tachyon gRPC",
             "TUN",
             "Telemetry",
             "Validate Configs",
         )
+        if not cdp.evaluate("Boolean(document.querySelector('[data-testid=\"runtime-row-tun-privilege\"]'))"):
+            raise AssertionError("stable TUN privilege runtime row is missing")
         core_summary = core_config_summary(cdp)
         if core_summary != {
             "serverAddr": "game.example.com:443",

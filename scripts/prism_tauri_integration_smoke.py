@@ -871,11 +871,11 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
                 "resizableFrameAbsent": thickframe_absent,
                 "note": "Recorded as native integration evidence; DOM custom-chrome assertions are authoritative.",
             }
-            if not caption_absent or not thickframe_absent:
-                context.log(
-                    f"WINDOW STYLE OBSERVATION style={style:#x} "
-                    f"captionAbsent={caption_absent} thickframeAbsent={thickframe_absent}"
-                )
+            assert_true(caption_absent, f"native WS_CAPTION is still present: style={style:#x}")
+            assert_true(
+                thickframe_absent,
+                f"native WS_THICKFRAME is still present: style={style:#x}",
+            )
             context.result["ui"].update(
                 zh800x540=True,
                 en800x540=True,

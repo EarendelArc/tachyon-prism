@@ -14,6 +14,7 @@ import {
   totalSubscriptionNodes,
   xrayConfigTemplateForNode,
   xrayOutboundCompatibilityForNode,
+  SubscriptionError,
 } from "../subscriptions";
 import type { ProxyNode } from "../subscriptions";
 import {
@@ -70,9 +71,10 @@ describe("fetchSubscriptionText", () => {
     const fetchMock = vi.fn();
     globalThis.fetch = fetchMock as typeof fetch;
 
-    await expect(fetchSubscriptionText("https://example.com/sub")).rejects.toThrow(
-      "request failed: 502",
-    );
+    await expect(fetchSubscriptionText("https://example.com/sub")).rejects.toMatchObject({
+      code: "fetch-failed",
+      detail: "request failed: 502",
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
@@ -1030,6 +1032,17 @@ describe("createSubscriptionSnapshot", () => {
     expect(activeSubscription(removed)?.name).toBe("Beta");
   });
 
+  it("uses stable codes for missing subscription selections", () => {
+    const snapshot = createSubscriptionSnapshot("https://example.com/a", nodes, undefined, "Alpha");
+    try {
+      selectSubscription(snapshot, "missing");
+      throw new Error("expected selection to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(SubscriptionError);
+      expect(error).toMatchObject({ code: "subscription-missing" });
+    }
+  });
+
   it("uses name and URL as the profile identity and updates that exact pair", () => {
     const first = createSubscriptionSnapshot(
       "https://example.com/shared",
@@ -1082,9 +1095,13 @@ describe("selectSubscriptionNode", () => {
 
   it("throws for a non-existent node", () => {
     const snapshot = createSubscriptionSnapshot("url", nodes);
-    expect(() => selectSubscriptionNode(snapshot, "nonexistent")).toThrow(
-      "Selected node no longer exists",
-    );
+    try {
+      selectSubscriptionNode(snapshot, "nonexistent");
+      throw new Error("expected node selection to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(SubscriptionError);
+      expect(error).toMatchObject({ code: "node-missing" });
+    }
   });
 
   it("keeps the active subscription when node IDs exist in multiple profiles", () => {

@@ -141,6 +141,40 @@ textarea:focus {
   box-shadow: 0 0 0 3px rgba(0, 120, 255, 0.18);
 }
 
+button:focus-visible,
+a:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid #5eb1ff;
+  outline-offset: 2px;
+}
+
+input[aria-invalid="true"],
+textarea[aria-invalid="true"] {
+  border-color: #ff6259;
+}
+
+.form-error {
+  color: #ff8179;
+  font-size: 12px;
+  line-height: 1.35;
+  margin: 0;
+}
+
+.field-error {
+  color: #ff8179;
+  font-size: 11px;
+  line-height: 1.3;
+  margin: -3px 0 0;
+}
+
+.subscription-operation-feedback {
+  background: rgba(255, 98, 89, 0.1);
+  border: 1px solid rgba(255, 98, 89, 0.28);
+  border-radius: 6px;
+  margin: -2px 0 10px;
+  padding: 7px 10px;
+}
+
 textarea {
   min-height: 82px;
   resize: vertical;
@@ -1615,6 +1649,78 @@ p,
   display: grid;
   gap: 10px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.plugin-catalog {
+  background: rgba(14, 17, 19, 0.98);
+  border: 1px solid rgba(0, 120, 255, 0.36);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 12px;
+}
+
+.plugin-catalog header p {
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 12px;
+  margin: 3px 0 0;
+}
+
+.plugin-catalog-list {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.plugin-catalog-list > div {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.045);
+  border-radius: 6px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 8px;
+}
+
+.plugin-catalog-list span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.plugin-catalog-list small {
+  color: rgba(255, 255, 255, 0.56);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root[data-theme="contrast"] .prism-shell {
+  background: #000;
+  border-color: rgba(255, 255, 255, 0.44);
+}
+
+:root[data-theme="contrast"] button,
+:root[data-theme="contrast"] input,
+:root[data-theme="contrast"] textarea,
+:root[data-theme="contrast"] select {
+  border-color: rgba(255, 255, 255, 0.32);
+}
+
+:root[data-density="compact"] .settings-card,
+:root[data-density="compact"] .plugin-rich-card,
+:root[data-density="compact"] .subscription-card {
+  padding: 9px;
+}
+
+:root[data-motion="off"] *,
+:root[data-motion="off"] *::before,
+:root[data-motion="off"] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  scroll-behavior: auto !important;
+  transition-duration: 0.001ms !important;
 }
 
 .plugin-rich-card {

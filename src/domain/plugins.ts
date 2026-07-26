@@ -1,5 +1,12 @@
 export type PluginRunStatus = "error" | "idle" | "ok";
 
+export class PluginStateError extends Error {
+  constructor(public readonly code: "not-runnable") {
+    super("Plugin must be installed and enabled before running");
+    this.name = "PluginStateError";
+  }
+}
+
 export interface PluginRuntimeState {
   enabled: boolean;
   installed: boolean;
@@ -105,7 +112,7 @@ export function recordPluginRun(
 ): PluginStateSnapshot {
   const current = snapshot[pluginId] ?? emptyPluginState();
   if (!current.installed || !current.enabled) {
-    throw new Error("Plugin must be installed and enabled before running");
+    throw new PluginStateError("not-runnable");
   }
   const options = nowOrOptions instanceof Date ? { now: nowOrOptions } : nowOrOptions;
   const now = options.now ?? new Date();

@@ -36,10 +36,18 @@ public static class PrismNativeSmokeWin32 {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
   [DllImport("user32.dll")] public static extern bool GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int index);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] private static extern int GetWindowLong32(IntPtr hWnd, int index);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int command);
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+
+  public static long WindowLong(IntPtr hWnd, int index) {
+    return IntPtr.Size == 8 ? GetWindowLongPtr64(hWnd, index).ToInt64() : GetWindowLong32(hWnd, index);
+  }
 
   public static List<IntPtr> VisibleWindowsForProcess(uint targetPid) {
     List<IntPtr> windows = new List<IntPtr>();
@@ -94,12 +102,15 @@ function Wait-ForMainWindow {
   $stableCount = 0
   while ((Get-Date) -lt $deadline) {
     $Process.Refresh()
+    if ($Process.HasExited) {
+      throw "Prism exited before its main window appeared: exit=$($Process.ExitCode)"
+    }
     $candidateHandles = @([PrismNativeSmokeWin32]::VisibleWindowsForProcess([uint32]$Process.Id))
     if ($Process.MainWindowHandle -ne 0) {
       $candidateHandles = @($Process.MainWindowHandle) + $candidateHandles
     }
     foreach ($candidate in $candidateHandles) {
-      if ($candidate -eq 0) {
+      if ($null -eq $candidate -or $candidate -eq 0) {
         continue
       }
       $rect = Get-RectObject -Handle $candidate
@@ -120,9 +131,30 @@ function Wait-ForMainWindow {
   throw "Prism main window did not appear within $TimeoutSeconds seconds"
 }
 
+function Invoke-WindowClick {
+  param(
+    [int]$X,
+    [int]$Y
+  )
+  [PrismNativeSmokeWin32]::SetCursorPos($X, $Y) | Out-Null
+  Start-Sleep -Milliseconds 100
+  [PrismNativeSmokeWin32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 80
+  [PrismNativeSmokeWin32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 500
+}
+
 $mouseDown = 0x0002
 $mouseUp = 0x0004
-$process = Start-Process -FilePath $Executable -PassThru
+$gwlStyle = -16
+$gwlExStyle = -20
+$wsCaption = 0x00C00000
+$wsThickFrame = 0x00040000
+$wsExTopmost = 0x00000008
+$swRestore = 9
+$startInfo = [System.Diagnostics.ProcessStartInfo]::new($Executable)
+$startInfo.UseShellExecute = $false
+$process = [System.Diagnostics.Process]::Start($startInfo)
 
 try {
   $hwnd = Wait-ForMainWindow -Process $process
@@ -142,9 +174,16 @@ try {
     }
   })
   $before = Get-RectObject -Handle $hwnd
+  $style = [PrismNativeSmokeWin32]::WindowLong($hwnd, $gwlStyle)
 
   if ($before.width -lt 780 -or $before.height -lt 520) {
     throw "Unexpected Prism window size: $($before.width)x$($before.height)"
+  }
+  if (($style -band $wsCaption) -ne 0) {
+    throw ("Native WS_CAPTION is still present: style=0x{0:X}" -f $style)
+  }
+  if (($style -band $wsThickFrame) -ne 0) {
+    throw ("Native WS_THICKFRAME is still present: style=0x{0:X}" -f $style)
   }
   $consoleWindows = @($windowInfos | Where-Object { $_.className -eq "ConsoleWindowClass" })
   if ($consoleWindows.Count -gt 0) {
@@ -173,9 +212,36 @@ try {
     throw "Window did not move enough after titlebar drag: dx=$deltaX dy=$deltaY"
   }
 
-  [pscustomobject]@{
+  $controlY = $after.top + 24
+  $pinX = $after.right - 143
+  $minimizeX = $after.right - 106
+  $closeX = $after.right - 32
+
+  Invoke-WindowClick -X $pinX -Y $controlY
+  $topmostEnabled = ([PrismNativeSmokeWin32]::WindowLong($hwnd, $gwlExStyle) -band $wsExTopmost) -ne 0
+  if (-not $topmostEnabled) {
+    throw "Custom pin control did not enable WS_EX_TOPMOST"
+  }
+  Invoke-WindowClick -X $pinX -Y $controlY
+  $topmostDisabled = ([PrismNativeSmokeWin32]::WindowLong($hwnd, $gwlExStyle) -band $wsExTopmost) -eq 0
+  if (-not $topmostDisabled) {
+    throw "Custom pin control did not disable WS_EX_TOPMOST"
+  }
+
+  Invoke-WindowClick -X $minimizeX -Y $controlY
+  if (-not [PrismNativeSmokeWin32]::IsIconic($hwnd)) {
+    throw "Custom minimize control did not minimize the window"
+  }
+  [PrismNativeSmokeWin32]::ShowWindow($hwnd, $swRestore) | Out-Null
+  [PrismNativeSmokeWin32]::SetForegroundWindow($hwnd) | Out-Null
+  Start-Sleep -Milliseconds 500
+
+  $result = [pscustomobject]@{
     executable = $Executable
     pid = $process.Id
+    style = ("0x{0:X}" -f $style)
+    nativeCaptionAbsent = $true
+    nativeThickFrameAbsent = $true
     visibleWindowCount = $visibleWindows.Count
     windows = $windowInfos
     before = $before
@@ -183,7 +249,18 @@ try {
     deltaX = $deltaX
     deltaY = $deltaY
     titlebarDragWorks = $true
-  } | ConvertTo-Json -Depth 5
+    pinControlWorks = $true
+    minimizeControlWorks = $true
+    closeControlWorks = $false
+  }
+
+  $restored = Get-RectObject -Handle $hwnd
+  Invoke-WindowClick -X ($restored.right - 32) -Y ($restored.top + 24)
+  if (-not $process.WaitForExit(5000)) {
+    throw "Custom close control did not close Prism"
+  }
+  $result.closeControlWorks = $true
+  $result | ConvertTo-Json -Depth 5
 }
 finally {
   if ($process -and -not $process.HasExited) {
