@@ -2,7 +2,10 @@
 
 [中文说明](development.zh-CN.md)
 
-Tachyon Prism uses `mise` for Node and Rust version management.
+## Toolchain
+
+Tachyon Prism uses `mise` for the repository-pinned Node.js and Rust toolchains.
+Install the pinned tools and dependencies before running the baseline checks:
 
 ```bash
 mise install
@@ -12,41 +15,119 @@ npm test
 npm run test:core-contract
 ```
 
-`npm test` excludes every `*.live.test.ts` file. The Core live contract runs
-only through `npm run test:core-contract`, requires the pinned Core source, and
-is executed by CI/Release on Linux, macOS, and Windows. It does not enable TUN:
-Linux/macOS assert the real Core process rejects non-empty selective routes
-before the `TUN device ready` point, while Windows parses `go test -json` and
-requires every named in-memory route simulation to emit its own run/pass events.
+Toolchain and dependency upgrades must be intentional, update the relevant lock
+files, and pass the complete local and CI test matrix. Do not infer support from
+a successful build on only the development host.
 
-The UI should stay decoupled from packet routing. Prism calls Core IPC APIs and
-renders state; it does not implement routing decisions locally.
+## Core contract
 
-## Cargo Registry
+`npm test` excludes every `*.live.test.ts` file. Run the cross-repository Core
+contract explicitly with `npm run test:core-contract`. CI and Release execute it
+on Linux, macOS, and Windows against the exact source pin in
+[`core-contract.json`](../core-contract.json).
 
-Prism uses a project-local Cargo source replacement in `.cargo/config.toml`.
-The default crates.io source is replaced with the RSProxy sparse registry mirror
-to improve dependency fetch reliability in mainland China.
+The audited pin is the annotated Tachyon Core tag `v0.1.0-alpha.22`, tag object
+`65f57643ae5644233033c3a3a7332290ff1ceeb6`, peeled to commit
+`80d9fb742c025387c1f036da846fc663ed8a7067`. An unavailable ref, a tag-object
+mismatch, or a peeled-commit mismatch is a hard failure.
 
-This setting is intentionally local to the repository and does not modify the
-user's global Cargo configuration.
+The contract does not enable TUN. Linux and macOS assert that the real Core
+process rejects non-empty selective routes before reporting `TUN device ready`.
+Windows parses `go test -json` and requires every named in-memory route test to
+emit its own run and pass events. These checks prove the pinned configuration
+and route contract, not live packet capture or real game acceleration.
 
-Node and Rust versions should track the latest official stable releases after
-checking the Node.js and Rust release pages. Direct npm and Cargo dependencies
-should be refreshed from their registry `latest` stable versions before release
-builds.
+Prism owns orchestration and presentation. Tachyon Core owns TGP transport; Xray
+owns ordinary proxy transport. The renderer must not implement packet-routing
+decisions.
 
-## Release Builds
+## Desktop UI gates
 
-Prism release artifacts are built by `.github/workflows/release.yml` on `v*`
-tags or manual workflow dispatch. The workflow runs frontend and Rust tests
-first, then builds Tauri bundles for Windows x64, Windows ARM64, macOS x64,
-macOS ARM64, Linux x64, and Linux ARM64.
+`npm run test:ui` builds the renderer in the dedicated `ui-smoke` mode and runs
+an isolated 800x540 Edge smoke test. It checks localized subscription states,
+selective plugin installation, visible custom scrolling, persisted appearance
+controls, four non-zero traffic series, and migration/reload behavior.
 
-The generated artifacts are uploaded to the GitHub release together with
-`SHA256SUMS.txt` and reproducible source metadata. The cross-repository test uses
-the exact Tachyon Core release pin in `core-contract.json`; it fails when that
-source/ref is unavailable instead of skipping validation. The current contract
-is the annotated `v0.1.0-alpha.21` tag object
-`26ac54b682c7d0e3a65f8a35662c6d7f11724001`, peeled to commit
-`12df9c561a921bed7fc5f63a2ea166e7227d773f`.
+Production secure storage depends on an operating-system credential service,
+which is intentionally unavailable to the browser-only smoke harness. Only the
+`ui-smoke` build substitutes a local test vault. The harness verifies migration
+semantics through that substitute; it does not prove the production keyring or
+encrypted file implementation. Rust vault tests cover the production backend.
+
+On Windows, `npm run test:native-window` launches an existing packaged Prism
+executable and treats the Win32 window style as a hard gate. It rejects
+`WS_CAPTION`, `WS_THICKFRAME`, and visible console windows, and exercises title
+bar dragging and custom window controls. The command does not build the binary
+and does not enable the system proxy or TUN.
+
+Neither desktop gate substitutes for isolated system-proxy, TUN, or real-server
+end-to-end testing.
+
+## Security-sensitive development
+
+See the [security model](security.md) for the authoritative boundary and threat
+model. Changes in the areas below require matching negative tests and bilingual
+documentation.
+
+### Runtime ownership
+
+The managed Xray process exclusively owns the system-proxy transaction.
+Tachyon Core start, stop, or failure must not alter it. Before Xray is stopped,
+Prism restores the previous proxy snapshot; if restoration fails, shutdown is
+blocked and Xray is kept running so the proxy does not point to a dead local
+port. Tachyon Core diagnostics must pass through the same bounded secret
+redaction boundary as Xray diagnostics.
+
+### Subscription boundary
+
+The Rust backend performs subscription downloads. It accepts credential-free
+HTTP(S) URLs, independently resolves and validates every redirect hop, binds
+the approved addresses to the actual connection, rejects HTTPS downgrade, and
+blocks cloud metadata and other special-use targets. Private and local
+subscription endpoints are not enabled in the current product policy. Do not
+move subscription fetching into renderer `fetch` or weaken the per-hop checks.
+
+### Renderer boundary
+
+The packaged renderer CSP permits application resources and Tauri IPC only;
+arbitrary remote HTTP(S), frames, forms, objects, and `unsafe-eval` are blocked.
+Tachyon telemetry is polled by the Rust backend and delivered through Tauri IPC,
+so renderer code must not add direct loopback network access.
+
+### Encrypted vault
+
+Subscription URLs and nodes, complete Xray outbound data, advanced Xray JSON,
+Tachyon server profiles, and TGP PSKs belong in the encrypted vault, never in
+WebView `localStorage`. The backend stores a random 256-bit master key in the OS
+credential service and encrypts the versioned vault with XChaCha20-Poly1305,
+fresh nonces, associated data, atomic replacement, restricted file permissions,
+and decrypt-and-compare verification. Missing credentials or failed
+verification must fail closed without a plaintext fallback.
+
+Legacy values are deleted only after a successful verified migration. Runtime
+configuration files still exist temporarily for the two cores and must use the
+protected-file writer. Non-sensitive UI preferences may remain in
+`localStorage`.
+
+## Cargo registry
+
+Prism uses a repository-local Cargo source replacement in
+`.cargo/config.toml`. It replaces crates.io with the RSProxy sparse registry to
+improve dependency fetch reliability in mainland China. This setting does not
+modify the user's global Cargo configuration.
+
+## Release builds
+
+The release workflow is defined in `.github/workflows/release.yml`; see the
+[release guide](releasing.md) for the complete governance and verification
+contract. It tests the frontend, Rust backend, and pinned Core contract before
+building Windows x64/ARM64, macOS x64/ARM64, and Linux x64/ARM64 bundles.
+
+Publication is fail-closed. It requires an annotated tag, immutable releases,
+an active protected `refs/tags/v*` ruleset with no bypass actors, bilingual
+release notes, reproducible source metadata, and exact remote digest checks.
+The final release contract is exactly seven installers plus
+`RELEASE_NOTES.md`, `RELEASE_NOTES.zh-CN.md`, `BUILD_METADATA.json`, and
+`SHA256SUMS.txt` (11 assets total, with 10 manifest entries). This deterministic
+staging contract is not a claim that installer bytes are reproducible across
+different signing or packaging environments.
