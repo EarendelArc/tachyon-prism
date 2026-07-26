@@ -24,9 +24,9 @@ tag ruleset，禁止 update、deletion 和 non-fast-forward，且不得配置 by
 `core-contract.json` 固定 `EarendelArc/tachyon-core` 的 annotated release tag、完整 tag
 object 和 peeled commit。当前契约为：
 
-- tag：`v0.1.0-alpha.21`
-- tag object：`26ac54b682c7d0e3a65f8a35662c6d7f11724001`
-- commit：`12df9c561a921bed7fc5f63a2ea166e7227d773f`
+- tag：`v0.1.0-alpha.22`
+- tag object：`65f57643ae5644233033c3a3a7332290ff1ceeb6`
+- commit：`80d9fb742c025387c1f036da846fc663ed8a7067`
 
 CI 与 Release 在 Linux、macOS 和 Windows 上检出该精确提交并验证 tag peel。真实契约测试
 使用 Prism 生产配置生成器构造 `client.json`，验证合法配置，并注入 `not-a-cidr`，要求

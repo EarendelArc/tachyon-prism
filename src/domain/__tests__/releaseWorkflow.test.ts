@@ -221,10 +221,10 @@ describe("release workflow checksum assets", () => {
     };
     const workflows = [readFileSync(ciWorkflowPath, "utf8"), readReleaseWorkflow()];
 
-    expect(contract.tag).toBe("v0.1.0-alpha.21");
+    expect(contract.tag).toBe("v0.1.0-alpha.22");
     expect(contract.repository).toBe("EarendelArc/tachyon-core");
-    expect(contract.tag_object).toBe("26ac54b682c7d0e3a65f8a35662c6d7f11724001");
-    expect(contract.commit).toBe("12df9c561a921bed7fc5f63a2ea166e7227d773f");
+    expect(contract.tag_object).toBe("65f57643ae5644233033c3a3a7332290ff1ceeb6");
+    expect(contract.commit).toBe("80d9fb742c025387c1f036da846fc663ed8a7067");
     for (const workflow of workflows) {
       expect(workflow).toContain(`repository: ${contract.repository}`);
       expect(workflow).toContain(`ref: ${contract.commit}`);

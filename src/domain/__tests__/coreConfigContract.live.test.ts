@@ -24,6 +24,7 @@ const sourceRepositoryDir = process.env.TACHYON_CORE_SOURCE_DIR?.trim()
 const contract = JSON.parse(
   readFileSync(resolve(process.cwd(), "core-contract.json"), "utf8"),
 ) as CoreContract;
+const expectedRuntimeVersion = "tachyon-core v0.1.0-alpha.22";
 const windowsSimulationTests = [
   "TestParseGameRoutePrefixesNormalizesHostBits",
   "TestPlanSelectiveRoutesNormalizesAndDeduplicates",
@@ -77,7 +78,7 @@ describe("pinned Tachyon Core release contract", () => {
 
   beforeAll(() => {
     expect(contract.repository).toBe("EarendelArc/tachyon-core");
-    expect(contract.tag).toBe("v0.1.0-alpha.21");
+    expect(contract.tag).toBe("v0.1.0-alpha.22");
     expect(contract.commit).toMatch(/^[0-9a-f]{40}$/);
     expect(contract.tag_object).toMatch(/^[0-9a-f]{40}$/);
     if (!existsSync(join(sourceRepositoryDir, ".git"))) {
@@ -140,7 +141,8 @@ describe("pinned Tachyon Core release contract", () => {
       encoding: "utf8",
       timeout: 8_000,
     });
-    expect(version).toContain(`tachyon-core ${contract.tag}`);
+    expect(version.split(" (built ", 1)[0]).toBe(expectedRuntimeVersion);
+    expect(expectedRuntimeVersion).toBe(`tachyon-core ${contract.tag}`);
   });
 
   it("validates a real Prism draft and rejects an injected invalid game route", () => {

@@ -35,9 +35,9 @@ check is defense in depth, not a replacement for an immutable-tag policy.
 
 `core-contract.json` pins the paired `EarendelArc/tachyon-core` repository, annotated release
 tag, full tag-object ID, and peeled commit. The current pin is
-`v0.1.0-alpha.21`, tag object
-`26ac54b682c7d0e3a65f8a35662c6d7f11724001`, peeled commit
-`12df9c561a921bed7fc5f63a2ea166e7227d773f`. CI and Release check out that exact
+`v0.1.0-alpha.22`, tag object
+`65f57643ae5644233033c3a3a7332290ff1ceeb6`, peeled commit
+`80d9fb742c025387c1f036da846fc663ed8a7067`. CI and Release check out that exact
 commit with full tag history and verify the annotated tag peel; a missing or
 changed repository/ref fails the job.
 

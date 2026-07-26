@@ -152,7 +152,7 @@ jobs:
         uses: actions/checkout@v6.0.3
         with:
           repository: EarendelArc/tachyon-core
-          ref: 12df9c561a921bed7fc5f63a2ea166e7227d773f
+          ref: 80d9fb742c025387c1f036da846fc663ed8a7067
           path: tachyon-core
           fetch-depth: 0
 
