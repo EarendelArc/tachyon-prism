@@ -6,10 +6,20 @@
 
 - Windows 10/11, macOS 13+, or Linux
 - A proxy subscription, individual share links, or full Xray outbound/config JSON
+- Linux requires a running freedesktop.org Secret Service provider, such as
+  GNOME Keyring or a KWallet installation that exposes the Secret Service API.
 
 ## 1. Install Tachyon Prism
 
 Download the latest Prism release for your platform from the GitHub releases page, then run the installer.
+
+Windows Credential Manager and macOS Keychain are provided by the operating
+system. On Linux, start or install a Secret Service provider before launching
+Prism. Desktop environments such as GNOME commonly start one automatically;
+minimal window-manager and headless sessions may need `gnome-keyring-daemon` or
+an equivalent provider. Prism deliberately fails closed when the credential
+service is unavailable: subscription and other sensitive settings are not
+persisted as plaintext.
 
 ## 2. Import a subscription
 

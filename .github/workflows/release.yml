@@ -260,7 +260,63 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y dbus-x11 gnome-keyring libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Credential Manager round trip (Windows)
+        if: matrix.asset_name == 'windows-x64'
+        shell: pwsh
+        env:
+          TACHYON_PRISM_SYSTEM_KEYRING_LIVE: "1"
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --features system-keyring-live-test --test system_keyring_live system_keyring_round_trip -- --ignored --exact
+
+      - name: Keychain round trip in temporary keychain (macOS)
+        if: matrix.asset_name == 'macos-arm64'
+        shell: bash
+        env:
+          TACHYON_PRISM_SYSTEM_KEYRING_LIVE: "1"
+        run: |
+          set -euo pipefail
+          keychain_path="${RUNNER_TEMP}/tachyon-prism-keyring-live.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          original_default="$(security default-keychain -d user | sed -E 's/^[[:space:]]*"(.*)"[[:space:]]*$/\1/')"
+          original_keychains="${RUNNER_TEMP}/tachyon-prism-original-keychains.txt"
+          security list-keychains -d user > "${original_keychains}"
+          echo "::add-mask::${keychain_password}"
+
+          cleanup() {
+            python3 -c 'import pathlib, shlex, subprocess, sys; subprocess.run(["security", "list-keychains", "-d", "user", "-s", *shlex.split(pathlib.Path(sys.argv[1]).read_text())], check=True)' "${original_keychains}" || true
+            [[ -z "${original_default}" ]] || security default-keychain -d user -s "${original_default}" || true
+            security delete-keychain "${keychain_path}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -t 3600 -u "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          security list-keychains -d user -s "${keychain_path}"
+          security default-keychain -d user -s "${keychain_path}"
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --features system-keyring-live-test --test system_keyring_live system_keyring_round_trip -- --ignored --exact
+
+      - name: Secret Service round trip in isolated D-Bus session (Linux)
+        if: matrix.asset_name == 'linux-x64'
+        shell: bash
+        env:
+          TACHYON_PRISM_SYSTEM_KEYRING_LIVE: "1"
+        run: |
+          set -euo pipefail
+          export LIVE_KEYRING_HOME="${RUNNER_TEMP}/tachyon-prism-keyring-live-home"
+          export LIVE_KEYRING_PASSWORD="$(openssl rand -hex 24)"
+          echo "::add-mask::${LIVE_KEYRING_PASSWORD}"
+          mkdir -p "${LIVE_KEYRING_HOME}"
+          chmod 700 "${LIVE_KEYRING_HOME}"
+          dbus-run-session -- bash -euo pipefail -c '
+            export HOME="${LIVE_KEYRING_HOME}"
+            export XDG_DATA_HOME="${HOME}/.local/share"
+            mkdir -p "${XDG_DATA_HOME}/keyrings"
+            chmod 700 "${XDG_DATA_HOME}" "${XDG_DATA_HOME}/keyrings"
+            eval "$(printf "%s" "${LIVE_KEYRING_PASSWORD}" | gnome-keyring-daemon --unlock --components=secrets)"
+            cargo test --locked --manifest-path src-tauri/Cargo.toml --features system-keyring-live-test --test system_keyring_live system_keyring_round_trip -- --ignored --exact
+          '
 
       - name: Install frontend dependencies
         run: npm ci

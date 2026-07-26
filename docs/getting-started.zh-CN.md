@@ -6,10 +6,17 @@
 
 - Windows 10/11、macOS 13+ 或 Linux
 - 一个代理订阅、单独分享链接，或完整 Xray outbound/config JSON
+- Linux 需要正在运行的 freedesktop.org Secret Service 提供程序，例如 GNOME Keyring，
+  或提供 Secret Service API 的 KWallet 环境。
 
 ## 1. 安装 Tachyon Prism
 
 从 GitHub Releases 下载适合当前平台的 Prism 安装包，然后运行安装程序。
+
+Windows Credential Manager 与 macOS Keychain 由操作系统提供。Linux 用户需要在启动
+Prism 前安装并启动 Secret Service 提供程序；GNOME 等桌面环境通常会自动启动，精简窗口
+管理器或无头会话可能需要自行启动 `gnome-keyring-daemon` 或等价服务。凭据服务不可用时，
+Prism 会按设计 fail-closed：订阅及其他敏感设置不会降级为明文持久化。
 
 ## 2. 导入订阅
 

@@ -95,6 +95,109 @@ jobs:
           TACHYON_CORE_SOURCE_DIR: ${{ github.workspace }}/tachyon-core
         run: npm run test:core-contract
 
+  system-keyring-live:
+    name: System keyring (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+          - platform: macos
+            os: macos-15
+          - platform: linux
+            os: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.3
+
+      - name: Use crates.io on GitHub Actions
+        working-directory: .
+        shell: bash
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [registries.crates-io]
+          protocol = "sparse"
+
+          [net]
+          git-fetch-with-cli = true
+          EOF
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.96.1
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install keyring test dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dbus-x11 gnome-keyring libayatana-appindicator3-dev libwebkit2gtk-4.1-dev librsvg2-dev
+
+      - name: Credential Manager round trip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TACHYON_PRISM_SYSTEM_KEYRING_LIVE: "1"
+        run: cargo test --locked --features system-keyring-live-test --test system_keyring_live system_keyring_round_trip -- --ignored --exact
+
+      - name: Keychain round trip in temporary keychain (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          TACHYON_PRISM_SYSTEM_KEYRING_LIVE: "1"
+        run: |
+          set -euo pipefail
+          keychain_path="${RUNNER_TEMP}/tachyon-prism-keyring-live.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          original_default="$(security default-keychain -d user | sed -E 's/^[[:space:]]*"(.*)"[[:space:]]*$/\1/')"
+          original_keychains="${RUNNER_TEMP}/tachyon-prism-original-keychains.txt"
+          security list-keychains -d user > "${original_keychains}"
+          echo "::add-mask::${keychain_password}"
+
+          cleanup() {
+            python3 -c 'import pathlib, shlex, subprocess, sys; subprocess.run(["security", "list-keychains", "-d", "user", "-s", *shlex.split(pathlib.Path(sys.argv[1]).read_text())], check=True)' "${original_keychains}" || true
+            [[ -z "${original_default}" ]] || security default-keychain -d user -s "${original_default}" || true
+            security delete-keychain "${keychain_path}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -t 3600 -u "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          security list-keychains -d user -s "${keychain_path}"
+          security default-keychain -d user -s "${keychain_path}"
+          cargo test --locked --features system-keyring-live-test --test system_keyring_live system_keyring_round_trip -- --ignored --exact
+
+      - name: Secret Service round trip in isolated D-Bus session (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TACHYON_PRISM_SYSTEM_KEYRING_LIVE: "1"
+        run: |
+          set -euo pipefail
+          export LIVE_KEYRING_HOME="${RUNNER_TEMP}/tachyon-prism-keyring-live-home"
+          export LIVE_KEYRING_PASSWORD="$(openssl rand -hex 24)"
+          echo "::add-mask::${LIVE_KEYRING_PASSWORD}"
+          mkdir -p "${LIVE_KEYRING_HOME}"
+          chmod 700 "${LIVE_KEYRING_HOME}"
+          dbus-run-session -- bash -euo pipefail -c '
+            export HOME="${LIVE_KEYRING_HOME}"
+            export XDG_DATA_HOME="${HOME}/.local/share"
+            mkdir -p "${XDG_DATA_HOME}/keyrings"
+            chmod 700 "${XDG_DATA_HOME}" "${XDG_DATA_HOME}/keyrings"
+            eval "$(printf "%s" "${LIVE_KEYRING_PASSWORD}" | gnome-keyring-daemon --unlock --components=secrets)"
+            cargo test --locked --features system-keyring-live-test --test system_keyring_live system_keyring_round_trip -- --ignored --exact
+          '
+
   rust:
     name: Rust (${{ matrix.asset_name }})
     runs-on: ${{ matrix.os }}

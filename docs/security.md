@@ -32,6 +32,22 @@ Prism creates a random 256-bit master key and stores that small key in the opera
 
 Prism does not store the subscription corpus directly as a credential entry and does not implement its own cipher. If the credential service is unavailable, the key is missing, authentication fails, or the vault cannot be verified, the operation fails closed; there is no plaintext file or WebView fallback.
 
+Linux packages use the `keyring 4.1.5` zbus Secret Service backend. A compatible
+provider must be available in the user's D-Bus session; GNOME Keyring and
+Secret-Service-compatible KWallet deployments are examples. A package install
+does not create or unlock a desktop keyring on the user's behalf. Missing,
+locked, or unreachable Secret Service providers therefore produce the same
+fail-closed behavior described above.
+
+CI and release workflows exercise the production platform backends directly.
+Each run creates a cryptographically unique service, account, and value; writes,
+reads, compares, deletes, and confirms absence; and never enumerates or reads
+pre-existing user credentials. Windows uses Credential Manager, macOS uses a
+temporary Keychain that is removed after the test, and Linux starts GNOME
+Keyring inside an isolated `dbus-run-session`. This live test is both feature-
+gated and ignored by default, so ordinary `cargo test` never touches the system
+credential store.
+
 On first launch after this change, the Rust backend imports the legacy subscription snapshot, Tachyon profiles, advanced Xray draft, and runtime TGP PSK. The renderer removes an old `localStorage` value only after the encrypted write has been read back and compared with that exact section. Failed or conflicting migrations retain the legacy value and show a localized error so the user can retry without losing data. Repeated migration is idempotent.
 
 The generated Xray and Tachyon runtime configuration files must still exist temporarily for their respective cores. They use the protected-file policy above and are not WebView persistence.

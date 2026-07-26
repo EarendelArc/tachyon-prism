@@ -32,6 +32,17 @@ Prism 生成随机 256 位主密钥，并通过 `keyring 4.1.5` 将这段小密�
 
 Prism 不会把大型订阅内容直接塞入凭据条目，也不会自行实现密码算法。系统凭据服务不可用、主密钥丢失、认证失败或回读验证失败时，操作会立即失败；不会回退到明文文件或 WebView 存储。
 
+Linux 安装包使用 `keyring 4.1.5` 的 zbus Secret Service 后端。用户的 D-Bus 会话中必须
+存在兼容提供程序，例如 GNOME Keyring，或提供 Secret Service 兼容接口的 KWallet 环境。
+安装软件包不会代替用户创建或解锁桌面密钥环；Secret Service 缺失、锁定或不可达时，
+会触发上述相同的 fail-closed 行为。
+
+CI 与 Release 工作流会直接验证生产平台后端。每轮测试创建密码学随机且唯一的 service、
+account 与 value，完成写入、读取、比对、删除和删除后不存在确认；测试不会枚举或读取用户
+已有凭据。Windows 使用 Credential Manager，macOS 使用测试后立即删除的临时 Keychain，
+Linux 则在隔离的 `dbus-run-session` 中启动 GNOME Keyring。该 live test 同时受 Cargo feature
+和默认 ignored 标记保护，因此普通 `cargo test` 永远不会触碰系统凭据库。
+
 升级后的首次启动会由 Rust 后端迁移旧订阅快照、Tachyon 服务端配置、高级 Xray 草稿及运行时 TGP PSK。只有当加密写入已成功回读，且目标 section 与原数据完全一致时，渲染器才会删除对应旧 `localStorage` 值。迁移失败或发生冲突时会保留旧数据并显示本地化错误，用户可重试而不会丢失数据；重复迁移是幂等的。
 
 供两个核心实际运行的 Xray 与 Tachyon 配置文件仍需临时存在于磁盘；它们使用上述受保护文件策略，不属于 WebView 持久化。
