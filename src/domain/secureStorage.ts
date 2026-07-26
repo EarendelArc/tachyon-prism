@@ -1,4 +1,15 @@
-import { invokeDesktop, isTauriRuntime } from "./tauri";
+import { secureStorageBackend } from "./secureStorageBackend";
+import type {
+  SecureVaultLoadResult,
+  SecureVaultMigrationResult,
+  SecureVaultPayload,
+} from "./secureStorageContract";
+
+export type {
+  SecureVaultLoadResult,
+  SecureVaultMigrationResult,
+  SecureVaultPayload,
+} from "./secureStorageContract";
 
 export const secureVaultSections = {
   runtimeTgpAuthPsk: "runtimeTgpAuthPsk",
@@ -9,23 +20,6 @@ export const secureVaultSections = {
 
 export type SecureVaultSection =
   (typeof secureVaultSections)[keyof typeof secureVaultSections];
-
-export interface SecureVaultPayload {
-  subscriptions?: unknown;
-  tachyonServers?: unknown;
-  xrayAdvancedEditor?: unknown;
-  runtimeTgpAuthPsk?: unknown;
-}
-
-export interface SecureVaultLoadResult {
-  version: number;
-  revision: number;
-  payload: SecureVaultPayload;
-}
-
-export interface SecureVaultMigrationResult extends SecureVaultLoadResult {
-  migratedSections: string[];
-}
 
 export class SecureStorageError extends Error {
   constructor(public readonly code: string) {
@@ -41,27 +35,16 @@ const legacyStorageKeys = {
 } as const;
 
 const migrationMarkerKey = "tachyon.prism.secureMigration.v1";
-const uiSmokeVaultKey = "tachyon.prism.uiSmokeVault.v1";
-
-interface UiSmokeVaultDocument extends SecureVaultLoadResult {}
-
-function usesUiSmokeVault(): boolean {
-  return import.meta.env.MODE === "ui-smoke";
-}
 
 export async function initializeSecureStorage(): Promise<SecureVaultMigrationResult> {
-  if (!isTauriRuntime() && !usesUiSmokeVault()) {
+  if (!secureStorageBackend.available()) {
     throw new SecureStorageError("secure-vault-runtime-unavailable");
   }
 
   const legacy = readLegacySecurePayload();
   let migration: SecureVaultMigrationResult;
   try {
-    migration = usesUiSmokeVault()
-      ? uiSmokeMigrate(legacy.payload)
-      : await invokeDesktop<SecureVaultMigrationResult>("migrate_secure_vault", {
-          payload: legacy.payload,
-        });
+    migration = await secureStorageBackend.migrate(legacy.payload);
   } catch (error) {
     throw secureStorageError(error);
   }
@@ -75,9 +58,8 @@ export async function initializeSecureStorage(): Promise<SecureVaultMigrationRes
 }
 
 export async function loadSecureStorage(): Promise<SecureVaultLoadResult> {
-  if (usesUiSmokeVault()) return uiSmokeLoad();
   try {
-    return await invokeDesktop<SecureVaultLoadResult>("load_secure_vault");
+    return await secureStorageBackend.load();
   } catch (error) {
     throw secureStorageError(error);
   }
@@ -87,77 +69,23 @@ export async function saveSecureStorageSection(
   section: SecureVaultSection,
   value: unknown,
 ): Promise<SecureVaultLoadResult> {
-  if (usesUiSmokeVault()) return uiSmokeSaveSection(section, value);
   try {
-    return await invokeDesktop<SecureVaultLoadResult>("save_secure_vault_section", {
-      section,
-      value,
-    });
+    return await secureStorageBackend.saveSection(section, value);
   } catch (error) {
     throw secureStorageError(error);
   }
 }
 
 export async function clearSecureStorage(): Promise<void> {
-  if (usesUiSmokeVault()) {
-    globalThis.localStorage?.removeItem(uiSmokeVaultKey);
-  } else {
-    try {
-      await invokeDesktop<void>("clear_secure_vault");
-    } catch (error) {
-      throw secureStorageError(error);
-    }
+  try {
+    await secureStorageBackend.clear();
+  } catch (error) {
+    throw secureStorageError(error);
   }
   for (const key of Object.values(legacyStorageKeys)) {
     globalThis.localStorage?.removeItem(key);
   }
   globalThis.localStorage?.removeItem(migrationMarkerKey);
-}
-
-function uiSmokeLoad(): UiSmokeVaultDocument {
-  const raw = globalThis.localStorage?.getItem(uiSmokeVaultKey);
-  if (!raw) return { version: 1, revision: 0, payload: {} };
-  try {
-    const parsed = JSON.parse(raw) as UiSmokeVaultDocument;
-    if (parsed.version !== 1 || !Number.isSafeInteger(parsed.revision) || !parsed.payload) {
-      throw new Error("invalid");
-    }
-    return parsed;
-  } catch {
-    throw new SecureStorageError("secure-vault-corrupt");
-  }
-}
-
-function uiSmokePersist(document: UiSmokeVaultDocument): UiSmokeVaultDocument {
-  globalThis.localStorage?.setItem(uiSmokeVaultKey, JSON.stringify(document));
-  return structuredClone(document);
-}
-
-function uiSmokeSaveSection(
-  section: SecureVaultSection,
-  value: unknown,
-): UiSmokeVaultDocument {
-  const current = uiSmokeLoad();
-  return uiSmokePersist({
-    version: 1,
-    revision: current.revision + 1,
-    payload: { ...current.payload, [section]: structuredClone(value) },
-  });
-}
-
-function uiSmokeMigrate(payload: SecureVaultPayload): SecureVaultMigrationResult {
-  const current = uiSmokeLoad();
-  const nextPayload = { ...current.payload };
-  const migratedSections: string[] = [];
-  for (const [section, value] of Object.entries(payload)) {
-    if (section in nextPayload) continue;
-    nextPayload[section as keyof SecureVaultPayload] = structuredClone(value);
-    migratedSections.push(section);
-  }
-  const next = migratedSections.length
-    ? uiSmokePersist({ version: 1, revision: current.revision + 1, payload: nextPayload })
-    : current;
-  return { ...next, migratedSections };
 }
 
 export function hasLegacySecureStorage(): boolean {

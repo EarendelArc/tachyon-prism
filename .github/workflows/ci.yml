@@ -15,7 +15,9 @@ jobs:
         uses: actions/checkout@v6.0.3
 
       - name: Validate release workflows
-        run: python scripts/validate_release.py --check-workflows
+        run: |
+          python scripts/validate_release.py --check-workflows
+          python scripts/verify_production_bundle.py --self-test
 
   typecheck:
     name: TypeScript
@@ -41,6 +43,9 @@ jobs:
 
       - name: Web Build
         run: npm run web:build
+
+      - name: Verify production vault boundary
+        run: python scripts/verify_production_bundle.py --dist dist
 
   core-contract:
     name: Core contract (${{ matrix.platform }})

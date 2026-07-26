@@ -6,14 +6,15 @@
     "scripts": {
         "dev": "tauri dev",
         "web:dev": "vite --configLoader native --host 127.0.0.1 --port 1420",
-        "web:build": "tsc && vite build --configLoader runner",
+        "web:build": "tsc && vite build --configLoader runner && npm run verify:production-bundle",
         "build": "tauri build --features custom-protocol",
         "build:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
         "typecheck": "tsc --noEmit",
         "test": "vitest run",
         "test:core-contract": "vitest run --config vitest.contract.config.ts --reporter=verbose",
         "test:ui": "vite build --configLoader runner --mode ui-smoke && python scripts/prism_ui_smoke.py",
-        "test:native-window": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prism_native_window_smoke.ps1"
+        "test:native-window": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prism_native_window_smoke.ps1",
+        "verify:production-bundle": "python scripts/verify_production_bundle.py --dist dist"
     },
     "dependencies": {
         "@tauri-apps/api": "2.11.0",

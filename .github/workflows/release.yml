@@ -54,6 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/validate_release.py --check-workflows
+          python scripts/verify_production_bundle.py --self-test
           python scripts/validate_release.py \
             --tag "${RELEASE_TAG}" \
             --channel "${RELEASE_CHANNEL}" \
@@ -360,6 +361,10 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: npm run build -- --target ${{ matrix.rust_target }} ${{ matrix.bundle_args }}
+
+      - name: Verify production vault boundary
+        shell: bash
+        run: python scripts/verify_production_bundle.py --dist dist
 
       - name: Verify Windows Authenticode signatures
         if: runner.os == 'Windows' && env.SIGNING_ENABLED == 'true'

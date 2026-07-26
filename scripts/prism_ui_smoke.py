@@ -1562,17 +1562,27 @@ def assert_ui_smoke_vault_migration_and_reload(cdp: CDP) -> None:
     cdp.call("Page.reload", {"ignoreCache": True})
     text = wait_for_shell(cdp)
     text = navigate_hash(cdp, "subscriptions")
-    assert_contains(text, "Smoke URL VLESS", "Clash Smoke SS")
+    assert_contains(text, "Smoke URL", "Clash Smoke SS")
     migrated = cdp.evaluate(
         """
-        (() => ({
-          legacyRemoved: localStorage.getItem('tachyon.prism.subscription.v1') === null,
-          vaultPresent: Boolean(localStorage.getItem('tachyon.prism.uiSmokeVault.v1')),
-          marker: localStorage.getItem('tachyon.prism.secureMigration.v1')
-        }))()
+        (() => {
+          const raw = localStorage.getItem('tachyon.prism.uiSmokeVault.v1');
+          const subscriptions = raw ? JSON.parse(raw)?.payload?.subscriptions : null;
+          return {
+            legacyRemoved: localStorage.getItem('tachyon.prism.subscription.v1') === null,
+            vaultPresent: Boolean(raw),
+            marker: localStorage.getItem('tachyon.prism.secureMigration.v1'),
+            hiddenNodePreserved: JSON.stringify(subscriptions).includes('Smoke URL VLESS')
+          };
+        })()
         """,
     )
-    if migrated != {"legacyRemoved": True, "vaultPresent": True, "marker": "complete"}:
+    if migrated != {
+        "legacyRemoved": True,
+        "vaultPresent": True,
+        "marker": "complete",
+        "hiddenNodePreserved": True,
+    }:
         raise AssertionError(f"UI smoke vault migration did not verify and delete legacy data: {migrated}")
 
 

@@ -21,6 +21,8 @@ const NONCE_BYTES: usize = 24;
 const KEYRING_SERVICE: &str = "io.tachyon.prism";
 const KEYRING_ACCOUNT: &str = "secure-vault-master-key-v1";
 const VAULT_FILE_NAME: &str = "secure-vault.v1.json";
+const CLEAR_STATE_FILE_NAME: &str = "secure-vault.v1.clear-state.json";
+const CLEAR_STATE_VERSION: u32 = 1;
 
 pub const SECTION_SUBSCRIPTIONS: &str = "subscriptions";
 pub const SECTION_TACHYON_SERVERS: &str = "tachyonServers";
@@ -76,10 +78,29 @@ struct VaultDocument {
     sections: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClearState {
+    version: u32,
+    vault_file: String,
+}
+
 trait MasterKeyStore {
     fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String>;
     fn store(&self, key: &[u8]) -> Result<(), String>;
     fn clear(&self) -> Result<(), String>;
+}
+
+trait VaultFileOps {
+    fn remove(&self, path: &Path) -> std::io::Result<()>;
+}
+
+struct SystemVaultFileOps;
+
+impl VaultFileOps for SystemVaultFileOps {
+    fn remove(&self, path: &Path) -> std::io::Result<()> {
+        fs::remove_file(path)
+    }
 }
 
 struct SystemMasterKeyStore;
@@ -115,8 +136,12 @@ impl MasterKeyStore for SystemMasterKeyStore {
 
     fn clear(&self) -> Result<(), String> {
         match self.entry()?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err("secure-vault-keyring-unavailable".to_string()),
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(_) => return Err("secure-vault-keyring-unavailable".to_string()),
+        }
+        match self.load()? {
+            None => Ok(()),
+            Some(_) => Err("secure-vault-keyring-verification-failed".to_string()),
         }
     }
 }
@@ -154,6 +179,7 @@ pub fn clear(app: &tauri::AppHandle) -> Result<(), String> {
 
 fn load_at(path: &Path, keys: &dyn MasterKeyStore) -> Result<SecureVaultLoadResult, String> {
     let _guard = vault_lock()?;
+    recover_interrupted_clear(path, keys, &SystemVaultFileOps)?;
     let document = load_document(path, keys, false)?;
     Ok(load_result(document))
 }
@@ -166,6 +192,7 @@ fn save_section_at(
 ) -> Result<SecureVaultLoadResult, String> {
     validate_section(section)?;
     let _guard = vault_lock()?;
+    recover_interrupted_clear(path, keys, &SystemVaultFileOps)?;
     let mut document = load_document(path, keys, true)?;
     document.sections.insert(section.to_string(), value);
     document.revision = document.revision.saturating_add(1);
@@ -179,6 +206,7 @@ fn migrate_at(
     payload: SecureVaultPayload,
 ) -> Result<SecureVaultMigrationResult, String> {
     let _guard = vault_lock()?;
+    recover_interrupted_clear(path, keys, &SystemVaultFileOps)?;
     let mut document = load_document(path, keys, true)?;
     let mut migrated_sections = Vec::new();
     for (section, value) in payload_sections(payload) {
@@ -203,13 +231,82 @@ fn migrate_at(
 }
 
 fn clear_at(path: &Path, keys: &dyn MasterKeyStore) -> Result<(), String> {
+    clear_at_with(path, keys, &SystemVaultFileOps)
+}
+
+fn clear_at_with(
+    path: &Path,
+    keys: &dyn MasterKeyStore,
+    files: &dyn VaultFileOps,
+) -> Result<(), String> {
     let _guard = vault_lock()?;
-    match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err("secure-vault-clear-failed".to_string()),
+    recover_interrupted_clear(path, keys, files)?;
+    write_clear_state(path)?;
+    if let Err(error) = keys.clear() {
+        // The marker and ciphertext are intentionally retained. Recovery checks
+        // whether the key still exists before deciding which state survived.
+        return Err(error);
     }
-    keys.clear()
+    remove_if_exists(files, path).map_err(|_| "secure-vault-clear-pending".to_string())?;
+    remove_if_exists(files, &clear_state_path(path))
+        .map_err(|_| "secure-vault-clear-state-pending".to_string())
+}
+
+fn clear_state_path(path: &Path) -> PathBuf {
+    path.with_file_name(CLEAR_STATE_FILE_NAME)
+}
+
+fn write_clear_state(path: &Path) -> Result<(), String> {
+    let marker_path = clear_state_path(path);
+    let marker = ClearState {
+        version: CLEAR_STATE_VERSION,
+        vault_file: VAULT_FILE_NAME.to_string(),
+    };
+    let encoded = serde_json::to_string(&marker)
+        .map_err(|_| "secure-vault-clear-state-write-failed".to_string())?;
+    write_atomic(&marker_path, &(encoded + "\n"))
+        .map_err(|_| "secure-vault-clear-state-write-failed".to_string())?;
+    secure_file_permissions(&marker_path)
+        .map_err(|_| "secure-vault-clear-state-permissions-failed".to_string())
+}
+
+fn recover_interrupted_clear(
+    path: &Path,
+    keys: &dyn MasterKeyStore,
+    files: &dyn VaultFileOps,
+) -> Result<(), String> {
+    let marker_path = clear_state_path(path);
+    if !marker_path.exists() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(&marker_path)
+        .map_err(|_| "secure-vault-clear-state-read-failed".to_string())?;
+    let marker: ClearState =
+        serde_json::from_str(&raw).map_err(|_| "secure-vault-clear-state-corrupt".to_string())?;
+    if marker.version != CLEAR_STATE_VERSION || marker.vault_file != VAULT_FILE_NAME {
+        return Err("secure-vault-clear-state-corrupt".to_string());
+    }
+
+    if keys.load()?.is_some() {
+        // Key deletion did not complete. Preserve the still-decryptable vault.
+        remove_if_exists(files, &marker_path)
+            .map_err(|_| "secure-vault-clear-state-pending".to_string())?;
+        return Ok(());
+    }
+
+    // The master key is gone. Any surviving ciphertext is cryptographically
+    // orphaned and can be deleted before a future save creates a fresh key.
+    remove_if_exists(files, path).map_err(|_| "secure-vault-clear-pending".to_string())?;
+    remove_if_exists(files, &marker_path)
+        .map_err(|_| "secure-vault-clear-state-pending".to_string())
+}
+
+fn remove_if_exists(files: &dyn VaultFileOps, path: &Path) -> std::io::Result<()> {
+    match files.remove(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn vault_lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
@@ -406,6 +503,7 @@ fn load_result(document: VaultDocument) -> SecureVaultLoadResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -413,6 +511,7 @@ mod tests {
     struct MemoryKeyStore {
         key: Mutex<Option<Vec<u8>>>,
         unavailable: bool,
+        fail_clear: AtomicBool,
     }
 
     impl MemoryKeyStore {
@@ -420,6 +519,7 @@ mod tests {
             Self {
                 key: Mutex::new(Some(key)),
                 unavailable: false,
+                fail_clear: AtomicBool::new(false),
             }
         }
     }
@@ -441,6 +541,9 @@ mod tests {
         }
 
         fn clear(&self) -> Result<(), String> {
+            if self.fail_clear.load(Ordering::SeqCst) {
+                return Err("secure-vault-keyring-unavailable".to_string());
+            }
             *self.key.lock().unwrap() = None;
             Ok(())
         }
@@ -659,6 +762,7 @@ mod tests {
         let keys = MemoryKeyStore {
             key: Mutex::new(None),
             unavailable: true,
+            fail_clear: AtomicBool::new(false),
         };
         assert_eq!(
             save_section_at(
@@ -671,6 +775,104 @@ mod tests {
             "secure-vault-keyring-unavailable"
         );
         assert!(!path.exists());
+    }
+
+    struct FailVaultRemovalOnce {
+        vault_path: PathBuf,
+        failed: AtomicBool,
+    }
+
+    impl VaultFileOps for FailVaultRemovalOnce {
+        fn remove(&self, path: &Path) -> std::io::Result<()> {
+            if path == self.vault_path && !self.failed.swap(true, Ordering::SeqCst) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected ciphertext deletion failure",
+                ));
+            }
+            fs::remove_file(path)
+        }
+    }
+
+    #[test]
+    fn key_deletion_failure_preserves_ciphertext_and_recovers_existing_vault() {
+        let (_directory, path, keys) = fixture();
+        save_section_at(
+            &path,
+            &keys,
+            SECTION_RUNTIME_TGP_PSK,
+            Value::String("must-survive".into()),
+        )
+        .unwrap();
+        let before = fs::read(&path).unwrap();
+        keys.fail_clear.store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            clear_at(&path, &keys).unwrap_err(),
+            "secure-vault-keyring-unavailable"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(clear_state_path(&path).exists());
+        assert!(keys.key.lock().unwrap().is_some());
+
+        keys.fail_clear.store(false, Ordering::SeqCst);
+        let loaded = load_at(&path, &keys).unwrap();
+        assert_eq!(
+            loaded.payload.runtime_tgp_auth_psk,
+            Some(Value::String("must-survive".into()))
+        );
+        assert!(!clear_state_path(&path).exists());
+    }
+
+    #[test]
+    fn ciphertext_delete_failure_leaves_recoverable_key_destroyed_state() {
+        let (directory, path, keys) = fixture();
+        save_section_at(
+            &path,
+            &keys,
+            SECTION_RUNTIME_TGP_PSK,
+            Value::String("old-secret".into()),
+        )
+        .unwrap();
+        let old_key = keys.key.lock().unwrap().clone().unwrap();
+        let old_ciphertext = fs::read(&path).unwrap();
+        let files = FailVaultRemovalOnce {
+            vault_path: path.clone(),
+            failed: AtomicBool::new(false),
+        };
+
+        assert_eq!(
+            clear_at_with(&path, &keys, &files).unwrap_err(),
+            "secure-vault-clear-pending"
+        );
+        assert!(keys.key.lock().unwrap().is_none());
+        assert_eq!(fs::read(&path).unwrap(), old_ciphertext);
+        assert!(clear_state_path(&path).exists());
+
+        save_section_at(
+            &path,
+            &keys,
+            SECTION_RUNTIME_TGP_PSK,
+            Value::String("new-secret".into()),
+        )
+        .unwrap();
+        let new_key = keys.key.lock().unwrap().clone().unwrap();
+        assert_ne!(new_key, old_key);
+        assert!(!clear_state_path(&path).exists());
+
+        let restored = directory.path().join("restored-old-vault.json");
+        fs::write(&restored, old_ciphertext).unwrap();
+        assert_eq!(
+            decrypt_document(&restored, &new_key).unwrap_err(),
+            "secure-vault-authentication-failed"
+        );
+        assert_eq!(
+            decrypt_document(&restored, &old_key)
+                .unwrap()
+                .sections
+                .get(SECTION_RUNTIME_TGP_PSK),
+            Some(&Value::String("old-secret".into()))
+        );
     }
 
     #[cfg(unix)]

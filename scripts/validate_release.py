@@ -138,6 +138,9 @@ def validate_workflows() -> None:
     governance_verification_path = ROOT / ".github" / "scripts" / "verify-release-governance.py"
     latest_response_parser_path = ROOT / ".github" / "scripts" / "parse-latest-release-response.py"
     core_contract_test_path = ROOT / "src" / "domain" / "__tests__" / "coreConfigContract.live.test.ts"
+    package_path = ROOT / "package.json"
+    tauri_config_path = ROOT / "src-tauri" / "tauri.conf.json"
+    bundle_verifier_path = ROOT / "scripts" / "verify_production_bundle.py"
     release_matrix = extract_matrix(release_path, "build")
     ci_matrix = extract_matrix(ci_path, "rust")
     if release_matrix != EXPECTED_MATRIX:
@@ -153,6 +156,9 @@ def validate_workflows() -> None:
     governance_verification = governance_verification_path.read_text(encoding="utf-8")
     latest_response_parser = latest_response_parser_path.read_text(encoding="utf-8")
     core_contract_test = core_contract_test_path.read_text(encoding="utf-8")
+    package = json.loads(package_path.read_text(encoding="utf-8"))
+    tauri_config = json.loads(tauri_config_path.read_text(encoding="utf-8"))
+    bundle_verifier = bundle_verifier_path.read_text(encoding="utf-8")
     core_contract = json.loads((ROOT / "core-contract.json").read_text(encoding="utf-8"))
     core_repository = str(core_contract["repository"])
     core_commit = str(core_contract["commit"])
@@ -213,6 +219,30 @@ def validate_workflows() -> None:
     missing = [fragment for fragment in required_fragments if fragment not in release]
     if missing:
         fail("release workflow is missing contract guards: " + ", ".join(missing))
+    bundle_scan_command = "python scripts/verify_production_bundle.py --dist dist"
+    if bundle_scan_command not in ci:
+        fail("CI does not explicitly scan the production renderer bundle")
+    if bundle_scan_command not in release:
+        fail("release builds do not scan the production renderer bundle")
+    if "python scripts/verify_production_bundle.py --self-test" not in ci:
+        fail("CI does not exercise the production bundle scanner's negative fixtures")
+    if "python scripts/verify_production_bundle.py --self-test" not in release:
+        fail("release preparation does not exercise the production bundle scanner")
+    web_build = str(package.get("scripts", {}).get("web:build", ""))
+    if "npm run verify:production-bundle" not in web_build:
+        fail("web:build does not fail closed on the production bundle scan")
+    if tauri_config.get("build", {}).get("beforeBuildCommand") != "npm run web:build":
+        fail("Tauri release builds bypass the production bundle scan")
+    scanner_guards = [
+        "tachyon.prism.uiSmokeVault.v1",
+        "secureStorageBackend.ui-smoke",
+        "uiSmokeLoad",
+        "uiSmokeSave",
+        "uiSmokeMigrate",
+    ]
+    missing_scanner_guards = [guard for guard in scanner_guards if guard not in bundle_verifier]
+    if missing_scanner_guards:
+        fail("production bundle scanner is missing guards: " + ", ".join(missing_scanner_guards))
     publication_fragments = [
         "trap 'cleanup_failed_draft $?' EXIT",
         'bash "${tag_verify_script}" "${VERSION}" "${COMMIT}" origin "${EXPECTED_TAG_OBJECT}"',
