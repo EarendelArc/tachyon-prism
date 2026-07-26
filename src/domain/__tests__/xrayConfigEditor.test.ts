@@ -64,14 +64,16 @@ describe("advanced Xray JSON UI wiring", () => {
     expect(startAll).not.toContain("validateXrayConfig");
   });
 
-  it("keeps localStorage as draft-only state", () => {
+  it("keeps advanced Xray JSON in the secure vault", () => {
     const state = /interface XrayAdvancedEditorState[\s\S]*?\n}/.exec(appSource)?.[0];
-    const loader = /function loadXrayAdvancedEditor[\s\S]*?\n}/.exec(appSource)?.[0];
+    const loader = /function xrayAdvancedEditorFromStored[\s\S]*?\n}/.exec(appSource)?.[0];
 
     expect(state).toContain("enabled: boolean");
     expect(state).toContain("text: string");
     expect(state).not.toContain("lastValid");
     expect(loader).not.toContain("lastValid");
+    expect(appSource).toContain("secureVaultSections.xrayAdvancedEditor");
+    expect(appSource).not.toContain("tachyon.prism.xrayAdvancedEditor.v1");
     expect(appSource).toContain('const [canonicalXrayText, setCanonicalXrayText] = useState("")');
   });
 

@@ -4,13 +4,13 @@ import {
   buildXrayOutboundDraft,
   createSubscriptionSnapshot,
   fetchSubscriptionText,
-  loadSubscriptionSnapshot,
   parseSubscription,
   parseSubscriptionWithReport,
   removeSubscription,
   selectSubscription,
   selectSubscriptionNode,
-  saveSubscriptionSnapshot,
+  subscriptionSnapshotForStorage,
+  subscriptionSnapshotFromStored,
   totalSubscriptionNodes,
   xrayConfigTemplateForNode,
   xrayOutboundCompatibilityForNode,
@@ -1125,7 +1125,7 @@ describe("selectSubscriptionNode", () => {
   });
 });
 
-describe("loadSubscriptionSnapshot", () => {
+describe("subscription vault serialization", () => {
   it("upgrades stored URI nodes to canonical Xray outbounds", () => {
     const uri = "vless://uuid@example.com:443?encryption=none#Stored VLESS";
     const parsed = parseSubscription(uri)[0];
@@ -1157,57 +1157,21 @@ describe("loadSubscriptionSnapshot", () => {
       ],
       selectedSubscriptionId: "subscription-test",
     };
-    const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
-    const store = new Map<string, string>([
-      ["tachyon.prism.subscription.v1", JSON.stringify(rawSnapshot)],
-    ]);
-    Object.defineProperty(globalThis, "localStorage", {
-      configurable: true,
-      value: {
-        getItem: (key: string) => store.get(key) ?? null,
-        removeItem: (key: string) => store.delete(key),
-        setItem: (key: string, value: string) => store.set(key, value),
-      },
+    const loaded = subscriptionSnapshotFromStored(rawSnapshot);
+    expect(activeSubscription(loaded)?.name).toBe("Stored");
+    expect(buildXrayOutboundDraft(loaded.nodes[0]).settings).toMatchObject({
+      address: "example.com",
+      port: 443,
+      id: "uuid",
+      encryption: "none",
     });
-
-    try {
-      const loaded = loadSubscriptionSnapshot();
-      expect(activeSubscription(loaded)?.name).toBe("Stored");
-      expect(buildXrayOutboundDraft(loaded.nodes[0]).settings).toMatchObject({
-        address: "example.com",
-        port: 443,
-        id: "uuid",
-        encryption: "none",
-      });
-    } finally {
-      if (previous) {
-        Object.defineProperty(globalThis, "localStorage", previous);
-      } else {
-        Reflect.deleteProperty(globalThis, "localStorage");
-      }
-    }
   });
 
   it("preserves the complete imported Xray config through snapshot storage", () => {
     const nodes = parseSubscription(xrayFullConfigJsonFixture);
     const snapshot = createSubscriptionSnapshot("https://example.com/full-xray", nodes);
     const source = JSON.parse(xrayFullConfigJsonFixture) as Record<string, unknown>;
-    const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
-    const store = new Map<string, string>();
-    Object.defineProperty(globalThis, "localStorage", {
-      configurable: true,
-      value: {
-        getItem: (key: string) => store.get(key) ?? null,
-        removeItem: (key: string) => store.delete(key),
-        setItem: (key: string, value: string) => store.set(key, value),
-      },
-    });
-
-    try {
-      saveSubscriptionSnapshot(snapshot);
-      const persisted = JSON.parse(
-        store.get("tachyon.prism.subscription.v1") ?? "{}",
-      ) as Record<string, unknown>;
+    const persisted = subscriptionSnapshotForStorage(snapshot) as unknown as Record<string, unknown>;
       const persistedProfiles = persisted.subscriptions as Array<Record<string, unknown>>;
       const persistedProfile = persistedProfiles[0];
       const persistedNodes = persistedProfile.nodes as Array<Record<string, unknown>>;
@@ -1216,7 +1180,7 @@ describe("loadSubscriptionSnapshot", () => {
         unknown
       >;
 
-      expect(persisted.nodes).toBeUndefined();
+      expect(persisted.nodes).toEqual([]);
       expect(persistedNodes).toHaveLength(2);
       expect(persistedNodes.every((item) => !("xrayConfig" in item))).toBe(true);
       expect(persistedNodes.every((item) => !("outbound" in item))).toBe(true);
@@ -1228,7 +1192,7 @@ describe("loadSubscriptionSnapshot", () => {
       expect(Object.values(persistedTemplates)).toEqual([source]);
       expect((JSON.stringify(persisted).match(/xray-trojan-secret/g) ?? [])).toHaveLength(1);
 
-      const loaded = loadSubscriptionSnapshot();
+      const loaded = subscriptionSnapshotFromStored(persisted);
       const loadedTemplate = xrayConfigTemplateForNode(loaded.nodes[1]);
       expect(loaded.nodes[0].xrayConfigId).toBe(loaded.nodes[1].xrayConfigId);
       expect(loaded.nodes[0]).not.toHaveProperty("xrayConfig");
@@ -1246,13 +1210,6 @@ describe("loadSubscriptionSnapshot", () => {
         }),
         userTopLevelField: { nested: ["preserve", { exactly: true }] },
       });
-    } finally {
-      if (previous) {
-        Object.defineProperty(globalThis, "localStorage", previous);
-      } else {
-        Reflect.deleteProperty(globalThis, "localStorage");
-      }
-    }
   });
 
   it("migrates node-level imported config copies into one profile template", () => {
@@ -1275,18 +1232,7 @@ describe("loadSubscriptionSnapshot", () => {
         },
       ],
     };
-    const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
-    Object.defineProperty(globalThis, "localStorage", {
-      configurable: true,
-      value: {
-        getItem: () => JSON.stringify(rawSnapshot),
-        removeItem: () => undefined,
-        setItem: () => undefined,
-      },
-    });
-
-    try {
-      const loaded = loadSubscriptionSnapshot();
+    const loaded = subscriptionSnapshotFromStored(rawSnapshot);
       const profile = activeSubscription(loaded);
 
       expect(Object.keys(profile?.xrayConfigTemplates ?? {})).toHaveLength(1);
@@ -1295,13 +1241,6 @@ describe("loadSubscriptionSnapshot", () => {
       expect(loaded.nodes[0].xrayConfigId).toBe(loaded.nodes[1].xrayConfigId);
       expect(loaded.nodes.map((node) => node.xrayOutboundIndex)).toEqual([0, 1]);
       expect(xrayConfigTemplateForNode(loaded.nodes[1])).toEqual(source);
-    } finally {
-      if (previous) {
-        Object.defineProperty(globalThis, "localStorage", previous);
-      } else {
-        Reflect.deleteProperty(globalThis, "localStorage");
-      }
-    }
   });
 });
 

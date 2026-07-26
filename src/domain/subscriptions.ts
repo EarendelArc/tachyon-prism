@@ -130,7 +130,6 @@ export interface SubscriptionSnapshot {
   selectedSubscriptionId: string;
 }
 
-const storageKey = "tachyon.prism.subscription.v1";
 const xrayConfigTemplateByNode = new WeakMap<ProxyNode, XrayImportedConfig>();
 
 const xraySupportedOutboundProtocols = new Set<XrayOutboundProtocol>([
@@ -404,14 +403,12 @@ export function xrayConfigTemplateForNode(
     : undefined;
 }
 
-export function loadSubscriptionSnapshot(): SubscriptionSnapshot {
+export function subscriptionSnapshotFromStored(value: unknown): SubscriptionSnapshot {
   try {
-    const raw = globalThis.localStorage?.getItem(storageKey);
-    if (!raw) {
+    if (!isRecord(value)) {
       return emptySubscriptionSnapshot;
     }
-
-    const snapshot = JSON.parse(raw) as Partial<SubscriptionSnapshot>;
+    const snapshot = value as Partial<SubscriptionSnapshot>;
     const subscriptions = normalizeSubscriptionProfiles(snapshot.subscriptions);
     if (subscriptions.length > 0) {
       return snapshotFromProfiles(
@@ -444,15 +441,15 @@ export function loadSubscriptionSnapshot(): SubscriptionSnapshot {
   }
 }
 
-export function saveSubscriptionSnapshot(snapshot: SubscriptionSnapshot): void {
+export function subscriptionSnapshotForStorage(
+  snapshot: SubscriptionSnapshot,
+): SubscriptionSnapshot {
   const canonical = snapshotFromProfiles(
     snapshot.subscriptions,
     snapshot.selectedSubscriptionId,
     snapshot.selectedNodeId,
   );
-  const persisted: Partial<SubscriptionSnapshot> = { ...canonical };
-  delete persisted.nodes;
-  globalThis.localStorage?.setItem(storageKey, JSON.stringify(persisted));
+  return { ...canonical, nodes: [] };
 }
 
 function subscriptionPayloadCandidates(input: string): string[] {

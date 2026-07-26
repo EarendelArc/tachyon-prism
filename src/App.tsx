@@ -99,13 +99,14 @@ import { preflightMessagesForLanguage } from "./domain/preflightI18n";
 import {
   activeSubscription,
   createSubscriptionSnapshot,
+  emptySubscriptionSnapshot,
   fetchSubscriptionText,
-  loadSubscriptionSnapshot,
   parseSubscriptionWithReport,
   removeSubscription,
-  saveSubscriptionSnapshot,
   selectSubscription,
   selectSubscriptionNode,
+  subscriptionSnapshotForStorage,
+  subscriptionSnapshotFromStored,
   totalSubscriptionNodes,
   xrayOutboundCompatibilityForNode,
   SubscriptionError,
@@ -114,16 +115,23 @@ import {
   activeTachyonServer,
   draftFromTachyonServerProfile,
   emptyTachyonServerDraft,
-  loadTachyonServerSnapshot,
+  emptyTachyonServerSnapshot,
   removeTachyonServerProfile,
-  saveTachyonServerSnapshot,
   selectTachyonServerProfile,
   tachyonServerEndpoint,
+  tachyonServerSnapshotForStorage,
+  tachyonServerSnapshotFromStored,
   upsertTachyonServerProfile,
   type TachyonServerDraft,
   type TachyonServerProfile,
   type TachyonServerSnapshot,
 } from "./domain/tachyonServers";
+import {
+  initializeSecureStorage,
+  saveSecureStorageSection,
+  secureVaultSections,
+  SecureStorageError,
+} from "./domain/secureStorage";
 import {
   emptyTrafficSample,
   emptyXrayTrafficStats,
@@ -218,7 +226,6 @@ interface XrayAdvancedEditorState {
 
 const prismViews: PrismView[] = ["overview", "configs", "subscriptions", "plugins", "settings"];
 const routingModeStorageKey = "tachyon.prism.routingMode.v1";
-const xrayAdvancedEditorStorageKey = "tachyon.prism.xrayAdvancedEditor.v1";
 
 interface ReadinessItem {
   detail: string;
@@ -522,6 +529,10 @@ const zh = {
   processName: "进程名",
   quickStart: "快速启动",
   ready: "就绪",
+  secureStorageMigrated: "敏感配置已迁移至系统凭据保护的加密保险库",
+  secureStorageMigrationFailed: "敏感配置迁移失败；旧数据已保留，未写入明文回退",
+  secureStorageUnavailable: "系统安全存储不可用；敏感配置不会以明文保存",
+  secureStorageSaveFailed: "敏感配置保存失败；未写入明文回退",
   recentRoutes: "最近路由",
   releaseChannel: "发布通道",
   releaseAsset: "发布文件",
@@ -950,6 +961,10 @@ const en: typeof zh = {
   processName: "Process name",
   quickStart: "Quick Start",
   ready: "Ready",
+  secureStorageMigrated: "Sensitive settings were migrated to the credential-protected encrypted vault",
+  secureStorageMigrationFailed: "Sensitive settings migration failed; legacy data was retained and no plaintext fallback was written",
+  secureStorageUnavailable: "System secure storage is unavailable; sensitive settings will not be saved as plaintext",
+  secureStorageSaveFailed: "Sensitive settings could not be saved; no plaintext fallback was written",
   recentRoutes: "Recent routes",
   releaseChannel: "Release channel",
   releaseAsset: "Asset",
@@ -1315,28 +1330,15 @@ function saveRoutingMode(mode: XrayRoutingMode): void {
   globalThis.localStorage?.setItem(routingModeStorageKey, mode);
 }
 
-function loadXrayAdvancedEditor(): XrayAdvancedEditorState {
-  try {
-    const raw = globalThis.localStorage?.getItem(xrayAdvancedEditorStorageKey);
-    if (!raw) {
-      return { enabled: false, text: "" };
-    }
-    const value = JSON.parse(raw) as Partial<XrayAdvancedEditorState>;
-    return {
-      enabled: value.enabled === true,
-      text: typeof value.text === "string" ? value.text : "",
-    };
-  } catch {
+function xrayAdvancedEditorFromStored(value: unknown): XrayAdvancedEditorState {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return { enabled: false, text: "" };
   }
-}
-
-function saveXrayAdvancedEditor(value: XrayAdvancedEditorState): void {
-  try {
-    globalThis.localStorage?.setItem(xrayAdvancedEditorStorageKey, JSON.stringify(value));
-  } catch {
-    // Large valid configs remain usable in memory even when browser storage is unavailable.
-  }
+  const stored = value as Partial<XrayAdvancedEditorState>;
+  return {
+    enabled: stored.enabled === true,
+    text: typeof stored.text === "string" ? stored.text : "",
+  };
 }
 
 function downloadTextFile(fileName: string, text: string, mimeType: string): void {
@@ -1661,6 +1663,17 @@ function subscriptionErrorCode(
   return error instanceof SubscriptionError ? error.code : fallback;
 }
 
+function secureStorageFailureMessage(error: unknown, ui: typeof zh): string | null {
+  if (!(error instanceof SecureStorageError)) {
+    return null;
+  }
+  return error.code.includes("migration")
+    ? ui.secureStorageMigrationFailed
+    : error.code.includes("keyring") || error.code.includes("key-missing")
+      ? ui.secureStorageUnavailable
+      : ui.secureStorageSaveFailed;
+}
+
 function subscriptionErrorMessage(code: SubscriptionErrorCode, ui: typeof zh): string {
   const messages = {
     "fetch-failed": ui.subscriptionFetchFailed,
@@ -1714,7 +1727,7 @@ export function App() {
   const [suggestions, setSuggestions] = useState<GameProfile[]>([]);
   const [steamRoot, setSteamRoot] = useState("");
   const [manualProfile, setManualProfile] = useState(emptyProfile);
-  const [subscription, setSubscription] = useState(loadSubscriptionSnapshot);
+  const [subscription, setSubscription] = useState(emptySubscriptionSnapshot);
   const [subscriptionName, setSubscriptionName] = useState("");
   const [subscriptionUrl, setSubscriptionUrl] = useState("");
   const [subscriptionText, setSubscriptionText] = useState("");
@@ -1728,7 +1741,7 @@ export function App() {
     useState<SubscriptionBatchFeedback | null>(null);
   const [subscriptionViewMode, setSubscriptionViewMode] = useState<SubscriptionViewMode>("grid");
   const [tachyonServers, setTachyonServers] = useState<TachyonServerSnapshot>(
-    loadTachyonServerSnapshot,
+    emptyTachyonServerSnapshot,
   );
   const [tachyonServerDraft, setTachyonServerDraft] =
     useState<TachyonServerDraft>(emptyTachyonServerDraft);
@@ -1738,7 +1751,8 @@ export function App() {
   );
   const [routingMode, setRoutingMode] = useState<XrayRoutingMode>(loadRoutingMode);
   const [xrayAdvancedEditor, setXrayAdvancedEditor] =
-    useState<XrayAdvancedEditorState>(loadXrayAdvancedEditor);
+    useState<XrayAdvancedEditorState>({ enabled: false, text: "" });
+  const [secureStorageReady, setSecureStorageReady] = useState(false);
   const [canonicalXrayText, setCanonicalXrayText] = useState("");
   const [canonicalXrayLoadState, setCanonicalXrayLoadState] =
     useState<CanonicalXrayLoadState>("loading");
@@ -2217,6 +2231,24 @@ export function App() {
     setMessage(ui.gameRouteRemoved);
   }
 
+  async function persistSubscriptionSnapshot(snapshot: SubscriptionSnapshot): Promise<void> {
+    await saveSecureStorageSection(
+      secureVaultSections.subscriptions,
+      subscriptionSnapshotForStorage(snapshot),
+    );
+    setSubscription(snapshot);
+  }
+
+  async function persistTachyonServerSnapshot(
+    snapshot: TachyonServerSnapshot,
+  ): Promise<void> {
+    await saveSecureStorageSection(
+      secureVaultSections.tachyonServers,
+      tachyonServerSnapshotForStorage(snapshot),
+    );
+    setTachyonServers(snapshot);
+  }
+
   async function updateSubscriptionFromUrl() {
     if (subscriptionMutationRef.current || subscriptionBusy || subscriptionUpdateAllBusy) return;
     const nameMissing = !subscriptionName.trim();
@@ -2244,11 +2276,16 @@ export function App() {
         subscription,
         subscriptionName,
       );
-      saveSubscriptionSnapshot(snapshot);
-      setSubscription(snapshot);
+      await persistSubscriptionSnapshot(snapshot);
       setMessage(subscriptionImportMessage(report, ui));
       void refreshNodeLatencies(report.nodes);
     } catch (error) {
+      const storageMessage = secureStorageFailureMessage(error, ui);
+      if (storageMessage) {
+        setSubscriptionFieldErrors({ general: "update-failed", name: null, url: null });
+        setMessage(storageMessage);
+        return;
+      }
       const code = subscriptionErrorCode(error);
       setSubscriptionFieldErrors({
         general: code === "fetch-failed" || code === "url-required" ? null : code,
@@ -2310,8 +2347,7 @@ export function App() {
         // Keep the freshly updated snapshot if the previous selection disappeared.
       }
 
-      saveSubscriptionSnapshot(nextSnapshot);
-      setSubscription(nextSnapshot);
+      await persistSubscriptionSnapshot(nextSnapshot);
       if (failures.length > 0) {
         setSubscriptionBatchFeedback({
           code: failures[0] ?? "update-failed",
@@ -2333,6 +2369,9 @@ export function App() {
           : templateValue(ui.subscriptionsUpdated, "count", String(remoteSubscriptions.length)),
       );
       void refreshNodeLatencies(updatedNodes, false);
+    } catch (error) {
+      setSubscriptionOperationError("update-failed");
+      setMessage(secureStorageFailureMessage(error, ui) ?? ui.subscriptionUpdateFailed);
     } finally {
       subscriptionMutationRef.current = false;
       setSubscriptionUpdateAllBusy(false);
@@ -2380,7 +2419,7 @@ export function App() {
     return nextLatencies;
   }
 
-  function importSubscriptionText() {
+  async function importSubscriptionText() {
     setSubscriptionFieldErrors((current) => ({ ...current, general: null }));
     setSubscriptionOperationError(null);
     try {
@@ -2391,56 +2430,76 @@ export function App() {
         subscription,
         subscriptionName || ui.manualSubscriptionName,
       );
-      saveSubscriptionSnapshot(snapshot);
-      setSubscription(snapshot);
+      await persistSubscriptionSnapshot(snapshot);
       setSubscriptionText("");
       setMessage(subscriptionImportMessage(report, ui));
       void refreshNodeLatencies(report.nodes);
     } catch (error) {
+      const storageMessage = secureStorageFailureMessage(error, ui);
+      if (storageMessage) {
+        setSubscriptionFieldErrors((current) => ({ ...current, general: "update-failed" }));
+        setMessage(storageMessage);
+        return;
+      }
       const code = subscriptionErrorCode(error);
       setSubscriptionFieldErrors((current) => ({ ...current, general: code }));
       setMessage(subscriptionErrorMessage(code, ui));
     }
   }
 
-  function chooseSubscription(subscriptionId: string) {
+  async function chooseSubscription(subscriptionId: string) {
     setSubscriptionOperationError(null);
     try {
       const snapshot = selectSubscription(subscription, subscriptionId);
-      saveSubscriptionSnapshot(snapshot);
-      setSubscription(snapshot);
+      await persistSubscriptionSnapshot(snapshot);
       setMessage(ui.subscriptionSelected);
     } catch (error) {
+      const storageMessage = secureStorageFailureMessage(error, ui);
+      if (storageMessage) {
+        setSubscriptionOperationError("update-failed");
+        setMessage(storageMessage);
+        return;
+      }
       const code = subscriptionErrorCode(error, "subscription-missing");
       setSubscriptionOperationError(code);
       setMessage(subscriptionErrorMessage(code, ui));
     }
   }
 
-  function chooseNode(nodeId: string) {
+  async function chooseNode(nodeId: string) {
     setSubscriptionOperationError(null);
     try {
       const snapshot = selectSubscriptionNode(subscription, nodeId);
-      saveSubscriptionSnapshot(snapshot);
-      setSubscription(snapshot);
+      await persistSubscriptionSnapshot(snapshot);
       setNodePickerOpen(false);
       setXrayProbe({ error: null, report: null, state: "idle" });
       setMessage(ui.nodeSelected);
     } catch (error) {
+      const storageMessage = secureStorageFailureMessage(error, ui);
+      if (storageMessage) {
+        setSubscriptionOperationError("update-failed");
+        setMessage(storageMessage);
+        return;
+      }
       const code = subscriptionErrorCode(error, "node-missing");
       setSubscriptionOperationError(code);
       setMessage(subscriptionErrorMessage(code, ui));
     }
   }
 
-  function deleteSubscription(subscriptionId: string) {
+  async function deleteSubscription(subscriptionId: string) {
     setSubscriptionOperationError(null);
     try {
       const snapshot = removeSubscription(subscription, subscriptionId);
-      saveSubscriptionSnapshot(snapshot);
-      setSubscription(snapshot);
+      await persistSubscriptionSnapshot(snapshot);
       setMessage(ui.subscriptionRemoved);
     } catch (error) {
+      const storageMessage = secureStorageFailureMessage(error, ui);
+      if (storageMessage) {
+        setSubscriptionOperationError("update-failed");
+        setMessage(storageMessage);
+        return;
+      }
       const code = subscriptionErrorCode(error, "subscription-missing");
       setSubscriptionOperationError(code);
       setMessage(subscriptionErrorMessage(code, ui));
@@ -2462,31 +2521,35 @@ export function App() {
     setSubscriptionFieldErrors((current) => ({ ...current, general: null }));
   }
 
-  function saveTachyonServerProfile() {
+  async function saveTachyonServerProfile() {
     try {
       const snapshot = upsertTachyonServerProfile(tachyonServers, tachyonServerDraft);
       const server = activeTachyonServer(snapshot);
-      saveTachyonServerSnapshot(snapshot);
-      setTachyonServers(snapshot);
+      await persistTachyonServerSnapshot(snapshot);
       setTachyonServerDraft(draftFromTachyonServerProfile(server));
       setRuntimeInputs((current) => runtimeWithTachyonServer(current, server));
       setMessage(ui.tachyonServerSaved);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : ui.tachyonServerSaveFailed);
+      setMessage(
+        secureStorageFailureMessage(error, ui) ??
+          (error instanceof Error ? error.message : ui.tachyonServerSaveFailed),
+      );
     }
   }
 
-  function chooseTachyonServerProfile(profileId: string) {
+  async function chooseTachyonServerProfile(profileId: string) {
     try {
       const snapshot = selectTachyonServerProfile(tachyonServers, profileId);
       const server = activeTachyonServer(snapshot);
-      saveTachyonServerSnapshot(snapshot);
-      setTachyonServers(snapshot);
+      await persistTachyonServerSnapshot(snapshot);
       setTachyonServerDraft(draftFromTachyonServerProfile(server));
       setRuntimeInputs((current) => runtimeWithTachyonServer(current, server));
       setMessage(ui.tachyonServerSelected);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : ui.tachyonServerSelectionFailed);
+      setMessage(
+        secureStorageFailureMessage(error, ui) ??
+          (error instanceof Error ? error.message : ui.tachyonServerSelectionFailed),
+      );
     }
   }
 
@@ -2495,17 +2558,19 @@ export function App() {
     setMessage(ui.tachyonServerEditing);
   }
 
-  function deleteTachyonServerProfile(profileId: string) {
+  async function deleteTachyonServerProfile(profileId: string) {
     try {
       const snapshot = removeTachyonServerProfile(tachyonServers, profileId);
       const server = activeTachyonServer(snapshot);
-      saveTachyonServerSnapshot(snapshot);
-      setTachyonServers(snapshot);
+      await persistTachyonServerSnapshot(snapshot);
       setTachyonServerDraft(draftFromTachyonServerProfile(server));
       setRuntimeInputs((current) => runtimeWithTachyonServer(current, server));
       setMessage(ui.tachyonServerRemoved);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : ui.tachyonServerRemovalFailed);
+      setMessage(
+        secureStorageFailureMessage(error, ui) ??
+          (error instanceof Error ? error.message : ui.tachyonServerRemovalFailed),
+      );
     }
   }
 
@@ -2644,8 +2709,7 @@ export function App() {
           throw new Error(ui.pluginSwitchNeedLatency);
         }
         const snapshot = selectSubscriptionNode(subscription, bestNode.id);
-        saveSubscriptionSnapshot(snapshot);
-        setSubscription(snapshot);
+        await persistSubscriptionSnapshot(snapshot);
         const result = `${pluginTitle} -> ${bestNode.name}`;
         const nextPluginState = recordPluginRun(pluginState, pluginId, { result });
         savePluginState(nextPluginState);
@@ -3360,8 +3424,50 @@ export function App() {
   }
 
   useEffect(() => {
-    saveXrayAdvancedEditor(xrayAdvancedEditor);
-  }, [xrayAdvancedEditor]);
+    let active = true;
+    void initializeSecureStorage()
+      .then((result) => {
+        if (!active) return;
+        setSubscription(subscriptionSnapshotFromStored(result.payload.subscriptions));
+        setTachyonServers(tachyonServerSnapshotFromStored(result.payload.tachyonServers));
+        setXrayAdvancedEditor(xrayAdvancedEditorFromStored(result.payload.xrayAdvancedEditor));
+        const psk =
+          typeof result.payload.runtimeTgpAuthPsk === "string"
+            ? result.payload.runtimeTgpAuthPsk
+            : "";
+        setRuntimeInputs((current) => ({
+          ...current,
+          tachyonTgpAuthPsk: psk || current.tachyonTgpAuthPsk,
+        }));
+        setSecureStorageReady(true);
+        if (result.migratedSections.length > 0) {
+          setMessage(ui.secureStorageMigrated);
+        }
+      })
+      .catch((error) => {
+        if (!active) return;
+        setSecureStorageReady(false);
+        setMessage(
+          error instanceof SecureStorageError && error.code.includes("migration")
+            ? ui.secureStorageMigrationFailed
+            : ui.secureStorageUnavailable,
+        );
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!secureStorageReady) return;
+    const timer = globalThis.setTimeout(() => {
+      void saveSecureStorageSection(
+        secureVaultSections.xrayAdvancedEditor,
+        xrayAdvancedEditor,
+      ).catch(() => setMessage(ui.secureStorageSaveFailed));
+    }, 250);
+    return () => globalThis.clearTimeout(timer);
+  }, [secureStorageReady, xrayAdvancedEditor]);
 
   useEffect(() => {
     let active = true;
@@ -3428,7 +3534,12 @@ export function App() {
       })
       .catch(() => undefined);
     void getRuntimeSettings()
-      .then((settings) => setRuntimeInputs(settings))
+      .then((settings) =>
+        setRuntimeInputs((current) => ({
+          ...settings,
+          tachyonTgpAuthPsk: current.tachyonTgpAuthPsk || settings.tachyonTgpAuthPsk,
+        })),
+      )
       .catch(() => undefined);
     void refreshManagedBinaries();
     void refreshRuntime();

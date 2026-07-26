@@ -24,6 +24,16 @@ The Tauri renderer uses an explicit Content Security Policy. Scripts load only f
 
 Runtime settings, Xray configuration, Tachyon configuration, proxy recovery journals, and atomic candidates use the common secure writer. Files are mode `0600` on Unix. On Windows, Prism applies a protected DACL granting full access only to the current user, Local System, and Administrators. Atomic replacement reapplies the policy to the canonical file.
 
-Xray diagnostics are redacted and bounded before reaching the UI. New backend errors must never include configuration bodies, PSKs, subscription credentials, node URIs, or authorization headers.
+## Credential-protected vault
 
-Credential migration from renderer storage to an operating-system credential vault is tracked separately and is not claimed by this document.
+Subscription URLs, node URIs, complete imported Xray outbound data, advanced Xray JSON drafts, Tachyon server profiles, and TGP PSKs are never persisted in WebView `localStorage`. Prism stores only non-sensitive preferences and identifiers there.
+
+Prism creates a random 256-bit master key and stores that small key in the operating-system credential service through `keyring 4.1.5`: Windows Credential Manager, macOS Keychain, or Linux Secret Service. The potentially large data set is serialized into a versioned vault under the application data directory and authenticated-encrypted with RustCrypto `XChaCha20-Poly1305` (`chacha20poly1305 0.11.0`). Every write uses a fresh 192-bit nonce, fixed versioned associated data, an atomic replace, owner-only file permissions, and a decrypt-and-compare verification pass. Secret byte buffers are zeroized where their representation permits it.
+
+Prism does not store the subscription corpus directly as a credential entry and does not implement its own cipher. If the credential service is unavailable, the key is missing, authentication fails, or the vault cannot be verified, the operation fails closed; there is no plaintext file or WebView fallback.
+
+On first launch after this change, the Rust backend imports the legacy subscription snapshot, Tachyon profiles, advanced Xray draft, and runtime TGP PSK. The renderer removes an old `localStorage` value only after the encrypted write has been read back and compared with that exact section. Failed or conflicting migrations retain the legacy value and show a localized error so the user can retry without losing data. Repeated migration is idempotent.
+
+The generated Xray and Tachyon runtime configuration files must still exist temporarily for their respective cores. They use the protected-file policy above and are not WebView persistence.
+
+Xray diagnostics are redacted and bounded before reaching the UI. New backend errors must never include configuration bodies, PSKs, subscription credentials, node URIs, or authorization headers.

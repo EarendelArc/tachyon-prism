@@ -16,6 +16,7 @@ use tauri::Manager;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+mod secure_vault;
 mod system_proxy;
 
 #[derive(Serialize)]
@@ -42,7 +43,7 @@ struct RuntimePaths {
     runtime_settings_path: String,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeSettings {
     #[serde(default)]
@@ -913,6 +914,48 @@ fn fetch_subscription_text(source_url: String) -> Result<String, String> {
         return Err("subscription URL is required".to_string());
     }
     fetch_subscription_url(&url)
+}
+
+#[tauri::command]
+fn load_secure_vault(app: tauri::AppHandle) -> Result<secure_vault::SecureVaultLoadResult, String> {
+    secure_vault::load(&app)
+}
+
+#[tauri::command]
+fn save_secure_vault_section(
+    app: tauri::AppHandle,
+    section: String,
+    value: Value,
+) -> Result<secure_vault::SecureVaultLoadResult, String> {
+    secure_vault::save_section(&app, &section, value)
+}
+
+#[tauri::command]
+fn migrate_secure_vault(
+    app: tauri::AppHandle,
+    mut payload: secure_vault::SecureVaultPayload,
+) -> Result<secure_vault::SecureVaultMigrationResult, String> {
+    let settings = load_runtime_settings(&app)?;
+    let legacy_psk = settings.tachyon_tgp_auth_psk.trim().to_string();
+    if payload.runtime_tgp_auth_psk.is_none() && !legacy_psk.is_empty() {
+        payload.runtime_tgp_auth_psk = Some(Value::String(legacy_psk.clone()));
+    }
+
+    let migration = secure_vault::migrate(&app, payload)?;
+    if !settings.tachyon_tgp_auth_psk.is_empty() {
+        if migration.payload.runtime_tgp_auth_psk.as_ref() != Some(&Value::String(legacy_psk)) {
+            return Err("secure-vault-migration-conflict".to_string());
+        }
+        let mut scrubbed = settings;
+        scrubbed.tachyon_tgp_auth_psk.clear();
+        save_runtime_settings_plain_file(&app, &scrubbed)?;
+    }
+    Ok(migration)
+}
+
+#[tauri::command]
+fn clear_secure_vault(app: tauri::AppHandle) -> Result<(), String> {
+    secure_vault::clear(&app)
 }
 
 #[tauri::command]
@@ -3361,16 +3404,31 @@ fn save_runtime_settings_file(
     settings: RuntimeSettings,
 ) -> Result<RuntimeSettings, String> {
     let settings = normalize_runtime_settings(app, settings)?;
+    secure_vault::save_section(
+        app,
+        secure_vault::SECTION_RUNTIME_TGP_PSK,
+        Value::String(settings.tachyon_tgp_auth_psk.clone()),
+    )?;
+    save_runtime_settings_plain_file(app, &settings)?;
+    Ok(settings)
+}
+
+fn save_runtime_settings_plain_file(
+    app: &tauri::AppHandle,
+    settings: &RuntimeSettings,
+) -> Result<(), String> {
     let settings_path = runtime_settings_path(app)?;
     let config_dir = settings_path
         .parent()
         .ok_or_else(|| "runtime settings path has no parent".to_string())?;
     fs::create_dir_all(config_dir)
         .map_err(|err| format!("create config directory {}: {err}", config_dir.display()))?;
-    let data = serde_json::to_string_pretty(&settings)
+    let mut persisted = settings.clone();
+    persisted.tachyon_tgp_auth_psk.clear();
+    let data = serde_json::to_string_pretty(&persisted)
         .map_err(|err| format!("encode runtime settings: {err}"))?;
     write_atomic(&settings_path, &(data + "\n"))?;
-    Ok(settings)
+    Ok(())
 }
 
 fn normalize_runtime_settings(
@@ -9396,6 +9454,10 @@ pub fn run() {
             core_release_diagnostics,
             install_wintun_sidecar,
             fetch_subscription_text,
+            load_secure_vault,
+            save_secure_vault_section,
+            migrate_secure_vault,
+            clear_secure_vault,
             runtime_status,
             runtime_process_logs,
             runtime_privilege_status,

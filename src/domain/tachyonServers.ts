@@ -21,8 +21,6 @@ export interface TachyonServerDraft {
   remark: string;
 }
 
-const storageKey = "tachyon.prism.tachyonServers.v1";
-
 export const emptyTachyonServerSnapshot: TachyonServerSnapshot = {
   profiles: [],
   selectedProfileId: "",
@@ -110,20 +108,21 @@ export function draftFromTachyonServerProfile(
   };
 }
 
-export function loadTachyonServerSnapshot(): TachyonServerSnapshot {
+export function tachyonServerSnapshotFromStored(value: unknown): TachyonServerSnapshot {
   try {
-    const raw = globalThis.localStorage?.getItem(storageKey);
-    if (!raw) {
+    if (!isRecord(value)) {
       return emptyTachyonServerSnapshot;
     }
-    return normalizeSnapshot(JSON.parse(raw) as Partial<TachyonServerSnapshot>);
+    return normalizeSnapshot(value as Partial<TachyonServerSnapshot>);
   } catch {
     return emptyTachyonServerSnapshot;
   }
 }
 
-export function saveTachyonServerSnapshot(snapshot: TachyonServerSnapshot): void {
-  globalThis.localStorage?.setItem(storageKey, JSON.stringify(normalizeSnapshot(snapshot)));
+export function tachyonServerSnapshotForStorage(
+  snapshot: TachyonServerSnapshot,
+): TachyonServerSnapshot {
+  return normalizeSnapshot(snapshot);
 }
 
 function normalizeDraft(draft: TachyonServerDraft, profileId: string): TachyonServerProfile {

@@ -1,26 +1,16 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { buildCoreClientConfigDraft } from "../configDrafts";
 import {
   activeTachyonServer,
   draftFromTachyonServerProfile,
   emptyTachyonServerSnapshot,
-  loadTachyonServerSnapshot,
   removeTachyonServerProfile,
-  saveTachyonServerSnapshot,
   selectTachyonServerProfile,
   tachyonServerEndpoint,
+  tachyonServerSnapshotForStorage,
+  tachyonServerSnapshotFromStored,
   upsertTachyonServerProfile,
 } from "../tachyonServers";
-
-const originalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
-
-afterEach(() => {
-  if (originalStorage) {
-    Object.defineProperty(globalThis, "localStorage", originalStorage);
-  } else {
-    Reflect.deleteProperty(globalThis, "localStorage");
-  }
-});
 
 describe("tachyon server profiles", () => {
   it("stores Tachyon server profiles independently from Xray nodes", () => {
@@ -111,16 +101,7 @@ describe("tachyon server profiles", () => {
     ).toThrow(/address/);
   });
 
-  it("round-trips normalized profiles through localStorage", () => {
-    const store = new Map<string, string>();
-    Object.defineProperty(globalThis, "localStorage", {
-      configurable: true,
-      value: {
-        getItem: (key: string) => store.get(key) ?? null,
-        removeItem: (key: string) => store.delete(key),
-        setItem: (key: string, value: string) => store.set(key, value),
-      },
-    });
+  it("round-trips normalized profiles through the vault payload", () => {
     const snapshot = upsertTachyonServerProfile(emptyTachyonServerSnapshot, {
       name: "Stored",
       address: "stored.example.com",
@@ -129,8 +110,9 @@ describe("tachyon server profiles", () => {
       remark: "saved",
     });
 
-    saveTachyonServerSnapshot(snapshot);
-    const loaded = loadTachyonServerSnapshot();
+    const loaded = tachyonServerSnapshotFromStored(
+      tachyonServerSnapshotForStorage(snapshot),
+    );
 
     expect(activeTachyonServer(loaded)?.name).toBe("Stored");
     expect(draftFromTachyonServerProfile(activeTachyonServer(loaded))).toMatchObject({
