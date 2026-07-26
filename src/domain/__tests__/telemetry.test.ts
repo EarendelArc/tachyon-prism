@@ -1,4 +1,4 @@
-import { beforeEach, describe, it, expect } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import type {
   HelloData,
   TelemetryData,
@@ -6,28 +6,13 @@ import type {
   TelemetryEvent,
   TelemetryState,
 } from "../telemetry";
-import { TelemetryClient } from "../telemetry";
-
-class MockEventSource {
-  onerror: (() => void) | null = null;
-
-  constructor(public readonly url: string) {}
-
-  addEventListener(): void {
-    // Tests in this file assert connection state transitions only.
-  }
-
-  close(): void {
-    // no-op
-  }
-}
+import { localizeTelemetryError, TelemetryClient } from "../telemetry";
 
 beforeEach(() => {
-  Object.defineProperty(globalThis, "EventSource", {
-    configurable: true,
-    value: MockEventSource,
-  });
+  vi.useFakeTimers();
 });
+
+afterEach(() => vi.useRealTimers());
 
 describe("TelemetryClient", () => {
   it("starts in disconnected state", () => {
@@ -40,34 +25,65 @@ describe("TelemetryClient", () => {
     expect(state.recentErrors).toEqual([]);
   });
 
-  it("notifies listeners on state change", () => {
-    const client = new TelemetryClient();
+  it("polls telemetry only through the injected IPC poller", async () => {
+    const poller = vi.fn().mockResolvedValue({
+      events: [
+        { type: "hello", seq: 1, ts: "now", data: { version: "0.1.0", platform: "windows" } },
+        { type: "telemetry", seq: 2, ts: "now", data: { packets_read: 7 } },
+      ],
+    });
+    const client = new TelemetryClient(poller);
     const states: TelemetryState[] = [];
     const unsub = client.subscribe((state) => states.push({ ...state }));
-
-    // connect() will set to "connecting" (EventSource not available in test env,
-    // so it will immediately error, but the state transition still fires).
     client.connect();
+    await vi.waitFor(() => expect(poller).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(client.getState().connection).toBe("connected"));
 
     expect(states.length).toBeGreaterThanOrEqual(1);
     expect(states[0].connection).toBe("connecting");
+    expect(client.getState().hello?.version).toBe("0.1.0");
+    expect(client.getState().latestTelemetry?.packets_read).toBe(7);
 
     unsub();
+    client.disconnect();
   });
 
   it("unsubscribe stops notifications", () => {
-    const client = new TelemetryClient();
+    const client = new TelemetryClient(() => new Promise(() => undefined));
     let count = 0;
     const unsub = client.subscribe(() => count++);
     unsub();
     client.connect();
     expect(count).toBe(0);
+    client.disconnect();
   });
 
   it("disconnect resets connection state", () => {
-    const client = new TelemetryClient();
+    const client = new TelemetryClient(() => new Promise(() => undefined));
+    client.connect();
     client.disconnect();
     expect(client.getState().connection).toBe("disconnected");
+  });
+
+  it("backs off after IPC errors without exposing backend details", async () => {
+    const poller = vi.fn().mockRejectedValue(new Error("tachyon-telemetry-connect-failed: sentinel"));
+    const client = new TelemetryClient(poller);
+    client.connect();
+    await vi.waitFor(() => expect(client.getState().connection).toBe("disconnected"));
+    expect(client.getState().recentErrors[0]).toEqual({
+      message: "tachyon-telemetry-connect-failed",
+      source: "telemetry-ipc",
+    });
+    expect(JSON.stringify(client.getState())).not.toContain("sentinel");
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => expect(poller).toHaveBeenCalledTimes(2));
+    client.disconnect();
+  });
+
+  it("localizes stable IPC error codes", () => {
+    expect(localizeTelemetryError("tachyon-telemetry-connect-failed", "zh-CN")).toContain("无法连接");
+    expect(localizeTelemetryError("tachyon-telemetry-connect-failed", "en")).toContain("Could not connect");
+    expect(localizeTelemetryError("unknown", "zh-CN")).toContain("不可用");
   });
 });
 

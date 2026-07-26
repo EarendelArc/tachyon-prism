@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   loadAppearancePreferences,
@@ -70,7 +71,6 @@ import {
   tachyonCorePreflightCheckMessage,
   tachyonCorePreflightReadinessMessage,
   tachyonCorePreflightStartBlockReason,
-  tachyonIpcBaseUrl,
   testXrayLocalProxies,
   testTcpLatency,
   validateTachyonCoreConfig,
@@ -167,7 +167,7 @@ import {
   PluginStateError,
   type PluginStateSnapshot,
 } from "./domain/plugins";
-import { TelemetryClient } from "./domain/telemetry";
+import { localizeTelemetryError, TelemetryClient } from "./domain/telemetry";
 import type { TelemetryState } from "./domain/telemetry";
 import { invokeDesktop, isTauriRuntime } from "./domain/tauri";
 
@@ -529,6 +529,7 @@ const zh = {
   processName: "进程名",
   quickStart: "快速启动",
   ready: "就绪",
+  shutdownBlocked: "为防止系统代理失效，退出已被阻止",
   secureStorageMigrated: "敏感配置已迁移至系统凭据保护的加密保险库",
   secureStorageMigrationFailed: "敏感配置迁移失败；旧数据已保留，未写入明文回退",
   secureStorageUnavailable: "系统安全存储不可用；敏感配置不会以明文保存",
@@ -961,6 +962,7 @@ const en: typeof zh = {
   processName: "Process name",
   quickStart: "Quick Start",
   ready: "Ready",
+  shutdownBlocked: "Exit was blocked to prevent a broken system proxy",
   secureStorageMigrated: "Sensitive settings were migrated to the credential-protected encrypted vault",
   secureStorageMigrationFailed: "Sensitive settings migration failed; legacy data was retained and no plaintext fallback was written",
   secureStorageUnavailable: "System secure storage is unavailable; sensitive settings will not be saved as plaintext",
@@ -1790,14 +1792,7 @@ export function App() {
     recentRoutes: [],
     recentErrors: [],
   }));
-  const telemetryBaseUrl = useMemo(
-    () => tachyonIpcBaseUrl(runtimeInputs),
-    [runtimeInputs.tachyonIpcListen, runtimeInputs.tachyonIpcPort],
-  );
-  const telemetryClient = useMemo(
-    () => new TelemetryClient(telemetryBaseUrl),
-    [telemetryBaseUrl],
-  );
+  const telemetryClient = useMemo(() => new TelemetryClient(), []);
   const [xrayTrafficStats, setXrayTrafficStats] = useState<XrayTrafficStats>(emptyXrayTrafficStats);
   const [xrayTrafficError, setXrayTrafficError] = useState<string | null>(null);
   const [xrayProbe, setXrayProbe] = useState<XrayProbeStatus>({
@@ -2765,7 +2760,11 @@ export function App() {
           releaseDiagnostics.xray?.lastError,
           releaseDiagnostics.tachyonCore?.lastError,
           ...telemetry.recentErrors.map((error) =>
-            error.source ? `${error.source}: ${error.message}` : error.message,
+            error.source === "telemetry-ipc"
+              ? localizeTelemetryError(error.message, language)
+              : error.source
+                ? `${error.source}: ${error.message}`
+                : error.message,
           ),
         ].filter((value): value is string => Boolean(value)),
         releaseDiagnostics,
@@ -3579,6 +3578,22 @@ export function App() {
       telemetryClient.disconnect();
     };
   }, [telemetryClient]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<string>("runtime-cleanup-error", (event) => {
+      setMessage(`${ui.shutdownBlocked}: ${event.payload}`);
+    }).then((release) => {
+      if (disposed) release();
+      else unlisten = release;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [ui.shutdownBlocked]);
 
   useEffect(() => {
     if (isTauriRuntime()) return;

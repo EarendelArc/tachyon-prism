@@ -3,7 +3,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -259,6 +259,21 @@ struct XrayTrafficStats {
     queried_at: Option<u64>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct TachyonTelemetryEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    seq: u64,
+    ts: String,
+    data: Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TachyonTelemetryPoll {
+    events: Vec<TachyonTelemetryEvent>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TcpLatencyResult {
@@ -338,6 +353,10 @@ const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(3);
 const STARTUP_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_READINESS_INTERVAL: Duration = Duration::from_millis(100);
 const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+const PROXY_RESTORE_ATTEMPTS: usize = 3;
+const PROXY_RESTORE_RETRY_DELAY: Duration = Duration::from_millis(100);
+const TELEMETRY_EVENT_LIMIT: usize = 64;
+const TELEMETRY_RESPONSE_LIMIT_BYTES: usize = 256 * 1024;
 
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -972,7 +991,12 @@ fn runtime_status(
         processes.status()
     };
     if should_restore_proxy_for_runtime(&status) {
-        let _ = system_proxy::restore_if_pending(&app, &proxy_state);
+        system_proxy::restore_if_pending(&app, &proxy_state).map_err(|error| {
+            format!(
+                "restore system proxy for stopped Xray: {}",
+                sanitize_xray_ui_error(error)
+            )
+        })?;
     }
     Ok(status)
 }
@@ -1011,6 +1035,90 @@ fn xray_traffic_stats(app: tauri::AppHandle) -> Result<XrayTrafficStats, String>
     let mut stats = parse_xray_stats_query_output(&output);
     stats.queried_at = epoch_seconds(SystemTime::now());
     Ok(stats)
+}
+
+#[tauri::command]
+fn tachyon_telemetry_events(app: tauri::AppHandle) -> Result<TachyonTelemetryPoll, String> {
+    let settings = load_runtime_settings(&app)?;
+    let host = local_probe_host(&settings.tachyon_ipc_listen)?;
+    let url = format!(
+        "http://{}:{}/v1/telemetry/sse",
+        http_url_host(&host),
+        settings.tachyon_ipc_port,
+    );
+    let interval = Duration::from_millis(u64::from(
+        settings.tachyon_telemetry_interval_ms.clamp(100, 2_000),
+    ));
+    poll_tachyon_telemetry_url(&url, interval + Duration::from_secs(1))
+}
+
+fn poll_tachyon_telemetry_url(
+    url: &str,
+    timeout: Duration,
+) -> Result<TachyonTelemetryPoll, String> {
+    let mut response = health_agent_with_timeout(timeout)
+        .get(url)
+        .header("Accept", "text/event-stream")
+        .header("User-Agent", "Tachyon-Prism/0.1")
+        .call()
+        .map_err(|error| format!("tachyon-telemetry-connect-failed: {error}"))?;
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !content_type.starts_with("text/event-stream") {
+        return Err("tachyon-telemetry-invalid-content-type".to_string());
+    }
+
+    parse_tachyon_sse_batch(BufReader::new(response.body_mut().as_reader()))
+}
+
+fn parse_tachyon_sse_batch(reader: impl Read) -> Result<TachyonTelemetryPoll, String> {
+    let mut reader = BufReader::new(reader.take(TELEMETRY_RESPONSE_LIMIT_BYTES as u64 + 1));
+    let mut events = Vec::new();
+    let mut consumed = 0_usize;
+    let mut data_lines = Vec::new();
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .map_err(|_| "tachyon-telemetry-read-failed".to_string())?;
+        if read == 0 {
+            break;
+        }
+        consumed = consumed.saturating_add(read);
+        if consumed > TELEMETRY_RESPONSE_LIMIT_BYTES {
+            return Err("tachyon-telemetry-response-too-large".to_string());
+        }
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            if data_lines.is_empty() {
+                continue;
+            }
+            let encoded = data_lines.join("\n");
+            data_lines.clear();
+            let event: TachyonTelemetryEvent = serde_json::from_str(&encoded)
+                .map_err(|_| "tachyon-telemetry-invalid-event".to_string())?;
+            let is_snapshot = event.event_type == "telemetry";
+            events.push(event);
+            if events.len() >= TELEMETRY_EVENT_LIMIT || is_snapshot {
+                break;
+            }
+            continue;
+        }
+        if let Some(data) = line.strip_prefix("data:") {
+            data_lines.push(data.strip_prefix(' ').unwrap_or(data).to_string());
+        }
+    }
+
+    if events.is_empty() {
+        return Err("tachyon-telemetry-stream-ended".to_string());
+    }
+    Ok(TachyonTelemetryPoll { events })
 }
 
 #[tauri::command]
@@ -1386,30 +1494,83 @@ fn stop_all(
     state: tauri::State<RuntimeState>,
     proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
 ) -> Result<StopAllResult, String> {
-    let mut errors = Vec::new();
-    let (proxy_restored, proxy_restore_status) =
-        match system_proxy::restore_if_pending(&app, &proxy_state) {
-            Ok(true) => (true, "restored".to_string()),
-            Ok(false) => (false, "notPending".to_string()),
-            Err(error) => {
-                errors.push(format!("restore system proxy: {error}"));
-                (false, "failed".to_string())
-            }
-        };
-    let runtime = {
-        let mut processes = state
-            .processes
-            .lock()
-            .map_err(|err| format!("lock runtime state: {err}"))?;
-        errors.extend(processes.stop_all_checked());
-        processes.status()
-    };
+    let mut processes = state
+        .processes
+        .lock()
+        .map_err(|err| format!("lock runtime state: {err}"))?;
+    let outcome = execute_runtime_shutdown(
+        &mut *processes,
+        || system_proxy::restore_if_pending(&app, &proxy_state),
+        thread::sleep,
+    );
+    let runtime = processes.status();
     Ok(StopAllResult {
         runtime,
+        proxy_restored: outcome.proxy_restored,
+        proxy_restore_status: outcome.proxy_restore_status,
+        errors: outcome.errors,
+    })
+}
+
+trait RuntimeStopControl {
+    fn stop_tachyon_core_checked(&mut self) -> Result<(), String>;
+    fn stop_xray_checked(&mut self) -> Result<(), String>;
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RuntimeShutdownOutcome {
+    proxy_restored: bool,
+    proxy_restore_status: String,
+    xray_stop_blocked: bool,
+    errors: Vec<String>,
+}
+
+fn execute_runtime_shutdown(
+    runtime: &mut impl RuntimeStopControl,
+    mut restore_proxy: impl FnMut() -> Result<bool, String>,
+    mut wait: impl FnMut(Duration),
+) -> RuntimeShutdownOutcome {
+    let mut restore_errors = Vec::new();
+    let mut proxy_restored = false;
+    let mut proxy_restore_status = "failed".to_string();
+    for attempt in 1..=PROXY_RESTORE_ATTEMPTS {
+        match restore_proxy() {
+            Ok(restored) => {
+                proxy_restored = restored;
+                proxy_restore_status = if restored { "restored" } else { "notPending" }.to_string();
+                restore_errors.clear();
+                break;
+            }
+            Err(error) => restore_errors.push(format!(
+                "restore system proxy attempt {attempt}/{PROXY_RESTORE_ATTEMPTS}: {}",
+                sanitize_xray_ui_error(error)
+            )),
+        }
+        if attempt < PROXY_RESTORE_ATTEMPTS {
+            wait(PROXY_RESTORE_RETRY_DELAY);
+        }
+    }
+
+    let mut errors = restore_errors;
+    if let Err(error) = runtime.stop_tachyon_core_checked() {
+        errors.push(sanitize_xray_ui_error(error));
+    }
+    let xray_stop_blocked = proxy_restore_status == "failed";
+    if xray_stop_blocked {
+        errors.push(
+            "Xray was kept running because the system proxy could not be restored; retry shutdown before exiting."
+                .to_string(),
+        );
+    } else if let Err(error) = runtime.stop_xray_checked() {
+        errors.push(sanitize_xray_ui_error(error));
+    }
+
+    RuntimeShutdownOutcome {
         proxy_restored,
         proxy_restore_status,
+        xray_stop_blocked,
         errors,
-    })
+    }
 }
 
 fn validate_xray_config_file(
@@ -1581,13 +1742,7 @@ fn config_validation_result(
     command: String,
     output: Result<Output, String>,
 ) -> ConfigValidationResult {
-    let sanitize = |value: &str| {
-        if target == "xray" {
-            sanitize_xray_diagnostic(value).text
-        } else {
-            value.to_string()
-        }
-    };
+    let sanitize = |value: &str| sanitize_xray_diagnostic(value).text;
     let command = sanitize(&command);
     match output {
         Ok(output) => {
@@ -1599,7 +1754,7 @@ fn config_validation_result(
             let details = if target == "xray" {
                 xray_validation_output_details(stdout, stderr)
             } else {
-                validation_details(stdout, stderr)
+                validation_details(&sanitize(stdout), &sanitize(stderr))
             };
             let error = (!ok).then(|| details.clone());
             ConfigValidationResult {
@@ -1657,7 +1812,7 @@ fn sanitize_xray_output(value: &str, limit_bytes: usize) -> SanitizedXrayDiagnos
     });
     let assignment_secret = ASSIGNMENT_SECRET.get_or_init(|| {
         Regex::new(
-            r#"(?im)(?P<prefix>(?:^|[^A-Za-z0-9_-])(?P<key>auth|id|password|passwd|pass|token|secret(?:[_-]?key)?|psk|pre(?:[_-]?shared[_-]?key)|private(?:[_-]?key)|uuid)\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'[^'\r\n]*'|[^\s,}\]]+)"#,
+            r#"(?im)(?P<prefix>(?:^|[^A-Za-z0-9_-])(?P<key>auth|id|pass|passwd|password|token|secret(?:[_-]?key)?|psk|private[_-]?key|pre[_-]?shared[_-]?key|uuid|[A-Za-z][A-Za-z0-9_-]+(?:password|passwd|token|secret(?:[_-]?key)?|psk|private[_-]?key|pre[_-]?shared[_-]?key))\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'[^'\r\n]*'|[^\s,}\]]+)"#,
         )
         .expect("valid Xray assignment secret regex")
     });
@@ -1713,7 +1868,18 @@ fn is_sensitive_xray_key(key: &str) -> bool {
             | "secretkey"
             | "token"
             | "uuid"
-    )
+    ) || [
+        "password",
+        "passwd",
+        "presharedkey",
+        "privatekey",
+        "secret",
+        "secretkey",
+        "token",
+        "psk",
+    ]
+    .iter()
+    .any(|suffix| normalized.ends_with(suffix))
 }
 
 fn xray_validation_output_details(stdout: &str, stderr: &str) -> String {
@@ -1769,14 +1935,10 @@ struct SanitizedPreflightOutput {
 }
 
 fn sanitize_preflight_output(output: &str) -> SanitizedPreflightOutput {
-    let redacted = redact_sensitive_paths(output);
-    let mut end = redacted.len().min(PREFLIGHT_OUTPUT_LIMIT_BYTES);
-    while !redacted.is_char_boundary(end) {
-        end -= 1;
-    }
-    let truncated = end < redacted.len();
+    let sanitized = sanitize_xray_output(output, PREFLIGHT_OUTPUT_LIMIT_BYTES);
+    let truncated = sanitized.text.ends_with("\n...[truncated]");
     SanitizedPreflightOutput {
-        text: redacted[..end].to_string(),
+        text: sanitized.text,
         truncated,
     }
 }
@@ -1816,12 +1978,40 @@ fn sanitize_preflight_value(value: &Value) -> Value {
                 if is_raw_preflight_field(key) {
                     continue;
                 }
-                sanitized.insert(key.clone(), sanitize_preflight_value(value));
+                sanitized.insert(
+                    key.clone(),
+                    if is_sensitive_structured_key(key) {
+                        Value::String("<redacted>".to_string())
+                    } else {
+                        sanitize_preflight_value(value)
+                    },
+                );
             }
             Value::Object(sanitized)
         }
         _ => value.clone(),
     }
+}
+
+fn is_sensitive_structured_key(key: &str) -> bool {
+    let normalized = key
+        .bytes()
+        .filter(|byte| !matches!(byte, b'_' | b'-'))
+        .map(|byte| byte.to_ascii_lowercase() as char)
+        .collect::<String>();
+    matches!(normalized.as_str(), "pass" | "passwd" | "password")
+        || [
+            "password",
+            "passwd",
+            "presharedkey",
+            "privatekey",
+            "secret",
+            "secretkey",
+            "token",
+            "psk",
+        ]
+        .iter()
+        .any(|suffix| normalized.ends_with(suffix))
 }
 
 fn is_raw_preflight_field(key: &str) -> bool {
@@ -5564,14 +5754,25 @@ fn secure_file_permissions(_path: &Path) -> Result<(), String> {
 }
 
 #[cfg(all(test, target_os = "windows"))]
-fn windows_file_dacl_is_protected(path: &Path) -> Result<bool, String> {
+#[derive(Debug)]
+struct WindowsFileDaclAudit {
+    protected: bool,
+    trustees: Vec<String>,
+    access_masks: Vec<u32>,
+}
+
+#[cfg(all(test, target_os = "windows"))]
+fn windows_file_dacl_audit(path: &Path) -> Result<WindowsFileDaclAudit, String> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
-    use windows_sys::Win32::Security::{
-        GetSecurityDescriptorControl, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-        SE_DACL_PROTECTED,
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
     };
+    use windows_sys::Win32::Security::{
+        GetAce, GetSecurityDescriptorControl, ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+    };
+    const ACCESS_ALLOWED_ACE_TYPE_VALUE: u8 = 0;
 
     let path_wide: Vec<u16> = path
         .as_os_str()
@@ -5579,6 +5780,7 @@ fn windows_file_dacl_is_protected(path: &Path) -> Result<bool, String> {
         .chain(std::iter::once(0))
         .collect();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
     let result = unsafe {
         GetNamedSecurityInfoW(
             path_wide.as_ptr(),
@@ -5586,7 +5788,7 @@ fn windows_file_dacl_is_protected(path: &Path) -> Result<bool, String> {
             DACL_SECURITY_INFORMATION,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            &mut dacl,
             std::ptr::null_mut(),
             &mut descriptor,
         )
@@ -5594,17 +5796,63 @@ fn windows_file_dacl_is_protected(path: &Path) -> Result<bool, String> {
     if result != 0 {
         return Err(format!("query secure file ACL: Windows error {result}"));
     }
+    if dacl.is_null() {
+        unsafe { LocalFree(descriptor.cast()) };
+        return Err("query secure file ACL: missing DACL".to_string());
+    }
     let mut control = 0_u16;
     let mut revision = 0_u32;
     let ok = unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) };
-    unsafe { LocalFree(descriptor.cast()) };
     if ok == 0 {
+        unsafe { LocalFree(descriptor.cast()) };
         return Err(format!(
             "query secure file ACL control: {}",
             io::Error::last_os_error()
         ));
     }
-    Ok(control & SE_DACL_PROTECTED != 0)
+    let ace_count = unsafe { (*dacl).AceCount };
+    let mut trustees = Vec::with_capacity(ace_count as usize);
+    let mut access_masks = Vec::with_capacity(ace_count as usize);
+    for index in 0..u32::from(ace_count) {
+        let mut ace = std::ptr::null_mut();
+        if unsafe { GetAce(dacl, index, &mut ace) } == 0 || ace.is_null() {
+            unsafe { LocalFree(descriptor.cast()) };
+            return Err(format!(
+                "query secure file ACL ACE {index}: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        let allowed = unsafe { &*(ace.cast::<ACCESS_ALLOWED_ACE>()) };
+        if allowed.Header.AceType != ACCESS_ALLOWED_ACE_TYPE_VALUE {
+            unsafe { LocalFree(descriptor.cast()) };
+            return Err(format!("secure file ACL ACE {index} is not an allow ACE"));
+        }
+        let sid = std::ptr::addr_of!(allowed.SidStart).cast_mut().cast();
+        let mut sid_text = std::ptr::null_mut();
+        if unsafe { ConvertSidToStringSidW(sid, &mut sid_text) } == 0 {
+            unsafe { LocalFree(descriptor.cast()) };
+            return Err(format!(
+                "format secure file ACL ACE {index} SID: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        let sid_len = unsafe {
+            (0..)
+                .take_while(|offset| *sid_text.add(*offset) != 0)
+                .count()
+        };
+        trustees.push(unsafe {
+            String::from_utf16_lossy(std::slice::from_raw_parts(sid_text, sid_len))
+        });
+        unsafe { LocalFree(sid_text.cast()) };
+        access_masks.push(allowed.Mask);
+    }
+    unsafe { LocalFree(descriptor.cast()) };
+    Ok(WindowsFileDaclAudit {
+        protected: control & SE_DACL_PROTECTED != 0,
+        trustees,
+        access_masks,
+    })
 }
 
 impl Drop for SyncedTempFile {
@@ -5849,27 +6097,17 @@ impl RuntimeProcesses {
         };
         let stdout_tail = log_tail_snapshot(&process.stdout_tail);
         let stderr_tail = log_tail_snapshot(&process.stderr_tail);
-        let (stdout_tail, stderr_tail, capacity_bytes_per_stream) = if process.sanitize_diagnostics
-        {
-            (
-                sanitize_xray_diagnostic(&stdout_tail).text,
-                sanitize_xray_diagnostic(&stderr_tail).text,
-                XRAY_DIAGNOSTIC_LIMIT_BYTES,
-            )
-        } else {
-            (stdout_tail, stderr_tail, PROCESS_LOG_TAIL_BYTES)
-        };
+        let (stdout_tail, stderr_tail, capacity_bytes_per_stream) = (
+            sanitize_xray_diagnostic(&stdout_tail).text,
+            sanitize_xray_diagnostic(&stderr_tail).text,
+            XRAY_DIAGNOSTIC_LIMIT_BYTES,
+        );
         Ok(ProcessLogs {
             kind: kind.to_string(),
             stdout_tail,
             stderr_tail,
             capacity_bytes_per_stream,
         })
-    }
-
-    fn stop_all(&mut self) {
-        let _ = self.tachyon_core.stop("tachyon-core");
-        let _ = self.xray.stop("xray");
     }
 
     fn stop_all_checked(&mut self) -> Vec<String> {
@@ -5905,6 +6143,16 @@ impl RuntimeProcesses {
             tachyon_core_config_path,
         };
         execute_start_all(&mut transaction)
+    }
+}
+
+impl RuntimeStopControl for RuntimeProcesses {
+    fn stop_tachyon_core_checked(&mut self) -> Result<(), String> {
+        self.tachyon_core.stop("tachyon-core").map(|_| ())
+    }
+
+    fn stop_xray_checked(&mut self) -> Result<(), String> {
+        self.xray.stop("xray").map(|_| ())
     }
 }
 
@@ -6169,7 +6417,10 @@ impl ManagedProcess {
             return Err(format!("{label} config not found: {}", config.display()));
         }
         validate_process_start_inputs(label, kind, &binary, &config)?;
-        self.sanitize_diagnostics = kind == ManagedBinaryKind::Xray;
+        self.sanitize_diagnostics = matches!(
+            kind,
+            ManagedBinaryKind::Xray | ManagedBinaryKind::TachyonCore
+        );
 
         let mut command = Command::new(&binary);
         command.args(args);
@@ -6442,14 +6693,23 @@ fn epoch_seconds(time: SystemTime) -> Option<u64> {
         .ok()
 }
 
-fn cleanup_runtime(handle: &tauri::AppHandle) {
+fn cleanup_runtime(handle: &tauri::AppHandle) -> Result<(), String> {
     let proxy_runtime = handle.state::<system_proxy::SystemProxyRuntime>();
-    let _ = system_proxy::restore_if_pending(handle, &proxy_runtime);
-
     let runtime = handle.state::<RuntimeState>();
-    if let Ok(mut processes) = runtime.processes.lock() {
-        processes.stop_all();
-    };
+    let mut processes = runtime
+        .processes
+        .lock()
+        .map_err(|error| format!("lock runtime state during shutdown: {error}"))?;
+    let outcome = execute_runtime_shutdown(
+        &mut *processes,
+        || system_proxy::restore_if_pending(handle, &proxy_runtime),
+        thread::sleep,
+    );
+    if outcome.errors.is_empty() {
+        Ok(())
+    } else {
+        Err(outcome.errors.join("; "))
+    }
 }
 
 #[tauri::command]
@@ -6519,7 +6779,8 @@ fn window_set_always_on_top(window: tauri::Window, value: bool) -> Result<bool, 
 }
 
 #[tauri::command]
-fn window_close(window: tauri::Window) -> Result<(), String> {
+fn window_close(app: tauri::AppHandle, window: tauri::Window) -> Result<(), String> {
+    cleanup_runtime(&app)?;
     window.close().map_err(|error| error.to_string())
 }
 
@@ -6725,7 +6986,8 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         for secret in secrets {
             assert!(
                 !sanitized.text.contains(&secret),
-                "leaked assignment secret: {secret}"
+                "leaked assignment secret: {secret}; sanitized={}",
+                sanitized.text
             );
         }
         assert_eq!(sanitized.text.matches("<redacted>").count(), keys.len());
@@ -6954,6 +7216,195 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         assert!(!stopped.get());
     }
 
+    #[derive(Default)]
+    struct FakeStopRuntime {
+        core_running: bool,
+        xray_running: bool,
+        events: Vec<&'static str>,
+    }
+
+    impl RuntimeStopControl for FakeStopRuntime {
+        fn stop_tachyon_core_checked(&mut self) -> Result<(), String> {
+            self.events.push("stopCore");
+            self.core_running = false;
+            Ok(())
+        }
+
+        fn stop_xray_checked(&mut self) -> Result<(), String> {
+            self.events.push("stopXray");
+            self.xray_running = false;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stop_all_retries_proxy_restore_and_keeps_xray_alive_on_failure() {
+        let mut runtime = FakeStopRuntime {
+            core_running: true,
+            xray_running: true,
+            ..Default::default()
+        };
+        let attempts = std::cell::Cell::new(0);
+        let waits = std::cell::Cell::new(0);
+
+        let outcome = execute_runtime_shutdown(
+            &mut runtime,
+            || {
+                attempts.set(attempts.get() + 1);
+                Err("password=shutdown-sentinel".to_string())
+            },
+            |_| waits.set(waits.get() + 1),
+        );
+
+        assert_eq!(attempts.get(), PROXY_RESTORE_ATTEMPTS);
+        assert_eq!(waits.get(), PROXY_RESTORE_ATTEMPTS - 1);
+        assert_eq!(runtime.events, ["stopCore"]);
+        assert!(!runtime.core_running);
+        assert!(runtime.xray_running);
+        assert!(outcome.xray_stop_blocked);
+        assert_eq!(outcome.proxy_restore_status, "failed");
+        assert!(!outcome.errors.join(" ").contains("shutdown-sentinel"));
+        assert!(outcome.errors.join(" ").contains("<redacted>"));
+    }
+
+    #[test]
+    fn stop_all_stops_both_cores_after_a_successful_restore_retry() {
+        let mut runtime = FakeStopRuntime {
+            core_running: true,
+            xray_running: true,
+            ..Default::default()
+        };
+        let attempts = std::cell::Cell::new(0);
+        let outcome = execute_runtime_shutdown(
+            &mut runtime,
+            || {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+                if attempt == 1 {
+                    Err("temporary".to_string())
+                } else {
+                    Ok(true)
+                }
+            },
+            |_| {},
+        );
+
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(runtime.events, ["stopCore", "stopXray"]);
+        assert!(!runtime.core_running && !runtime.xray_running);
+        assert!(outcome.proxy_restored);
+        assert!(!outcome.xray_stop_blocked);
+        assert!(outcome.errors.is_empty());
+    }
+
+    #[test]
+    fn stop_all_handles_xray_only_core_only_and_dual_core_states() {
+        for (core_running, xray_running) in [(false, true), (true, false), (true, true)] {
+            let mut runtime = FakeStopRuntime {
+                core_running,
+                xray_running,
+                ..Default::default()
+            };
+            let outcome = execute_runtime_shutdown(&mut runtime, || Ok(false), |_| {});
+            assert!(outcome.errors.is_empty());
+            assert_eq!(outcome.proxy_restore_status, "notPending");
+            assert!(!runtime.core_running && !runtime.xray_running);
+            assert_eq!(runtime.events, ["stopCore", "stopXray"]);
+        }
+    }
+
+    #[test]
+    fn tachyon_core_diagnostics_redact_json_yaml_assignments_uris_and_logs() {
+        let sentinel = "core-secret-sentinel";
+        let raw = format!(
+            "{{\"auth_psk\":\"{sentinel}\",\"safe\":\"visible\"}}\npassword: {sentinel}\napi_token={sentinel}\nrelay: socks5://user:{sentinel}@example.test:1080"
+        );
+        let validation = config_validation_result(
+            "tachyon-core",
+            format!("tachyon-core validate token={sentinel}"),
+            Ok(test_output(1, raw.as_bytes(), raw.as_bytes())),
+        );
+        let preflight = tachyon_core_preflight_result(
+            "tachyon-core preflight".to_string(),
+            Ok(test_output(1, raw.as_bytes(), raw.as_bytes())),
+        );
+        let mut process = ManagedProcess {
+            sanitize_diagnostics: true,
+            stdout_tail: Arc::new(Mutex::new(raw.clone())),
+            stderr_tail: Arc::new(Mutex::new(raw)),
+            last_error: Some(format!("secret={sentinel}")),
+            ..Default::default()
+        };
+        let status = process.status();
+        let combined = format!(
+            "{} {:?} {} {} {:?}",
+            validation.details,
+            validation.error,
+            preflight.stdout,
+            preflight.stderr,
+            status.last_error
+        );
+        assert!(!combined.contains(sentinel));
+        assert!(combined.contains("<redacted>"));
+        assert!(combined.contains("visible"));
+        assert!(combined.contains("example.test"));
+    }
+
+    #[test]
+    fn tachyon_core_structured_preflight_redacts_sensitive_fields() {
+        let sentinel = "structured-core-sentinel";
+        let stdout = serde_json::json!({
+            "overall": "ok",
+            "checks": [{
+                "code": "SAFE",
+                "status": "ok",
+                "message": "diagnostic preserved",
+                "details": "relay is reachable",
+                "auth_psk": sentinel,
+                "nested": { "api_token": sentinel }
+            }]
+        })
+        .to_string();
+        let result = tachyon_core_preflight_result(
+            "tachyon-core preflight".to_string(),
+            Ok(test_output(0, stdout.as_bytes(), b"")),
+        );
+        let serialized = serde_json::to_string(&result.structured_report).unwrap();
+        assert!(!serialized.contains(sentinel));
+        assert!(serialized.contains("<redacted>"));
+        assert!(serialized.contains("diagnostic preserved"));
+    }
+
+    #[test]
+    fn tachyon_sse_parser_returns_hello_and_first_snapshot() {
+        let stream = concat!(
+            "event: hello\n",
+            "data: {\"type\":\"hello\",\"seq\":1,\"ts\":\"now\",\"data\":{\"version\":\"v1\",\"platform\":\"windows\"}}\n\n",
+            "event: telemetry\n",
+            "data: {\"type\":\"telemetry\",\"seq\":2,\"ts\":\"now\",\"data\":{\"packets_read\":9}}\n\n",
+            "event: telemetry\n",
+            "data: {\"type\":\"telemetry\",\"seq\":3,\"ts\":\"later\",\"data\":{\"packets_read\":10}}\n\n"
+        );
+        let poll = parse_tachyon_sse_batch(stream.as_bytes()).unwrap();
+        assert_eq!(poll.events.len(), 2);
+        assert_eq!(poll.events[0].event_type, "hello");
+        assert_eq!(poll.events[1].event_type, "telemetry");
+        assert_eq!(poll.events[1].data["packets_read"], 9);
+    }
+
+    #[test]
+    fn tachyon_sse_parser_fails_closed_for_malformed_or_oversized_events() {
+        assert_eq!(
+            parse_tachyon_sse_batch("data: {not-json}\n\n".as_bytes()).unwrap_err(),
+            "tachyon-telemetry-invalid-event"
+        );
+        let oversized = format!("data: {}\n\n", "x".repeat(TELEMETRY_RESPONSE_LIMIT_BYTES));
+        assert_eq!(
+            parse_tachyon_sse_batch(oversized.as_bytes()).unwrap_err(),
+            "tachyon-telemetry-response-too-large"
+        );
+    }
+
     fn atomic_candidates(directory: &Path, canonical_name: &str) -> Vec<PathBuf> {
         let canonical = Path::new(canonical_name);
         let prefix = format!(
@@ -7090,10 +7541,7 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
             assert_eq!(mode, 0o600);
         }
         #[cfg(target_os = "windows")]
-        assert!(
-            windows_file_dacl_is_protected(&canonical).expect("query protected DACL"),
-            "runtime config DACL must not inherit broad directory permissions"
-        );
+        assert_private_windows_file_dacl(&canonical);
 
         assert_eq!(
             fs::read_to_string(&canonical).unwrap(),
@@ -7112,13 +7560,89 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         assert!(csp.contains("script-src 'self'"));
         assert!(csp.contains("ipc:"));
         assert!(csp.contains("http://ipc.localhost"));
-        assert!(csp.contains("http://127.0.0.1:*"));
-        assert!(csp.contains("http://[::1]:*"));
+        assert!(!csp.contains("http://127.0.0.1"));
+        assert!(!csp.contains("http://[::1]"));
+        assert!(!csp.contains("http://localhost:"));
         assert!(csp.contains("object-src 'none'"));
         assert!(!csp.contains("'unsafe-eval'"));
         assert!(!csp.contains("https:"));
         assert!(!csp.contains("connect-src *"));
         assert!(!csp.contains("http://*:"));
+
+        let renderer_telemetry = include_str!("../../src/domain/telemetry.ts");
+        assert!(renderer_telemetry.contains("tachyon_telemetry_events"));
+        assert!(!renderer_telemetry.contains("new EventSource"));
+        assert!(!renderer_telemetry.contains("/v1/telemetry/sse"));
+        assert!(!renderer_telemetry.contains("http://127.0.0.1"));
+    }
+
+    #[cfg(target_os = "windows")]
+    fn assert_private_windows_file_dacl(path: &Path) {
+        use windows_sys::Win32::Foundation::{CloseHandle, LocalFree};
+        use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+        };
+        use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+        let audit = windows_file_dacl_audit(path).expect("query and parse protected DACL");
+        let current_user_sid = unsafe {
+            let mut token = std::ptr::null_mut();
+            assert_ne!(
+                OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token),
+                0
+            );
+            let mut required = 0_u32;
+            let _ = GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut required);
+            let mut buffer = vec![0_u8; required as usize];
+            assert_ne!(
+                GetTokenInformation(
+                    token,
+                    TokenUser,
+                    buffer.as_mut_ptr().cast(),
+                    required,
+                    &mut required
+                ),
+                0
+            );
+            CloseHandle(token);
+            let user = &*(buffer.as_ptr().cast::<TOKEN_USER>());
+            let mut text = std::ptr::null_mut();
+            assert_ne!(ConvertSidToStringSidW(user.User.Sid, &mut text), 0);
+            let len = (0..).take_while(|offset| *text.add(*offset) != 0).count();
+            let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+            LocalFree(text.cast());
+            sid
+        };
+        assert!(audit.protected, "DACL must be protected from inheritance");
+        assert_eq!(
+            audit.trustees.len(),
+            3,
+            "DACL must contain exactly three allow ACEs"
+        );
+        assert!(
+            audit.trustees.iter().any(|sid| sid == &current_user_sid),
+            "current user ACE missing"
+        );
+        assert!(
+            audit.trustees.iter().any(|sid| sid == "S-1-5-18"),
+            "SYSTEM ACE missing"
+        );
+        assert!(
+            audit.trustees.iter().any(|sid| sid == "S-1-5-32-544"),
+            "Administrators ACE missing"
+        );
+        for forbidden in ["S-1-1-0", "S-1-5-11", "S-1-5-32-545"] {
+            assert!(
+                !audit.trustees.iter().any(|sid| sid == forbidden),
+                "broad trustee {forbidden} must not be present"
+            );
+        }
+        assert!(audit
+            .access_masks
+            .iter()
+            .all(|mask| *mask == FILE_ALL_ACCESS));
     }
 
     #[test]
@@ -9462,6 +9986,7 @@ pub fn run() {
             runtime_process_logs,
             runtime_privilege_status,
             xray_traffic_stats,
+            tachyon_telemetry_events,
             test_tcp_latency,
             test_xray_proxy,
             test_xray_local_proxies,
@@ -9492,9 +10017,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build Tachyon Prism")
         .run(|handle, event| {
-            if matches!(event, tauri::RunEvent::Ready) {
+            if matches!(&event, tauri::RunEvent::Ready) {
                 let proxy_runtime = handle.state::<system_proxy::SystemProxyRuntime>();
-                let _ = system_proxy::restore_if_pending(handle, &proxy_runtime);
+                if let Err(error) = system_proxy::restore_if_pending(handle, &proxy_runtime) {
+                    let sanitized = sanitize_xray_ui_error(error);
+                    eprintln!("Tachyon Prism startup proxy recovery failed: {sanitized}");
+                    let _ = handle.emit("runtime-cleanup-error", sanitized);
+                }
                 for (_, window) in handle.webview_windows() {
                     let default_size = tauri::Size::Logical(tauri::LogicalSize {
                         width: 800.0,
@@ -9509,11 +10038,24 @@ pub fn run() {
                         .expect("failed to install native borderless titlebar");
                 }
             }
-            if matches!(
-                event,
-                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
-            ) {
-                cleanup_runtime(handle);
+            match event {
+                tauri::RunEvent::ExitRequested { api, .. } => {
+                    if let Err(error) = cleanup_runtime(handle) {
+                        api.prevent_exit();
+                        let sanitized = sanitize_xray_ui_error(error);
+                        eprintln!("Tachyon Prism shutdown blocked: {sanitized}");
+                        let _ = handle.emit("runtime-cleanup-error", sanitized);
+                    }
+                }
+                tauri::RunEvent::Exit => {
+                    if let Err(error) = cleanup_runtime(handle) {
+                        eprintln!(
+                            "Tachyon Prism final cleanup failed: {}",
+                            sanitize_xray_ui_error(error)
+                        );
+                    }
+                }
+                _ => {}
             }
         });
 }

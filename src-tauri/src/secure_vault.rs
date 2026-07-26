@@ -475,6 +475,102 @@ mod tests {
     }
 
     #[test]
+    fn keyring_identity_and_envelope_schema_are_stable() {
+        assert_eq!(KEYRING_SERVICE, "io.tachyon.prism");
+        assert_eq!(KEYRING_ACCOUNT, "secure-vault-master-key-v1");
+        assert_eq!(VAULT_AAD, b"tachyon-prism:secure-vault:v1");
+        assert_eq!(VAULT_VERSION, 1);
+        assert_eq!(VAULT_ALGORITHM, "XChaCha20-Poly1305");
+    }
+
+    #[test]
+    fn independent_vaults_receive_distinct_random_master_keys() {
+        let first = fixture();
+        let second = fixture();
+        save_section_at(
+            &first.1,
+            &first.2,
+            SECTION_RUNTIME_TGP_PSK,
+            Value::String("a".into()),
+        )
+        .unwrap();
+        save_section_at(
+            &second.1,
+            &second.2,
+            SECTION_RUNTIME_TGP_PSK,
+            Value::String("b".into()),
+        )
+        .unwrap();
+        let first_key = first.2.key.lock().unwrap().clone().unwrap();
+        let second_key = second.2.key.lock().unwrap().clone().unwrap();
+        assert_eq!(first_key.len(), MASTER_KEY_BYTES);
+        assert_eq!(second_key.len(), MASTER_KEY_BYTES);
+        assert_ne!(first_key, second_key);
+        assert_ne!(first_key, vec![0; MASTER_KEY_BYTES]);
+        assert_ne!(second_key, vec![0; MASTER_KEY_BYTES]);
+    }
+
+    #[test]
+    fn every_persist_uses_a_fresh_xchacha_nonce() {
+        let (_directory, path, keys) = fixture();
+        save_section_at(
+            &path,
+            &keys,
+            SECTION_RUNTIME_TGP_PSK,
+            Value::String("first".into()),
+        )
+        .unwrap();
+        let first: VaultEnvelope =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        save_section_at(
+            &path,
+            &keys,
+            SECTION_RUNTIME_TGP_PSK,
+            Value::String("second".into()),
+        )
+        .unwrap();
+        let second: VaultEnvelope =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_ne!(first.nonce, second.nonce);
+        assert_eq!(
+            STANDARD_NO_PAD.decode(first.nonce).unwrap().len(),
+            NONCE_BYTES
+        );
+        assert_eq!(
+            STANDARD_NO_PAD.decode(second.nonce).unwrap().len(),
+            NONCE_BYTES
+        );
+    }
+
+    #[test]
+    fn ciphertext_is_bound_to_the_versioned_aad() {
+        let (_directory, path, keys) = fixture();
+        save_section_at(
+            &path,
+            &keys,
+            SECTION_RUNTIME_TGP_PSK,
+            Value::String("bound".into()),
+        )
+        .unwrap();
+        let envelope: VaultEnvelope =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let nonce = STANDARD_NO_PAD.decode(envelope.nonce).unwrap();
+        let ciphertext = STANDARD_NO_PAD.decode(envelope.ciphertext).unwrap();
+        let key = keys.key.lock().unwrap().clone().unwrap();
+        let cipher = XChaCha20Poly1305::new_from_slice(&key).unwrap();
+        let nonce: [u8; NONCE_BYTES] = nonce.try_into().unwrap();
+        assert!(cipher
+            .decrypt(
+                &XNonce::from(nonce),
+                Payload {
+                    msg: &ciphertext,
+                    aad: b"tachyon-prism:secure-vault:wrong"
+                },
+            )
+            .is_err());
+    }
+
+    #[test]
     fn rejects_tampering_and_wrong_keys() {
         let (_directory, path, keys) = fixture();
         save_section_at(
@@ -607,6 +703,13 @@ mod tests {
             Value::String("psk".into()),
         )
         .unwrap();
-        assert!(crate::windows_file_dacl_is_protected(&path).unwrap());
+        let audit = crate::windows_file_dacl_audit(&path).unwrap();
+        assert!(audit.protected);
+        assert_eq!(audit.trustees.len(), 3);
+        assert!(audit.trustees.iter().any(|sid| sid == "S-1-5-18"));
+        assert!(audit.trustees.iter().any(|sid| sid == "S-1-5-32-544"));
+        for forbidden in ["S-1-1-0", "S-1-5-11", "S-1-5-32-545"] {
+            assert!(!audit.trustees.iter().any(|sid| sid == forbidden));
+        }
     }
 }

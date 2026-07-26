@@ -1,9 +1,11 @@
 /**
  * Telemetry domain module for consuming the Core SSE telemetry stream.
  *
- * Connects to `GET /v1/telemetry/sse` on the Core HTTP bridge and exposes
- * typed event callbacks for the frontend UI.
+ * Polls a Tauri IPC command which owns the Core SSE connection. The renderer
+ * never receives permission to connect to arbitrary loopback ports.
  */
+
+import { invokeDesktop, isTauriRuntime } from "./tauri";
 
 // ---------------------------------------------------------------------------
 // Event types (match Core observability package)
@@ -92,13 +94,43 @@ const MAX_RECENT_ERRORS = 20;
 // ---------------------------------------------------------------------------
 
 export type TelemetryListener = (state: TelemetryState) => void;
+export interface TelemetryPoll {
+  events: TelemetryEvent[];
+}
+export type TelemetryPoller = () => Promise<TelemetryPoll>;
+
+export type TelemetryLanguage = "zh-CN" | "en";
+
+export function localizeTelemetryError(code: string, language: TelemetryLanguage): string {
+  const normalized = code.startsWith("tachyon-telemetry-")
+    ? code.split(":", 1)[0]
+    : "tachyon-telemetry-unavailable";
+  const messages: Record<string, Record<TelemetryLanguage, string>> = {
+    "tachyon-telemetry-connect-failed": {
+      "zh-CN": "无法连接 Tachyon Core 遥测服务",
+      en: "Could not connect to Tachyon Core telemetry",
+    },
+    "tachyon-telemetry-invalid-content-type": {
+      "zh-CN": "Tachyon Core 返回了无效的遥测响应",
+      en: "Tachyon Core returned an invalid telemetry response",
+    },
+    "tachyon-telemetry-invalid-event": {
+      "zh-CN": "Tachyon Core 返回了损坏的遥测事件",
+      en: "Tachyon Core returned a malformed telemetry event",
+    },
+    "tachyon-telemetry-unavailable": {
+      "zh-CN": "Tachyon Core 遥测当前不可用",
+      en: "Tachyon Core telemetry is unavailable",
+    },
+  };
+  return (messages[normalized] ?? messages["tachyon-telemetry-unavailable"])[language];
+}
 
 /**
  * TelemetryClient connects to the Core SSE stream and maintains a reactive
  * state snapshot. Call `connect()` to start, `disconnect()` to stop.
  */
 export class TelemetryClient {
-  private source: EventSource | null = null;
   private state: TelemetryState = {
     connection: "disconnected",
     hello: null,
@@ -107,13 +139,15 @@ export class TelemetryClient {
     recentErrors: [],
   };
   private listeners: Set<TelemetryListener> = new Set();
-  private baseUrl: string;
+  private readonly poller: TelemetryPoller;
   private closed = false;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pollGeneration = 0;
+  private polling = false;
 
-  constructor(baseUrl = "http://127.0.0.1:55123") {
-    this.baseUrl = baseUrl;
+  constructor(poller: TelemetryPoller = defaultTelemetryPoller) {
+    this.poller = poller;
   }
 
   getState(): TelemetryState {
@@ -131,58 +165,13 @@ export class TelemetryClient {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    if (this.source) {
+    if (this.polling) {
       return;
     }
     this.updateState({ connection: "connecting" });
-
-    const source = new EventSource(`${this.baseUrl}/v1/telemetry/sse`);
-
-    source.addEventListener("hello", (event) => {
-      const data = JSON.parse((event as MessageEvent).data) as TelemetryEvent;
-      this.reconnectAttempt = 0;
-      this.updateState({
-        connection: "connected",
-        hello: data.data as HelloData,
-      });
-    });
-
-    source.addEventListener("telemetry", (event) => {
-      const data = JSON.parse((event as MessageEvent).data) as TelemetryEvent;
-      this.updateState({
-        latestTelemetry: data.data as TelemetryData,
-      });
-    });
-
-    source.addEventListener("route_event", (event) => {
-      const data = JSON.parse((event as MessageEvent).data) as TelemetryEvent;
-      const route = data.data as RouteEventData;
-      this.updateState({
-        recentRoutes: [route, ...this.state.recentRoutes].slice(0, MAX_RECENT_ROUTES),
-      });
-    });
-
-    source.addEventListener("error", (event) => {
-      const data = JSON.parse((event as MessageEvent).data) as TelemetryEvent;
-      const err = data.data as ErrorData;
-      this.updateState({
-        recentErrors: [err, ...this.state.recentErrors].slice(0, MAX_RECENT_ERRORS),
-      });
-    });
-
-    source.onerror = () => {
-      source.close();
-      this.source = null;
-      this.updateState({ connection: "disconnected" });
-      // Auto-reconnect with exponential backoff (1s, 2s, 4s, max 30s)
-      if (!this.closed) {
-        const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempt), 30000);
-        this.reconnectAttempt++;
-        this.reconnectTimer = setTimeout(() => this.connect(), delay);
-      }
-    };
-
-    this.source = source;
+    const generation = ++this.pollGeneration;
+    this.polling = true;
+    void this.poll(generation);
   }
 
   disconnect(): void {
@@ -191,10 +180,8 @@ export class TelemetryClient {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    if (this.source) {
-      this.source.close();
-      this.source = null;
-    }
+    this.pollGeneration++;
+    this.polling = false;
     this.reconnectAttempt = 0;
     this.updateState({ connection: "disconnected" });
   }
@@ -209,5 +196,78 @@ export class TelemetryClient {
       }
     }
   }
+
+  private async poll(generation: number): Promise<void> {
+    try {
+      const batch = await this.poller();
+      if (this.closed || generation !== this.pollGeneration) return;
+      this.reconnectAttempt = 0;
+      for (const event of batch.events) this.applyEvent(event);
+      this.updateState({ connection: "connected" });
+      this.schedulePoll(generation, 0);
+    } catch (error) {
+      if (this.closed || generation !== this.pollGeneration) return;
+      const code = normalizeTelemetryError(error);
+      const previous = this.state.recentErrors[0];
+      this.updateState({
+        connection: "disconnected",
+        recentErrors:
+          previous?.source === "telemetry-ipc" && previous.message === code
+            ? this.state.recentErrors
+            : [{ message: code, source: "telemetry-ipc" }, ...this.state.recentErrors].slice(
+                0,
+                MAX_RECENT_ERRORS,
+              ),
+      });
+      const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempt), 30000);
+      this.reconnectAttempt++;
+      this.schedulePoll(generation, delay);
+    } finally {
+      if (generation === this.pollGeneration) this.polling = false;
+    }
+  }
+
+  private schedulePoll(generation: number, delay: number): void {
+    if (this.closed || generation !== this.pollGeneration) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.closed || generation !== this.pollGeneration || this.polling) return;
+      this.polling = true;
+      void this.poll(generation);
+    }, delay);
+  }
+
+  private applyEvent(event: TelemetryEvent): void {
+    if (event.type === "hello") {
+      this.updateState({ hello: event.data as HelloData });
+    } else if (event.type === "telemetry") {
+      this.updateState({ latestTelemetry: event.data as TelemetryData });
+    } else if (event.type === "route_event") {
+      this.updateState({
+        recentRoutes: [event.data as RouteEventData, ...this.state.recentRoutes].slice(
+          0,
+          MAX_RECENT_ROUTES,
+        ),
+      });
+    } else if (event.type === "error") {
+      this.updateState({
+        recentErrors: [event.data as ErrorData, ...this.state.recentErrors].slice(
+          0,
+          MAX_RECENT_ERRORS,
+        ),
+      });
+    }
+  }
+}
+
+async function defaultTelemetryPoller(): Promise<TelemetryPoll> {
+  if (!isTauriRuntime()) throw new Error("tachyon-telemetry-unavailable");
+  return invokeDesktop<TelemetryPoll>("tachyon_telemetry_events");
+}
+
+function normalizeTelemetryError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = message.match(/tachyon-telemetry-[a-z-]+/)?.[0];
+  return code ?? "tachyon-telemetry-unavailable";
 }
 

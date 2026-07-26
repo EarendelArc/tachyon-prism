@@ -1542,6 +1542,40 @@ def assert_appearance_persistence(cdp: CDP) -> str:
     )
 
 
+def assert_ui_smoke_vault_migration_and_reload(cdp: CDP) -> None:
+    prepared = cdp.evaluate(
+        """
+        (() => {
+          const vaultKey = 'tachyon.prism.uiSmokeVault.v1';
+          const legacyKey = 'tachyon.prism.subscription.v1';
+          const vault = JSON.parse(localStorage.getItem(vaultKey) || 'null');
+          const subscriptions = vault?.payload?.subscriptions;
+          if (!subscriptions) return { prepared: false, reason: 'subscription section missing' };
+          localStorage.removeItem(vaultKey);
+          localStorage.setItem(legacyKey, JSON.stringify(subscriptions));
+          return { prepared: true };
+        })()
+        """,
+    )
+    if not prepared.get("prepared"):
+        raise AssertionError(f"UI smoke vault migration fixture was not prepared: {prepared}")
+    cdp.call("Page.reload", {"ignoreCache": True})
+    text = wait_for_shell(cdp)
+    text = navigate_hash(cdp, "subscriptions")
+    assert_contains(text, "Smoke URL VLESS", "Clash Smoke SS")
+    migrated = cdp.evaluate(
+        """
+        (() => ({
+          legacyRemoved: localStorage.getItem('tachyon.prism.subscription.v1') === null,
+          vaultPresent: Boolean(localStorage.getItem('tachyon.prism.uiSmokeVault.v1')),
+          marker: localStorage.getItem('tachyon.prism.secureMigration.v1')
+        }))()
+        """,
+    )
+    if migrated != {"legacyRemoved": True, "vaultPresent": True, "marker": "complete"}:
+        raise AssertionError(f"UI smoke vault migration did not verify and delete legacy data: {migrated}")
+
+
 def run(edge_path: Path, port: int, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     server = start_server(port)
@@ -1835,6 +1869,8 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
         assert_desktop_viewport(cdp)
         cdp.screenshot(output_dir / "settings-core-desktop-en.png")
         assert_key_pages_at_viewports(cdp, output_dir)
+
+        assert_ui_smoke_vault_migration_and_reload(cdp)
 
         print(f"Prism UI smoke test passed. Artifacts: {output_dir}")
     finally:
