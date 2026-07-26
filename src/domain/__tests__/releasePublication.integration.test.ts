@@ -34,7 +34,36 @@ function executable(path: string, contents: string): void {
   chmodSync(path, 0o755);
 }
 
-type Failure = "digest" | "immutable" | "latest" | "none" | "patch-draft" | "patch-published" | "target" | "upload";
+type Failure =
+  | "body-chinese-missing"
+  | "body-english-missing"
+  | "body-order"
+  | "body-paragraph"
+  | "digest"
+  | "governance-bypass"
+  | "governance-immutable-api"
+  | "governance-immutable"
+  | "governance-inactive"
+  | "governance-missing-rule"
+  | "governance-no-ruleset"
+  | "governance-wrong-pattern"
+  | "immutable"
+  | "latest"
+  | "latest-401"
+  | "latest-403"
+  | "latest-404"
+  | "latest-500"
+  | "latest-network"
+  | "none"
+  | "patch-draft"
+  | "patch-published"
+  | "remote-duplicate"
+  | "remote-extra"
+  | "remote-missing"
+  | "remote-metadata-digest"
+  | "ruleset-list-api"
+  | "target"
+  | "upload";
 
 function stageRelease(releaseDir: string, omitChinese: boolean): {
   notesEn: string;
@@ -118,14 +147,34 @@ function runPublication(failAt: Failure, omitChinese = false) {
   const staged = stageRelease(releaseDir, omitChinese);
   const english = readFileSync(staged.notesEn, "utf8").trimEnd();
   const chinese = omitChinese ? "" : readFileSync(staged.notesZh, "utf8").trimEnd();
-  const remoteAssets = staged.remoteAssets.map((asset, index) => (
+  let remoteAssets = staged.remoteAssets.map((asset, index) => (
     failAt === "digest" && index === 0 ? { ...asset, digest: `sha256:${"0".repeat(64)}` } : asset
   ));
+  if (failAt === "remote-extra") {
+    remoteAssets = [...remoteAssets, { digest: `sha256:${"1".repeat(64)}`, name: "EXTRA.txt" }];
+  } else if (failAt === "remote-missing") {
+    remoteAssets = remoteAssets.slice(1);
+  } else if (failAt === "remote-duplicate") {
+    remoteAssets = [...remoteAssets, remoteAssets[0]];
+  } else if (failAt === "remote-metadata-digest") {
+    remoteAssets = remoteAssets.map((asset) => asset.name === "BUILD_METADATA.json"
+      ? { ...asset, digest: `sha256:${"2".repeat(64)}` }
+      : asset);
+  }
+  const releaseBody = failAt === "body-english-missing"
+    ? chinese
+    : failAt === "body-chinese-missing"
+      ? english
+      : failAt === "body-order"
+        ? `${chinese}\n\n---\n\n${english}`
+        : failAt === "body-paragraph"
+          ? `${english.replace("English notes.", "English notes changed.")}\n\n---\n\n${chinese}`
+        : `${english}\n\n---\n\n${chinese}`;
   writeFileSync(
     releaseJsonPath,
     JSON.stringify({
       assets: remoteAssets,
-      body: `${english}\n\n---\n\n${chinese}`,
+      body: releaseBody,
       draft: false,
       immutable: failAt !== "immutable",
       prerelease: true,
@@ -144,8 +193,33 @@ function runPublication(failAt: Failure, omitChinese = false) {
       "#!/usr/bin/env bash",
       "set -euo pipefail",
       "joined=\"$*\"",
-      "if [[ \"$1\" == api && \"${joined}\" == *\"--paginate\"* ]]; then",
+      "if [[ \"$1\" == api && \"${joined}\" == *\"/releases?per_page=100\"* ]]; then",
       "  echo LIST >> \"${MOCK_LOG}\"",
+      "  exit 0",
+      "fi",
+      "if [[ \"$1\" == api && \"${joined}\" == *\"/immutable-releases\"* ]]; then",
+      "  echo GET_IMMUTABLE >> \"${MOCK_LOG}\"",
+      "  [[ \"${MOCK_FAIL_AT}\" != governance-immutable-api ]] || exit 75",
+      "  [[ \"${MOCK_FAIL_AT}\" == governance-immutable ]] && echo '{\"enabled\":false}' || echo '{\"enabled\":true}'",
+      "  exit 0",
+      "fi",
+      "if [[ \"$1\" == api && \"${joined}\" == *\"/rulesets?includes_parents=false&per_page=100\"* ]]; then",
+      "  echo GET_RULESET_LIST >> \"${MOCK_LOG}\"",
+      "  [[ \"${MOCK_FAIL_AT}\" != ruleset-list-api ]] || exit 74",
+      "  [[ \"${MOCK_FAIL_AT}\" == governance-no-ruleset ]] || echo 9001",
+      "  exit 0",
+      "fi",
+      "if [[ \"$1\" == api && \"${joined}\" == *\"/rulesets/9001\"* ]]; then",
+      "  echo GET_RULESET_DETAIL >> \"${MOCK_LOG}\"",
+      "  bypass='[]'",
+      "  [[ \"${MOCK_FAIL_AT}\" != governance-bypass ]] || bypass='[{\"actor_id\":1,\"actor_type\":\"OrganizationAdmin\",\"bypass_mode\":\"always\"}]'",
+      "  update_rule=',{\"type\":\"update\"}'",
+      "  [[ \"${MOCK_FAIL_AT}\" != governance-missing-rule ]] || update_rule=''",
+      "  enforcement=active",
+      "  [[ \"${MOCK_FAIL_AT}\" != governance-inactive ]] || enforcement=disabled",
+      "  pattern='refs/tags/v*'",
+      "  [[ \"${MOCK_FAIL_AT}\" != governance-wrong-pattern ]] || pattern='refs/tags/release-*'",
+      "  printf '{\"id\":9001,\"target\":\"tag\",\"enforcement\":\"%s\",\"bypass_actors\":%s,\"conditions\":{\"ref_name\":{\"include\":[\"%s\"],\"exclude\":[]}},\"rules\":[{\"type\":\"deletion\"},{\"type\":\"non_fast_forward\"}%s]}\\n' \"${enforcement}\" \"${bypass}\" \"${pattern}\" \"${update_rule}\"",
       "  exit 0",
       "fi",
       "if [[ \"$1\" == api && \"${joined}\" == *\"--method POST\"* ]]; then",
@@ -170,9 +244,18 @@ function runPublication(failAt: Failure, omitChinese = false) {
       "  echo '{}'",
       "  exit 0",
       "fi",
-      "if [[ \"$1\" == api && \"${joined}\" == *\"/releases/latest\"* ]]; then",
+      "if [[ \"$1\" == api && \"${joined}\" == *\"--include\"* && \"${joined}\" == *\"/releases/latest\"* ]]; then",
       "  echo LATEST >> \"${MOCK_LOG}\"",
-      "  [[ \"${MOCK_FAIL_AT}\" != latest ]] && echo v0.0.9 || echo v0.1.0-alpha.1",
+      "  case \"${MOCK_FAIL_AT}\" in",
+      "    latest-401) printf 'HTTP/2 401 Unauthorized\\r\\nContent-Type: application/json\\r\\n\\r\\n{\"message\":\"Bad credentials\"}\\n'; exit 1 ;;",
+      "    latest-403) printf 'HTTP/2 403 Forbidden\\r\\nContent-Type: application/json\\r\\n\\r\\n{\"message\":\"Forbidden\"}\\n'; exit 1 ;;",
+      "    latest-404) printf 'HTTP/2 404 Not Found\\r\\nContent-Type: application/json\\r\\n\\r\\n{\"message\":\"Not Found\"}\\n'; exit 1 ;;",
+      "    latest-500) printf 'HTTP/2 500 Internal Server Error\\r\\nContent-Type: application/json\\r\\n\\r\\n{\"message\":\"Failure\"}\\n'; exit 1 ;;",
+      "    latest-network) echo 'network unavailable' >&2; exit 1 ;;",
+      "    latest) tag=v0.1.0-alpha.1 ;;",
+      "    *) tag=v0.0.9 ;;",
+      "  esac",
+      "  printf 'HTTP/2 200 OK\\r\\nContent-Type: application/json\\r\\n\\r\\n{\"tag_name\":\"%s\"}\\n' \"${tag}\"",
       "  exit 0",
       "fi",
       "if [[ \"$1\" == api && \"${joined}\" == *\"--method DELETE\"* ]]; then",
@@ -207,9 +290,17 @@ function runPublication(failAt: Failure, omitChinese = false) {
       env: {
         ...process.env,
         COMMIT: "a".repeat(40),
+        EXPECTED_REPRODUCIBILITY_JSON: JSON.stringify({
+          installerByteReproducibilityGuaranteed: false,
+          stagedAssetTimestampsNormalized: true,
+        }),
+        EXPECTED_SOURCE_DATE_EPOCH: "1700000000",
         EXPECTED_TAG_OBJECT: "b".repeat(40),
+        EXPECTED_TAG_VERIFICATION: "ref-commit",
+        EXPECTED_TOOLS_JSON: JSON.stringify({ node: "26.4.0" }),
         GH_CLI: shellPath(ghPath),
         GITHUB_REPOSITORY: "EarendelArc/tachyon-prism",
+        GOVERNANCE_TOKEN: "governance-test-token",
         MOCK_FAIL_AT: failAt,
         MOCK_LOG: shellPath(logPath),
         MOCK_RELEASE_JSON: shellPath(releaseJsonPath),
@@ -247,7 +338,15 @@ describe("release publication transaction", () => {
     const run = runPublication("upload");
 
     expect(run.result.status).not.toBe(0);
-    expect(run.log.slice(0, 4)).toEqual(["LIST", "VERIFY", "POST", "UPLOAD"]);
+    expect(run.log.slice(0, 7)).toEqual([
+      "LIST",
+      "GET_IMMUTABLE",
+      "GET_RULESET_LIST",
+      "GET_RULESET_DETAIL",
+      "VERIFY",
+      "POST",
+      "UPLOAD",
+    ]);
     expect(run.log).toContainEqual(expect.stringContaining("GET_CLEANUP api repos/EarendelArc/tachyon-prism/releases/4242"));
     expect(run.log).toContainEqual(expect.stringContaining("DELETE api --method DELETE repos/EarendelArc/tachyon-prism/releases/4242"));
     expect(run.state).toBe("deleted");
@@ -293,7 +392,77 @@ describe("release publication transaction", () => {
     expect(run.result.status).not.toBe(0);
     expect(run.log.some((line) => line.startsWith("DELETE "))).toBe(false);
     expect(run.state).toBe("published");
-    expect(run.result.stdout).toContain(message);
+    expect(`${run.result.stdout}\n${run.result.stderr}`).toContain(message);
+  });
+
+  it.each([
+    "governance-immutable",
+    "governance-immutable-api",
+    "governance-inactive",
+    "governance-bypass",
+    "governance-missing-rule",
+    "governance-no-ruleset",
+    "governance-wrong-pattern",
+    "ruleset-list-api",
+  ] as const)("fails before every GitHub write when %s is detected", (failure) => {
+    const run = runPublication(failure);
+
+    expect(run.result.status).not.toBe(0);
+    expect(run.log).toContain("LIST");
+    expect(run.log.some((line) => ["POST", "UPLOAD", "PATCH"].includes(line))).toBe(false);
+    expect(run.log.some((line) => line.startsWith("DELETE "))).toBe(false);
+    expect(run.state).toBe("not-created");
+  });
+
+  it("accepts only an explicit HTTP 404 as no GitHub Latest release", () => {
+    const run = runPublication("latest-404");
+
+    expect(run.result.status, `${run.result.stdout}\n${run.result.stderr}`).toBe(0);
+    expect(run.state).toBe("published");
+  });
+
+  it.each([
+    ["latest-401", "HTTP 401"],
+    ["latest-403", "HTTP 403"],
+    ["latest-500", "HTTP 500"],
+    ["latest-network", "did not contain an HTTP status line"],
+  ] as const)("fails closed when GitHub Latest returns %s", (failure, message) => {
+    const run = runPublication(failure);
+
+    expect(run.result.status).not.toBe(0);
+    expect(run.state).toBe("published");
+    expect(`${run.result.stdout}\n${run.result.stderr}`).toContain(message);
+  });
+
+  it.each([
+    "body-english-missing",
+    "body-chinese-missing",
+    "body-order",
+    "body-paragraph",
+  ] as const)("rejects published bilingual body mutation %s", (failure) => {
+    const run = runPublication(failure);
+
+    expect(run.result.status).not.toBe(0);
+    expect(run.state).toBe("published");
+    expect(run.result.stdout).toContain("published release body");
+  });
+
+  it.each([
+    "remote-extra",
+    "remote-missing",
+    "remote-duplicate",
+  ] as const)("rejects published asset-set mutation %s", (failure) => {
+    const run = runPublication(failure);
+
+    expect(run.result.status).not.toBe(0);
+    expect(run.result.stdout).toContain("exact 11 staged assets");
+  });
+
+  it("rejects a published BUILD_METADATA digest drift", () => {
+    const run = runPublication("remote-metadata-digest");
+
+    expect(run.result.status).not.toBe(0);
+    expect(run.result.stdout).toContain("published digest mismatch for BUILD_METADATA.json");
   });
 
   it("publishes and verifies the exact remote release state", () => {
@@ -302,6 +471,9 @@ describe("release publication transaction", () => {
     expect(run.result.status, run.result.stderr).toBe(0);
     expect(run.log).toEqual([
       "LIST",
+      "GET_IMMUTABLE",
+      "GET_RULESET_LIST",
+      "GET_RULESET_DETAIL",
       "VERIFY",
       "POST",
       "UPLOAD",

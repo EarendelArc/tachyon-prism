@@ -79,18 +79,44 @@ def validate_metadata(
     tag: str,
     commit: str,
     core_contract_path: Path,
+    expected_tag_object: str,
+    expected_source_date_epoch: int,
+    expected_tag_verification: str,
+    expected_reproducibility: dict[str, object],
+    expected_tools: dict[str, object],
 ) -> None:
     metadata = json.loads(path.read_text(encoding="utf-8"))
     core = json.loads(core_contract_path.read_text(encoding="utf-8"))
+    if set(metadata) != {
+        "artifactDigests",
+        "coreContract",
+        "prism",
+        "reproducibility",
+        "schemaVersion",
+        "tools",
+    }:
+        fail("BUILD_METADATA.json must contain the exact schemaVersion 1 top-level fields")
     if metadata.get("schemaVersion") != 1:
         fail("BUILD_METADATA.json schemaVersion must be 1")
     prism = metadata.get("prism")
     if not isinstance(prism, dict):
         fail("BUILD_METADATA.json prism object is missing")
+    if set(prism) != {
+        "commit",
+        "sourceDateEpoch",
+        "tag",
+        "tagObject",
+        "tagVerification",
+    }:
+        fail("BUILD_METADATA.json prism object has an incomplete or extended schema")
     if prism.get("tag") != tag or prism.get("commit") != commit:
         fail("BUILD_METADATA.json Prism tag or full commit does not match the release")
-    if not FULL_OBJECT_ID.fullmatch(str(prism.get("tagObject", ""))):
-        fail("BUILD_METADATA.json Prism tagObject must be a full object ID")
+    if prism.get("tagObject") != expected_tag_object:
+        fail("BUILD_METADATA.json Prism tagObject does not match the verified tag object")
+    if prism.get("sourceDateEpoch") != expected_source_date_epoch:
+        fail("BUILD_METADATA.json sourceDateEpoch does not match the verified commit epoch")
+    if prism.get("tagVerification") != expected_tag_verification:
+        fail("BUILD_METADATA.json tagVerification does not match the prepare result")
     if metadata.get("coreContract") != core:
         fail("BUILD_METADATA.json Core contract does not match core-contract.json")
     for field in ("repository", "tag", "tag_object", "commit"):
@@ -102,6 +128,10 @@ def validate_metadata(
     for name in sorted(installers):
         if digests[name] != f"sha256:{local_digests[name]}":
             fail(f"BUILD_METADATA.json digest mismatch for {name}")
+    if metadata.get("reproducibility") != expected_reproducibility:
+        fail("BUILD_METADATA.json reproducibility contract does not match the expected object")
+    if metadata.get("tools") != expected_tools:
+        fail("BUILD_METADATA.json tools contract does not match the expected object")
 
 
 def validate_staged(
@@ -109,6 +139,11 @@ def validate_staged(
     tag: str,
     commit: str,
     core_contract_path: Path,
+    expected_tag_object: str,
+    expected_source_date_epoch: int,
+    expected_tag_verification: str,
+    expected_reproducibility: dict[str, object],
+    expected_tools: dict[str, object],
 ) -> tuple[set[str], dict[str, str]]:
     if not release_dir.is_dir():
         fail(f"release directory is missing: {release_dir}")
@@ -134,6 +169,11 @@ def validate_staged(
         tag,
         commit,
         core_contract_path,
+        expected_tag_object,
+        expected_source_date_epoch,
+        expected_tag_verification,
+        expected_reproducibility,
+        expected_tools,
     )
     return names, local_digests
 
@@ -188,6 +228,11 @@ def main() -> int:
     parser.add_argument("--tag", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--core-contract", type=Path, default=Path("core-contract.json"))
+    parser.add_argument("--expected-tag-object", required=True)
+    parser.add_argument("--expected-source-date-epoch", type=int, required=True)
+    parser.add_argument("--expected-tag-verification", required=True)
+    parser.add_argument("--expected-reproducibility-json", required=True)
+    parser.add_argument("--expected-tools-json", required=True)
     parser.add_argument("--release-json", type=Path)
     parser.add_argument("--prerelease", choices=("true", "false"))
     parser.add_argument("--latest-tag")
@@ -195,11 +240,33 @@ def main() -> int:
     try:
         if not FULL_OBJECT_ID.fullmatch(args.commit):
             fail("commit must be a full object ID")
+        if not FULL_OBJECT_ID.fullmatch(args.expected_tag_object):
+            fail("expected tag object must be a full object ID")
+        expected_reproducibility = json.loads(args.expected_reproducibility_json)
+        expected_tools = json.loads(args.expected_tools_json)
+        if not isinstance(expected_reproducibility, dict) or set(expected_reproducibility) != {
+            "installerByteReproducibilityGuaranteed",
+            "stagedAssetTimestampsNormalized",
+        } or not all(isinstance(value, bool) for value in expected_reproducibility.values()):
+            fail("expected reproducibility JSON must contain exactly the two boolean schema fields")
+        if not isinstance(expected_tools, dict) or not expected_tools:
+            fail("expected tools JSON must be a non-empty object")
+        if not all(isinstance(name, str) and isinstance(value, str) for name, value in expected_tools.items()):
+            fail("expected tools JSON keys and values must be strings")
+        if args.expected_source_date_epoch <= 0:
+            fail("expected source date epoch must be positive")
+        if args.expected_tag_verification not in {"ref-commit", "signature"}:
+            fail("expected tag verification must be ref-commit or signature")
         names, digests = validate_staged(
             args.release_dir,
             args.tag,
             args.commit,
             args.core_contract,
+            args.expected_tag_object,
+            args.expected_source_date_epoch,
+            args.expected_tag_verification,
+            expected_reproducibility,
+            expected_tools,
         )
         if args.release_json:
             if args.prerelease is None or args.latest_tag is None:

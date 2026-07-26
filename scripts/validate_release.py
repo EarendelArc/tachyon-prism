@@ -135,6 +135,8 @@ def validate_workflows() -> None:
     publication_path = ROOT / ".github" / "scripts" / "publish-release.sh"
     tag_verification_path = ROOT / ".github" / "scripts" / "verify-release-tag.sh"
     published_verification_path = ROOT / ".github" / "scripts" / "verify-published-release.py"
+    governance_verification_path = ROOT / ".github" / "scripts" / "verify-release-governance.py"
+    latest_response_parser_path = ROOT / ".github" / "scripts" / "parse-latest-release-response.py"
     core_contract_test_path = ROOT / "src" / "domain" / "__tests__" / "coreConfigContract.live.test.ts"
     release_matrix = extract_matrix(release_path, "build")
     ci_matrix = extract_matrix(ci_path, "rust")
@@ -148,6 +150,8 @@ def validate_workflows() -> None:
     publication = publication_path.read_text(encoding="utf-8")
     tag_verification = tag_verification_path.read_text(encoding="utf-8")
     published_verification = published_verification_path.read_text(encoding="utf-8")
+    governance_verification = governance_verification_path.read_text(encoding="utf-8")
+    latest_response_parser = latest_response_parser_path.read_text(encoding="utf-8")
     core_contract_test = core_contract_test_path.read_text(encoding="utf-8")
     core_contract = json.loads((ROOT / "core-contract.json").read_text(encoding="utf-8"))
     core_repository = str(core_contract["repository"])
@@ -198,6 +202,11 @@ def validate_workflows() -> None:
         '"installerByteReproducibilityGuaranteed": False',
         '"stagedAssetTimestampsNormalized": True',
         "SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}",
+        "EXPECTED_SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}",
+        "EXPECTED_TAG_VERIFICATION: ${{ needs.prepare.outputs.verification }}",
+        "EXPECTED_REPRODUCIBILITY_JSON:",
+        'export EXPECTED_TOOLS_JSON="$(python -c',
+        "GOVERNANCE_TOKEN: ${{ secrets.RELEASE_GOVERNANCE_TOKEN }}",
         "SHA256SUMS.txt",
         "SIGNING_STATUS",
     ]
@@ -215,17 +224,28 @@ def validate_workflows() -> None:
         '"${gh_cli}" api --method DELETE',
         '"${current_draft}" != "true"',
         '"repos/${GITHUB_REPOSITORY}/releases/latest"',
+        '"repos/${GITHUB_REPOSITORY}/immutable-releases"',
+        '"repos/${GITHUB_REPOSITORY}/rulesets?includes_parents=false&per_page=100"',
+        'python "${governance_verify_script}"',
+        '"${gh_cli}" api --include',
+        'python "${latest_response_parser}"',
         '--release-json "${readback_file}"',
         '--latest-tag "${latest_tag}"',
+        '--expected-tag-object "${EXPECTED_TAG_OBJECT}"',
+        '--expected-source-date-epoch "${EXPECTED_SOURCE_DATE_EPOCH}"',
+        '--expected-tag-verification "${EXPECTED_TAG_VERIFICATION}"',
+        '--expected-reproducibility-json "${EXPECTED_REPRODUCIBILITY_JSON}"',
+        '--expected-tools-json "${EXPECTED_TOOLS_JSON}"',
         "release ${VERSION} already exists",
     ]
     missing_publication = [fragment for fragment in publication_fragments if fragment not in publication]
     if missing_publication:
         fail("publication script is missing transaction guards: " + ", ".join(missing_publication))
+    governance_index = publication.index('python "${governance_verify_script}"')
     verify_index = publication.index('bash "${tag_verify_script}"')
     create_index = publication.index('release_id=$("${gh_cli}" api --method POST')
-    if verify_index >= create_index:
-        fail("final tag verification must precede draft creation")
+    if not governance_index < verify_index < create_index:
+        fail("governance and final tag verification must immediately precede draft creation")
 
     forbidden = ['gh release edit', '--clobber']
     present = [fragment for fragment in forbidden if fragment in release or fragment in publication]
@@ -246,10 +266,35 @@ def validate_workflows() -> None:
         'len(manifest) != 10',
         'latest_tag == tag',
         'remote[name] != expected_digest',
+        'set(metadata) != {',
+        'prism.get("tagObject") != expected_tag_object',
+        'prism.get("sourceDateEpoch") != expected_source_date_epoch',
+        'metadata.get("reproducibility") != expected_reproducibility',
+        'metadata.get("tools") != expected_tools',
     ]
     missing_published = [guard for guard in published_guards if guard not in published_verification]
     if missing_published:
         fail("published release verification is missing guards: " + ", ".join(missing_published))
+    governance_guards = [
+        'REQUIRED_RULE_TYPES = {"deletion", "non_fast_forward", "update"}',
+        'RELEASE_TAG_PATTERN = "refs/tags/v*"',
+        'ruleset.get("target") != "tag"',
+        'ruleset.get("enforcement") != "active"',
+        'if not isinstance(bypass_actors, list) or bypass_actors:',
+        'immutable.get("enabled") is not True',
+    ]
+    missing_governance = [guard for guard in governance_guards if guard not in governance_verification]
+    if missing_governance:
+        fail("release governance verification is missing guards: " + ", ".join(missing_governance))
+    latest_guards = [
+        "if status == 404:",
+        "if status != 200:",
+        "if command_status != 0:",
+        'payload.get("tag_name")',
+    ]
+    missing_latest = [guard for guard in latest_guards if guard not in latest_response_parser]
+    if missing_latest:
+        fail("Latest response parser is missing fail-closed guards: " + ", ".join(missing_latest))
     windows_contract_tests = [
         "TestParseGameRoutePrefixesNormalizesHostBits",
         "TestPlanSelectiveRoutesNormalizesAndDeduplicates",

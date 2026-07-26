@@ -74,6 +74,22 @@ fail-closed 复核：tag、完整 target commit、`draft=false`、prerelease 状
 `immutable=true`、Latest 语义、双语正文、精确 11 个资产和每个远端 digest 都必须与本地
 暂存契约一致。任何字段缺失或不一致都会让发布 job 失败。
 
+发布脚本会在第一次 GitHub 写操作前独立执行治理预检：读取 immutable releases 设置，
+分页枚举仓库 ruleset 摘要，再读取每个候选 ruleset 的完整内容。只有至少一个 active tag
+ruleset 覆盖 `refs/tags/v*`、没有 bypass actor，并同时包含 deletion、update 和
+non-fast-forward 规则时才允许继续。分页缺失、JSON 结构异常、权限错误或 API 故障全部
+fail-closed。Latest 读回同样只把明确的 HTTP 404 解释为“没有 Latest”；401、403、网络错误
+和服务端错误都会阻断发布。
+
+`BUILD_METADATA.json` 按完整 schema 精确校验。prepare job 显式传入已验证 tag object、
+commit 时间戳、标签验证方式、可复现性声明和完整工具版本对象；这些值在上传前及最终远端
+复核时都必须完全一致，不能仅凭字段格式合法而通过。
+
+仓库 Actions secret 必须配置 `RELEASE_GOVERNANCE_TOKEN`。该细粒度凭据需要能够读取仓库
+immutable release 设置和包含 `bypass_actors` 的完整 ruleset 内容。它应与普通发布
+`GITHUB_TOKEN` 分离。GitHub 可能只向具有 ruleset 写权限的凭据返回 bypass actor，尽管
+Prism 实际只执行 GET 请求；发布脚本只会用该凭据执行治理读取。
+
 ## 签名策略
 
 签名不会被模拟。稳定版缺少任意 Windows 或 Apple 必需凭据都会失败；预发布版仅在某平台

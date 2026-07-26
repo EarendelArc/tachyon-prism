@@ -7,12 +7,20 @@ release_notes_zh=${2:-release/RELEASE_NOTES.zh-CN.md}
 release_dir=${3:-release}
 gh_cli=${GH_CLI:-gh}
 tag_verify_script=${TAG_VERIFY_SCRIPT:-.github/scripts/verify-release-tag.sh}
+governance_verify_script=${GOVERNANCE_VERIFY_SCRIPT:-.github/scripts/verify-release-governance.py}
+latest_response_parser=${LATEST_RESPONSE_PARSER:-.github/scripts/parse-latest-release-response.py}
+github_api_version=${GITHUB_API_VERSION:-2026-03-10}
 
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${VERSION:?VERSION is required}"
 : "${PRERELEASE:?PRERELEASE is required}"
 : "${COMMIT:?COMMIT is required}"
 : "${EXPECTED_TAG_OBJECT:?EXPECTED_TAG_OBJECT is required}"
+: "${EXPECTED_SOURCE_DATE_EPOCH:?EXPECTED_SOURCE_DATE_EPOCH is required}"
+: "${EXPECTED_TAG_VERIFICATION:?EXPECTED_TAG_VERIFICATION is required}"
+: "${EXPECTED_REPRODUCIBILITY_JSON:?EXPECTED_REPRODUCIBILITY_JSON is required}"
+: "${EXPECTED_TOOLS_JSON:?EXPECTED_TOOLS_JSON is required}"
+: "${GOVERNANCE_TOKEN:?GOVERNANCE_TOKEN with access to immutable settings and ruleset bypass actors is required}"
 
 [[ "${PRERELEASE}" == "true" || "${PRERELEASE}" == "false" ]] || {
   echo "PRERELEASE must be true or false" >&2
@@ -25,7 +33,12 @@ tag_verify_script=${TAG_VERIFY_SCRIPT:-.github/scripts/verify-release-tag.sh}
 python .github/scripts/verify-published-release.py \
   --release-dir "${release_dir}" \
   --tag "${VERSION}" \
-  --commit "${COMMIT}"
+  --commit "${COMMIT}" \
+  --expected-tag-object "${EXPECTED_TAG_OBJECT}" \
+  --expected-source-date-epoch "${EXPECTED_SOURCE_DATE_EPOCH}" \
+  --expected-tag-verification "${EXPECTED_TAG_VERIFICATION}" \
+  --expected-reproducibility-json "${EXPECTED_REPRODUCIBILITY_JSON}" \
+  --expected-tools-json "${EXPECTED_TOOLS_JSON}"
 
 release_body="$(<"${release_notes_en}")
 
@@ -35,14 +48,30 @@ $(<"${release_notes_zh}")"
 
 release_id=""
 readback_file=""
+governance_dir=""
+latest_response_file=""
+latest_error_file=""
+
+cleanup_temp_files() {
+  if [[ -n "${readback_file}" ]]; then
+    rm -f "${readback_file}"
+  fi
+  if [[ -n "${latest_response_file}" ]]; then
+    rm -f "${latest_response_file}"
+  fi
+  if [[ -n "${latest_error_file}" ]]; then
+    rm -f "${latest_error_file}"
+  fi
+  if [[ -n "${governance_dir}" ]]; then
+    rm -rf "${governance_dir}"
+  fi
+}
 
 cleanup_failed_draft() {
   local status=$1
   local release_state current_id current_draft current_tag
   trap - EXIT
-  if [[ -n "${readback_file}" ]]; then
-    rm -f "${readback_file}"
-  fi
+  cleanup_temp_files
 
   if [[ ${status} -eq 0 || -z "${release_id}" ]]; then
     exit "${status}"
@@ -79,6 +108,37 @@ existing_id=$("${gh_cli}" api --paginate \
   exit 1
 }
 
+# Governance is deliberately checked immediately before the final tag check and
+# the first write. API failures, incomplete pagination, and malformed responses
+# all stop publication.
+governance_dir=$(mktemp -d)
+immutable_json="${governance_dir}/immutable.json"
+ruleset_ids_file="${governance_dir}/ruleset-ids.txt"
+GH_TOKEN="${GOVERNANCE_TOKEN}" "${gh_cli}" api \
+  -H "Accept: application/vnd.github+json" \
+  -H "X-GitHub-Api-Version: ${github_api_version}" \
+  "repos/${GITHUB_REPOSITORY}/immutable-releases" > "${immutable_json}"
+GH_TOKEN="${GOVERNANCE_TOKEN}" "${gh_cli}" api --paginate \
+  -H "Accept: application/vnd.github+json" \
+  -H "X-GitHub-Api-Version: ${github_api_version}" \
+  "repos/${GITHUB_REPOSITORY}/rulesets?includes_parents=false&per_page=100" \
+  --jq '.[] | .id' > "${ruleset_ids_file}"
+mapfile -t ruleset_ids < "${ruleset_ids_file}"
+governance_args=(--immutable-json "${immutable_json}")
+for ruleset_id in "${ruleset_ids[@]}"; do
+  [[ "${ruleset_id}" =~ ^[0-9]+$ ]] || {
+    echo "repository ruleset list returned an invalid id: ${ruleset_id}" >&2
+    exit 1
+  }
+  ruleset_json="${governance_dir}/ruleset-${ruleset_id}.json"
+  GH_TOKEN="${GOVERNANCE_TOKEN}" "${gh_cli}" api \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: ${github_api_version}" \
+    "repos/${GITHUB_REPOSITORY}/rulesets/${ruleset_id}" > "${ruleset_json}"
+  governance_args+=(--ruleset-json "${ruleset_json}")
+done
+python "${governance_verify_script}" "${governance_args[@]}"
+
 # Keep the final remote tag check immediately adjacent to the first release write.
 bash "${tag_verify_script}" "${VERSION}" "${COMMIT}" origin "${EXPECTED_TAG_OBJECT}"
 release_id=$("${gh_cli}" api --method POST \
@@ -110,21 +170,36 @@ fi
 
 readback_file=$(mktemp)
 "${gh_cli}" api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "${readback_file}"
-if latest_tag=$("${gh_cli}" api \
+latest_response_file=$(mktemp)
+latest_error_file=$(mktemp)
+set +e
+"${gh_cli}" api --include \
   "repos/${GITHUB_REPOSITORY}/releases/latest" \
-  --jq '.tag_name' 2>/dev/null); then
-  :
-else
-  latest_tag="__NONE__"
+  > "${latest_response_file}" 2> "${latest_error_file}"
+latest_command_status=$?
+set -e
+if ! latest_tag=$(python "${latest_response_parser}" \
+  --response "${latest_response_file}" \
+  --command-status "${latest_command_status}"); then
+  cat "${latest_error_file}" >&2
+  exit 1
 fi
 python .github/scripts/verify-published-release.py \
   --release-dir "${release_dir}" \
   --tag "${VERSION}" \
   --commit "${COMMIT}" \
+  --expected-tag-object "${EXPECTED_TAG_OBJECT}" \
+  --expected-source-date-epoch "${EXPECTED_SOURCE_DATE_EPOCH}" \
+  --expected-tag-verification "${EXPECTED_TAG_VERIFICATION}" \
+  --expected-reproducibility-json "${EXPECTED_REPRODUCIBILITY_JSON}" \
+  --expected-tools-json "${EXPECTED_TOOLS_JSON}" \
   --release-json "${readback_file}" \
   --prerelease "${PRERELEASE}" \
   --latest-tag "${latest_tag}"
 
 release_id=""
-rm -f "${readback_file}"
+cleanup_temp_files
 readback_file=""
+governance_dir=""
+latest_response_file=""
+latest_error_file=""

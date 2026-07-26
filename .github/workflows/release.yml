@@ -627,7 +627,12 @@ jobs:
           python .github/scripts/verify-published-release.py \
             --release-dir release \
             --tag "${VERSION}" \
-            --commit "${PRISM_COMMIT}"
+            --commit "${PRISM_COMMIT}" \
+            --expected-tag-object "${PRISM_TAG_OBJECT}" \
+            --expected-source-date-epoch "${SOURCE_DATE_EPOCH}" \
+            --expected-tag-verification "${TAG_VERIFICATION}" \
+            --expected-reproducibility-json '{"installerByteReproducibilityGuaranteed":false,"stagedAssetTimestampsNormalized":true}' \
+            --expected-tools-json "$(python -c 'import json; print(json.dumps(dict(line.split(maxsplit=1) for line in open(".tool-versions", encoding="utf-8") if line.strip()), sort_keys=True, separators=(",", ":")))')"
           python .github/scripts/normalize-release-timestamps.py release "${SOURCE_DATE_EPOCH}"
 
       - name: Publish release
@@ -638,7 +643,14 @@ jobs:
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
           COMMIT: ${{ needs.prepare.outputs.commit }}
           EXPECTED_TAG_OBJECT: ${{ needs.prepare.outputs.tag_object }}
-        run: bash .github/scripts/publish-release.sh \
-          release/RELEASE_NOTES.md \
-          release/RELEASE_NOTES.zh-CN.md \
-          release
+          EXPECTED_SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
+          EXPECTED_TAG_VERIFICATION: ${{ needs.prepare.outputs.verification }}
+          EXPECTED_REPRODUCIBILITY_JSON: '{"installerByteReproducibilityGuaranteed":false,"stagedAssetTimestampsNormalized":true}'
+          GOVERNANCE_TOKEN: ${{ secrets.RELEASE_GOVERNANCE_TOKEN }}
+        run: |
+          set -euo pipefail
+          export EXPECTED_TOOLS_JSON="$(python -c 'import json; print(json.dumps(dict(line.split(maxsplit=1) for line in open(".tool-versions", encoding="utf-8") if line.strip()), sort_keys=True, separators=(",", ":")))')"
+          bash .github/scripts/publish-release.sh \
+            release/RELEASE_NOTES.md \
+            release/RELEASE_NOTES.zh-CN.md \
+            release

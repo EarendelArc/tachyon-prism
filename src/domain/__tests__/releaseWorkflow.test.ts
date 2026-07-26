@@ -24,6 +24,12 @@ const publicationScriptPath = fileURLToPath(
 const tagVerificationScriptPath = fileURLToPath(
   new URL("../../../.github/scripts/verify-release-tag.sh", import.meta.url),
 );
+const governanceVerificationScriptPath = fileURLToPath(
+  new URL("../../../.github/scripts/verify-release-governance.py", import.meta.url),
+);
+const latestResponseParserPath = fileURLToPath(
+  new URL("../../../.github/scripts/parse-latest-release-response.py", import.meta.url),
+);
 
 const readReleaseWorkflow = () => readFileSync(releaseWorkflowPath, "utf8");
 const readPublicationScript = () => readFileSync(publicationScriptPath, "utf8");
@@ -183,6 +189,27 @@ describe("release workflow checksum assets", () => {
     expect(publication).toContain('"repos/${GITHUB_REPOSITORY}/releases/latest"');
     expect(publication).toContain("verify-published-release.py");
     expect(publication).toContain('--latest-tag "${latest_tag}"');
+    expect(publication).toContain('--expected-tag-object "${EXPECTED_TAG_OBJECT}"');
+    expect(publication).toContain('--expected-source-date-epoch "${EXPECTED_SOURCE_DATE_EPOCH}"');
+    expect(publication).toContain('--expected-tag-verification "${EXPECTED_TAG_VERIFICATION}"');
+  });
+
+  it("fails closed on repository governance and distinguishes explicit Latest 404", () => {
+    const publication = readPublicationScript();
+    const governance = readFileSync(governanceVerificationScriptPath, "utf8");
+    const latestParser = readFileSync(latestResponseParserPath, "utf8");
+    const createIndex = publication.indexOf('release_id=$("${gh_cli}" api --method POST');
+
+    expect(publication.indexOf("immutable-releases")).toBeLessThan(createIndex);
+    expect(publication.indexOf("rulesets?includes_parents=false&per_page=100")).toBeLessThan(createIndex);
+    expect(publication.indexOf('python "${governance_verify_script}"')).toBeLessThan(createIndex);
+    expect(governance).toContain('REQUIRED_RULE_TYPES = {"deletion", "non_fast_forward", "update"}');
+    expect(governance).toContain('RELEASE_TAG_PATTERN = "refs/tags/v*"');
+    expect(governance).toContain('ruleset.get("enforcement") != "active"');
+    expect(governance).toContain("bypass_actors");
+    expect(publication).toContain('"${gh_cli}" api --include');
+    expect(latestParser).toContain("if status == 404:");
+    expect(latestParser).toContain("if status != 200:");
   });
 
   it("checks out the exact Core release pin in CI and Release", () => {

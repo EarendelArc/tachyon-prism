@@ -109,6 +109,30 @@ enable GitHub immutable releases and an active `refs/tags/v*` ruleset that
 prevents tag update, deletion, and non-fast-forward changes before dispatching
 the release workflow.
 
+The publication script independently enforces that repository governance before
+its first write. It reads the immutable-release setting, paginates repository
+ruleset summaries, then reads each candidate ruleset's full shape. Publication
+continues only when at least one active tag ruleset includes `refs/tags/v*`, has
+no bypass actors, and contains deletion, update, and non-fast-forward rules.
+Missing pages, malformed JSON, permission errors, and API failures are all
+fail-closed. The GitHub Latest readback follows the same rule: only an explicit
+HTTP 404 means no Latest release exists; authentication, authorization, network,
+and server failures stop the job.
+
+`BUILD_METADATA.json` is validated as an exact schema, not as a collection of
+optional hints. The verified tag object, commit timestamp, tag verification
+method, reproducibility declaration, and complete tool-version object are passed
+explicitly from the prepare job and must match exactly both before upload and
+during final release readback.
+
+Store a fine-grained token as the repository Actions secret
+`RELEASE_GOVERNANCE_TOKEN`. It must be able to read the repository immutable
+release setting and the full ruleset shape, including `bypass_actors`. GitHub
+may suppress bypass actors unless the credential has ruleset write access, even
+though Prism performs GET requests only. Keep this
+credential separate from the ordinary release `GITHUB_TOKEN`; the publication
+script uses it only for governance GET requests.
+
 ## Signing policy
 
 Signing is never simulated. A stable release fails if any required Windows or
