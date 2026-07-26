@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -12,6 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 mod system_proxy;
 
@@ -1154,9 +1157,13 @@ fn system_proxy_query(
 #[tauri::command]
 fn system_proxy_apply(
     app: tauri::AppHandle,
+    runtime_state: tauri::State<RuntimeState>,
     state: tauri::State<system_proxy::SystemProxyRuntime>,
     enabled: bool,
 ) -> Result<system_proxy::SystemProxyTransactionResult, String> {
+    if enabled {
+        require_running_xray(&runtime_state)?;
+    }
     system_proxy::apply(&app, &state, enabled)
 }
 
@@ -1180,9 +1187,27 @@ fn system_proxy_status(
 #[tauri::command]
 fn enable_system_proxy(
     app: tauri::AppHandle,
+    runtime_state: tauri::State<RuntimeState>,
     state: tauri::State<system_proxy::SystemProxyRuntime>,
 ) -> Result<system_proxy::SystemProxyState, String> {
+    require_running_xray(&runtime_state)?;
     Ok(system_proxy::apply(&app, &state, true)?.current)
+}
+
+fn require_running_xray(state: &RuntimeState) -> Result<(), String> {
+    let mut processes = state
+        .processes
+        .lock()
+        .map_err(|err| format!("lock runtime state: {err}"))?;
+    validate_system_proxy_owner_state(&processes.xray.status().state)
+}
+
+fn validate_system_proxy_owner_state(xray_state: &str) -> Result<(), String> {
+    if xray_state == "running" {
+        Ok(())
+    } else {
+        Err("system proxy can only be enabled while Xray is running".to_string())
+    }
 }
 
 #[tauri::command]
@@ -1195,7 +1220,9 @@ fn disable_system_proxy(
 
 #[tauri::command]
 fn start_xray(
+    app: tauri::AppHandle,
     state: tauri::State<RuntimeState>,
+    proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
     binary_path: String,
     config_path: String,
 ) -> Result<ProcessStatus, String> {
@@ -1204,6 +1231,10 @@ fn start_xray(
             .processes
             .lock()
             .map_err(|err| format!("lock runtime state: {err}"))?;
+        if processes.xray.status().state == "running" {
+            return Err("xray is already running".to_string());
+        }
+        system_proxy::restore_if_pending(&app, &proxy_state)?;
         processes.xray.start(
             "xray",
             ManagedBinaryKind::Xray,
@@ -1221,12 +1252,24 @@ fn stop_xray(
     state: tauri::State<RuntimeState>,
     proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
 ) -> Result<ProcessStatus, String> {
-    system_proxy::restore_if_pending(&app, &proxy_state)?;
-    let mut processes = state
-        .processes
-        .lock()
-        .map_err(|err| format!("lock runtime state: {err}"))?;
-    processes.xray.stop("xray")
+    stop_xray_transaction(
+        || system_proxy::restore_if_pending(&app, &proxy_state).map(|_| ()),
+        || {
+            let mut processes = state
+                .processes
+                .lock()
+                .map_err(|err| format!("lock runtime state: {err}"))?;
+            processes.xray.stop("xray")
+        },
+    )
+}
+
+fn stop_xray_transaction<T>(
+    restore_proxy: impl FnOnce() -> Result<(), String>,
+    stop_process: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    restore_proxy()?;
+    stop_process()
 }
 
 #[tauri::command]
@@ -1249,12 +1292,7 @@ fn start_tachyon_core(
 }
 
 #[tauri::command]
-fn stop_tachyon_core(
-    app: tauri::AppHandle,
-    state: tauri::State<RuntimeState>,
-    proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
-) -> Result<ProcessStatus, String> {
-    system_proxy::restore_if_pending(&app, &proxy_state)?;
+fn stop_tachyon_core(state: tauri::State<RuntimeState>) -> Result<ProcessStatus, String> {
     let mut processes = state
         .processes
         .lock()
@@ -1263,13 +1301,14 @@ fn stop_tachyon_core(
 }
 
 fn should_restore_proxy_for_runtime(status: &RuntimeStatus) -> bool {
-    status.xray.state != "running" || status.tachyon_core.state != "running"
+    validate_system_proxy_owner_state(&status.xray.state).is_err()
 }
 
 #[tauri::command]
 fn start_all(
     app: tauri::AppHandle,
     state: tauri::State<RuntimeState>,
+    proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
     xray_binary_path: String,
     xray_config_path: String,
     tachyon_core_binary_path: String,
@@ -1280,6 +1319,11 @@ fn start_all(
         .processes
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
+    let current = processes.status();
+    if current.xray.state == "running" || current.tachyon_core.state == "running" {
+        return Err("start_all requires both managed cores to be stopped".to_string());
+    }
+    system_proxy::restore_if_pending(&app, &proxy_state)?;
     sanitize_xray_ui_result(processes.start_all(
         &settings,
         xray_binary_path,
@@ -4165,6 +4209,7 @@ const SUBSCRIPTION_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const SUBSCRIPTION_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SUBSCRIPTION_IO_TIMEOUT: Duration = Duration::from_secs(15);
 const SUBSCRIPTION_TOTAL_TIMEOUT: Duration = Duration::from_secs(45);
+const SUBSCRIPTION_ALLOW_PRIVATE_NETWORKS: bool = false;
 
 #[derive(Clone, Debug)]
 struct SubscriptionUrl {
@@ -4277,6 +4322,197 @@ impl std::fmt::Display for SubscriptionUrl {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ApprovedSubscriptionResolver {
+    addresses: Vec<SocketAddr>,
+}
+
+impl ureq::unversioned::resolver::Resolver for ApprovedSubscriptionResolver {
+    fn resolve(
+        &self,
+        _uri: &ureq::http::Uri,
+        _config: &ureq::config::Config,
+        _timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        let mut resolved = self.empty();
+        for address in &self.addresses {
+            resolved.push(*address);
+        }
+        if resolved.is_empty() {
+            Err(ureq::Error::HostNotFound)
+        } else {
+            Ok(resolved)
+        }
+    }
+}
+
+fn resolve_approved_subscription_addresses(
+    url: &SubscriptionUrl,
+    allow_private_networks: bool,
+) -> Result<Vec<SocketAddr>, String> {
+    if is_cloud_metadata_host(&url.host) {
+        return Err("subscription URL targets a cloud metadata service".to_string());
+    }
+    let resolved = (url.host.as_str(), url.port)
+        .to_socket_addrs()
+        .map_err(|_| "subscription host could not be resolved".to_string())?;
+    let mut approved = Vec::new();
+    for address in resolved {
+        validate_subscription_address(address.ip(), allow_private_networks)?;
+        if !approved.contains(&address) {
+            approved.push(address);
+        }
+    }
+    if approved.is_empty() {
+        return Err("subscription host resolved to no addresses".to_string());
+    }
+    approved.truncate(16);
+    Ok(approved)
+}
+
+fn is_cloud_metadata_host(host: &str) -> bool {
+    matches!(
+        host.trim_end_matches('.').to_ascii_lowercase().as_str(),
+        "metadata.google.internal"
+            | "metadata.goog"
+            | "metadata.azure.internal"
+            | "instance-data.ec2.internal"
+            | "metadata.oraclecloud.com"
+    )
+}
+
+fn validate_subscription_address(
+    address: IpAddr,
+    allow_private_networks: bool,
+) -> Result<(), String> {
+    let reason = match address {
+        IpAddr::V4(address) => forbidden_ipv4_reason(address, allow_private_networks),
+        IpAddr::V6(address) => forbidden_ipv6_reason(address, allow_private_networks),
+    };
+    match reason {
+        Some(reason) => Err(format!(
+            "subscription destination address {address} is forbidden ({reason})"
+        )),
+        None => Ok(()),
+    }
+}
+
+fn forbidden_ipv4_reason(address: Ipv4Addr, allow_private_networks: bool) -> Option<&'static str> {
+    if matches!(
+        address.octets(),
+        [169, 254, 169, 254] | [100, 100, 100, 200] | [192, 0, 0, 192]
+    ) {
+        return Some("cloud metadata");
+    }
+    if ipv4_in_prefix(address, [0, 0, 0, 0], 8) {
+        return Some("unspecified or current network");
+    }
+    if ipv4_in_prefix(address, [127, 0, 0, 0], 8) {
+        return (!allow_private_networks).then_some("loopback");
+    }
+    if ipv4_in_prefix(address, [10, 0, 0, 0], 8)
+        || ipv4_in_prefix(address, [172, 16, 0, 0], 12)
+        || ipv4_in_prefix(address, [192, 168, 0, 0], 16)
+    {
+        return (!allow_private_networks).then_some("private network");
+    }
+    for (network, prefix, reason) in [
+        ([100, 64, 0, 0], 10, "shared address space"),
+        ([169, 254, 0, 0], 16, "link-local"),
+        ([192, 0, 0, 0], 24, "IETF protocol assignment"),
+        ([192, 0, 2, 0], 24, "documentation"),
+        ([192, 31, 196, 0], 24, "reserved service range"),
+        ([192, 52, 193, 0], 24, "reserved service range"),
+        ([192, 88, 99, 0], 24, "deprecated relay range"),
+        ([192, 175, 48, 0], 24, "reserved service range"),
+        ([198, 18, 0, 0], 15, "benchmarking"),
+        ([198, 51, 100, 0], 24, "documentation"),
+        ([203, 0, 113, 0], 24, "documentation"),
+        ([224, 0, 0, 0], 4, "multicast"),
+        ([240, 0, 0, 0], 4, "reserved"),
+    ] {
+        if ipv4_in_prefix(address, network, prefix) {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+fn forbidden_ipv6_reason(address: Ipv6Addr, allow_private_networks: bool) -> Option<&'static str> {
+    if address
+        == "fd00:ec2::254"
+            .parse::<Ipv6Addr>()
+            .expect("valid metadata address")
+    {
+        return Some("cloud metadata");
+    }
+    if address.is_unspecified() {
+        return Some("unspecified");
+    }
+    if address.is_loopback() {
+        return (!allow_private_networks).then_some("loopback");
+    }
+    if let Some(mapped) = address.to_ipv4_mapped() {
+        return forbidden_ipv4_reason(mapped, allow_private_networks);
+    }
+    if ipv6_in_prefix(address, "fc00::".parse().expect("valid prefix"), 7) {
+        return (!allow_private_networks).then_some("private network");
+    }
+    for (network, prefix, reason) in [
+        (
+            "::".parse().expect("valid prefix"),
+            96,
+            "IPv4-compatible or reserved",
+        ),
+        (
+            "64:ff9b::".parse().expect("valid prefix"),
+            96,
+            "translation prefix",
+        ),
+        (
+            "64:ff9b:1::".parse().expect("valid prefix"),
+            48,
+            "local translation prefix",
+        ),
+        ("100::".parse().expect("valid prefix"), 64, "discard-only"),
+        (
+            "2001::".parse().expect("valid prefix"),
+            23,
+            "IETF protocol assignment",
+        ),
+        (
+            "2001:db8::".parse().expect("valid prefix"),
+            32,
+            "documentation",
+        ),
+        (
+            "2002::".parse().expect("valid prefix"),
+            16,
+            "deprecated 6to4",
+        ),
+        ("fe80::".parse().expect("valid prefix"), 10, "link-local"),
+        ("ff00::".parse().expect("valid prefix"), 8, "multicast"),
+    ] {
+        if ipv6_in_prefix(address, network, prefix) {
+            return Some(reason);
+        }
+    }
+    if !ipv6_in_prefix(address, "2000::".parse().expect("valid prefix"), 3) {
+        return Some("reserved");
+    }
+    None
+}
+
+fn ipv4_in_prefix(address: Ipv4Addr, network: [u8; 4], prefix: u32) -> bool {
+    let mask = u32::MAX.checked_shl(32 - prefix).unwrap_or(0);
+    u32::from(address) & mask == u32::from(Ipv4Addr::from(network)) & mask
+}
+
+fn ipv6_in_prefix(address: Ipv6Addr, network: Ipv6Addr, prefix: u32) -> bool {
+    let mask = u128::MAX.checked_shl(128 - prefix).unwrap_or(0);
+    u128::from(address) & mask == u128::from(network) & mask
+}
+
 fn parse_subscription_authority(
     authority: &str,
     default_port: u16,
@@ -4351,6 +4587,13 @@ struct SubscriptionResponse {
 }
 
 fn fetch_subscription_url(input: &str) -> Result<String, String> {
+    fetch_subscription_url_with_policy(input, SUBSCRIPTION_ALLOW_PRIVATE_NETWORKS)
+}
+
+fn fetch_subscription_url_with_policy(
+    input: &str,
+    allow_private_networks: bool,
+) -> Result<String, String> {
     let mut url = SubscriptionUrl::parse(input)?;
     let started = Instant::now();
     let mut lenient_http = false;
@@ -4359,15 +4602,16 @@ fn fetch_subscription_url(input: &str) -> Result<String, String> {
         if started.elapsed() >= SUBSCRIPTION_TOTAL_TIMEOUT {
             return Err("subscription request timed out".to_string());
         }
+        let approved = resolve_approved_subscription_addresses(&url, allow_private_networks)?;
         let response = if lenient_http && url.scheme == "http" {
-            raw_subscription_request(&url, started)?
+            raw_subscription_request(&url, started, &approved)?
         } else {
             let remaining = SUBSCRIPTION_TOTAL_TIMEOUT.saturating_sub(started.elapsed());
-            match strict_subscription_request(&url, remaining) {
+            match strict_subscription_request(&url, remaining, &approved) {
                 Ok(response) => response,
                 Err(ureq::Error::Protocol(_)) if url.scheme == "http" => {
                     lenient_http = true;
-                    raw_subscription_request(&url, started)?
+                    raw_subscription_request(&url, started, &approved)?
                 }
                 Err(error) => return Err(format!("subscription request failed: {error}")),
             }
@@ -4410,13 +4654,20 @@ fn validate_subscription_redirect(
 fn strict_subscription_request(
     url: &SubscriptionUrl,
     timeout: Duration,
+    approved: &[SocketAddr],
 ) -> Result<SubscriptionResponse, ureq::Error> {
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(timeout.max(Duration::from_millis(1))))
         .max_redirects(0)
         .http_status_as_error(false)
         .build();
-    let agent: ureq::Agent = config.into();
+    let agent = ureq::Agent::with_parts(
+        config,
+        ureq::unversioned::transport::DefaultConnector::default(),
+        ApprovedSubscriptionResolver {
+            addresses: approved.to_vec(),
+        },
+    );
     let mut response = agent
         .get(url.to_string())
         .header("User-Agent", "Tachyon-Prism/0.1")
@@ -4459,21 +4710,19 @@ fn strict_subscription_request(
 fn raw_subscription_request(
     url: &SubscriptionUrl,
     started: Instant,
+    approved: &[SocketAddr],
 ) -> Result<SubscriptionResponse, String> {
     if url.scheme != "http" {
         return Err("internal error: raw subscription transport requires HTTP".to_string());
     }
-    let addresses = (url.host.as_str(), url.port)
-        .to_socket_addrs()
-        .map_err(|_| "subscription host could not be resolved".to_string())?;
     let mut last_error = None;
     let mut stream = None;
-    for address in addresses {
+    for address in approved {
         let remaining = SUBSCRIPTION_TOTAL_TIMEOUT.saturating_sub(started.elapsed());
         if remaining.is_zero() {
             break;
         }
-        match TcpStream::connect_timeout(&address, SUBSCRIPTION_CONNECT_TIMEOUT.min(remaining)) {
+        match TcpStream::connect_timeout(address, SUBSCRIPTION_CONNECT_TIMEOUT.min(remaining)) {
             Ok(connected) => {
                 stream = Some(connected);
                 break;
@@ -5029,7 +5278,8 @@ struct PlatformAtomicFileReplacer;
 
 impl AtomicFileReplacer for PlatformAtomicFileReplacer {
     fn replace(&self, candidate: &Path, canonical: &Path) -> Result<(), String> {
-        platform_atomic_replace(candidate, canonical)
+        platform_atomic_replace(candidate, canonical)?;
+        secure_file_permissions(canonical)
     }
 }
 
@@ -5049,7 +5299,11 @@ impl SyncedTempFile {
 
         for attempt in 0..100_u32 {
             let path = atomic_candidate_path(canonical, attempt)?;
-            let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = match options.open(&path) {
                 Ok(file) => file,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => {
@@ -5060,6 +5314,10 @@ impl SyncedTempFile {
                 }
             };
             let candidate = Self { path };
+            if let Err(error) = secure_file_permissions(&candidate.path) {
+                drop(file);
+                return Err(candidate.cleanup_after_failure(error));
+            }
             let write_result = file
                 .write_all(content.as_bytes())
                 .map_err(|error| {
@@ -5107,6 +5365,188 @@ impl SyncedTempFile {
             ),
         }
     }
+}
+
+#[cfg(unix)]
+fn secure_file_permissions(path: &Path) -> Result<(), String> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("secure file permissions {}: {error}", path.display()))
+}
+
+#[cfg(target_os = "windows")]
+fn secure_file_permissions(path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, GetTokenInformation, TokenUser, DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return Err(format!(
+                "open current user token for {}: {}",
+                path.display(),
+                io::Error::last_os_error()
+            ));
+        }
+        let mut required = 0_u32;
+        let _ = GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut required);
+        if required == 0 {
+            let error = io::Error::last_os_error();
+            CloseHandle(token);
+            return Err(format!(
+                "size current user token for {}: {error}",
+                path.display()
+            ));
+        }
+        let mut token_info = vec![0_u8; required as usize];
+        if GetTokenInformation(
+            token,
+            TokenUser,
+            token_info.as_mut_ptr().cast(),
+            required,
+            &mut required,
+        ) == 0
+        {
+            let error = io::Error::last_os_error();
+            CloseHandle(token);
+            return Err(format!(
+                "read current user token for {}: {error}",
+                path.display()
+            ));
+        }
+        CloseHandle(token);
+
+        let token_user = &*(token_info.as_ptr().cast::<TOKEN_USER>());
+        let mut sid_text = std::ptr::null_mut();
+        if ConvertSidToStringSidW(token_user.User.Sid, &mut sid_text) == 0 {
+            return Err(format!(
+                "format current user SID for {}: {}",
+                path.display(),
+                io::Error::last_os_error()
+            ));
+        }
+        let sid_len = (0..).take_while(|index| *sid_text.add(*index) != 0).count();
+        let sid = String::from_utf16_lossy(std::slice::from_raw_parts(sid_text, sid_len));
+        LocalFree(sid_text.cast());
+
+        let sddl = format!("D:P(A;;FA;;;{sid})(A;;FA;;;SY)(A;;FA;;;BA)");
+        let sddl_wide: Vec<u16> = std::ffi::OsStr::new(&sddl)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl_wide.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        ) == 0
+        {
+            return Err(format!(
+                "build user-only ACL for {}: {}",
+                path.display(),
+                io::Error::last_os_error()
+            ));
+        }
+        let mut dacl_present = 0;
+        let mut dacl_defaulted = 0;
+        let mut dacl = std::ptr::null_mut();
+        if GetSecurityDescriptorDacl(
+            descriptor,
+            &mut dacl_present,
+            &mut dacl,
+            &mut dacl_defaulted,
+        ) == 0
+            || dacl_present == 0
+            || dacl.is_null()
+        {
+            let error = io::Error::last_os_error();
+            LocalFree(descriptor.cast());
+            return Err(format!(
+                "read user-only ACL for {}: {error}",
+                path.display()
+            ));
+        }
+        let path_wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let result = SetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            dacl,
+            std::ptr::null_mut(),
+        );
+        LocalFree(descriptor.cast());
+        if result != 0 {
+            return Err(format!(
+                "apply user-only ACL to {}: Windows error {result}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn secure_file_permissions(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "windows"))]
+fn windows_file_dacl_is_protected(path: &Path) -> Result<bool, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorControl, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        SE_DACL_PROTECTED,
+    };
+
+    let path_wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let result = unsafe {
+        GetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if result != 0 {
+        return Err(format!("query secure file ACL: Windows error {result}"));
+    }
+    let mut control = 0_u16;
+    let mut revision = 0_u32;
+    let ok = unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) };
+    unsafe { LocalFree(descriptor.cast()) };
+    if ok == 0 {
+        return Err(format!(
+            "query secure file ACL control: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(control & SE_DACL_PROTECTED != 0)
 }
 
 impl Drop for SyncedTempFile {
@@ -6388,20 +6828,72 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
     }
 
     #[test]
-    fn system_proxy_requires_both_runtime_cores_to_remain_running() {
+    fn system_proxy_is_owned_only_by_xray_across_runtime_matrix() {
         let mut processes = RuntimeProcesses::default();
         let mut status = processes.status();
 
         status.xray.state = "running".to_string();
-        status.tachyon_core.state = "running".to_string();
-        assert!(!should_restore_proxy_for_runtime(&status));
+        for core_state in ["stopped", "running", "failed"] {
+            status.tachyon_core.state = core_state.to_string();
+            assert!(
+                !should_restore_proxy_for_runtime(&status),
+                "Xray-only and dual-core modes must retain the Xray-owned proxy when Core is {core_state}"
+            );
+        }
 
-        status.tachyon_core.state = "failed".to_string();
-        assert!(should_restore_proxy_for_runtime(&status));
+        for xray_state in ["stopped", "failed"] {
+            status.xray.state = xray_state.to_string();
+            for core_state in ["stopped", "running", "failed"] {
+                status.tachyon_core.state = core_state.to_string();
+                assert!(
+                    should_restore_proxy_for_runtime(&status),
+                    "Core-only, startup failure, and stopped-Xray states must restore the proxy"
+                );
+            }
+        }
+    }
 
-        status.tachyon_core.state = "running".to_string();
-        status.xray.state = "stopped".to_string();
-        assert!(should_restore_proxy_for_runtime(&status));
+    #[test]
+    fn system_proxy_enable_rejects_stopped_or_failed_xray() {
+        assert!(validate_system_proxy_owner_state("running").is_ok());
+        for state in ["stopped", "failed"] {
+            let error = validate_system_proxy_owner_state(state)
+                .expect_err("non-running Xray cannot own the system proxy");
+            assert!(error.contains("Xray is running"));
+        }
+    }
+
+    #[test]
+    fn xray_stop_restores_proxy_before_stopping_process() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let result = stop_xray_transaction(
+            || {
+                events.borrow_mut().push("restoreProxy");
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("stopXray");
+                Ok("stopped")
+            },
+        )
+        .unwrap();
+        assert_eq!(result, "stopped");
+        assert_eq!(*events.borrow(), ["restoreProxy", "stopXray"]);
+    }
+
+    #[test]
+    fn xray_stop_does_not_orphan_proxy_when_restore_fails() {
+        let stopped = std::cell::Cell::new(false);
+        let error = stop_xray_transaction(
+            || Err("restore failed".to_string()),
+            || {
+                stopped.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("proxy restoration failure must stop the shutdown transaction");
+        assert_eq!(error, "restore failed");
+        assert!(!stopped.get());
     }
 
     fn atomic_candidates(directory: &Path, canonical_name: &str) -> Vec<PathBuf> {
@@ -6524,6 +7016,51 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         );
         assert!(atomic_candidates(&directory, "xray-client.json").is_empty());
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn atomic_runtime_config_is_created_with_private_permissions() {
+        let directory = unique_temp_dir("tachyon-test-secure-runtime-config");
+        fs::create_dir_all(&directory).unwrap();
+        let canonical = directory.join("runtime-with-secret.json");
+        write_atomic(&canonical, r#"{"psk":"must-not-appear-in-errors"}"#)
+            .expect("secure runtime config write");
+
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(&canonical).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        #[cfg(target_os = "windows")]
+        assert!(
+            windows_file_dacl_is_protected(&canonical).expect("query protected DACL"),
+            "runtime config DACL must not inherit broad directory permissions"
+        );
+
+        assert_eq!(
+            fs::read_to_string(&canonical).unwrap(),
+            r#"{"psk":"must-not-appear-in-errors"}"#
+        );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn tauri_csp_allows_only_local_runtime_connections_and_ipc() {
+        let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let csp = config["app"]["security"]["csp"]
+            .as_str()
+            .expect("CSP must be configured");
+        assert!(csp.contains("default-src 'self'"));
+        assert!(csp.contains("script-src 'self'"));
+        assert!(csp.contains("ipc:"));
+        assert!(csp.contains("http://ipc.localhost"));
+        assert!(csp.contains("http://127.0.0.1:*"));
+        assert!(csp.contains("http://[::1]:*"));
+        assert!(csp.contains("object-src 'none'"));
+        assert!(!csp.contains("'unsafe-eval'"));
+        assert!(!csp.contains("https:"));
+        assert!(!csp.contains("connect-src *"));
+        assert!(!csp.contains("http://*:"));
     }
 
     #[test]
@@ -7905,8 +8442,11 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
             vec![malformed_redirect.clone(), malformed_redirect],
         );
 
-        let text = fetch_subscription_text(format!("http://127.0.0.1:{source_port}/start"))
-            .expect("malformed redirect should use bounded HTTP fallback");
+        let text = fetch_subscription_url_with_policy(
+            &format!("http://127.0.0.1:{source_port}/start"),
+            true,
+        )
+        .expect("malformed redirect should use bounded HTTP fallback");
         assert_eq!(text, "hello world");
         source_handle.join().unwrap();
         target_handle.join().unwrap();
@@ -7923,8 +8463,9 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         .into_bytes();
         let handle = spawn_subscription_server(listener, vec![response.clone(), response]);
 
-        let error = fetch_subscription_text(format!("http://127.0.0.1:{port}/large"))
-            .expect_err("oversized subscription must fail");
+        let error =
+            fetch_subscription_url_with_policy(&format!("http://127.0.0.1:{port}/large"), true)
+                .expect_err("oversized subscription must fail");
         assert!(error.contains("too large"));
         handle.join().unwrap();
     }
@@ -7936,8 +8477,9 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         let response = b" 307 Temporary Redirect\r\nLocation: /loop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
         let handle = spawn_subscription_server(listener, vec![response; 7]);
 
-        let error = fetch_subscription_text(format!("http://127.0.0.1:{port}/loop"))
-            .expect_err("redirect loop must fail");
+        let error =
+            fetch_subscription_url_with_policy(&format!("http://127.0.0.1:{port}/loop"), true)
+                .expect_err("redirect loop must fail");
         assert!(error.contains("redirect limit"));
         handle.join().unwrap();
     }
@@ -7949,8 +8491,9 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         let response = b"definitely not HTTP\r\nContent-Length: 0\r\n\r\n".to_vec();
         let handle = spawn_subscription_server(listener, vec![response.clone(), response]);
 
-        let error = fetch_subscription_text(format!("http://127.0.0.1:{port}/invalid"))
-            .expect_err("invalid response must fail");
+        let error =
+            fetch_subscription_url_with_policy(&format!("http://127.0.0.1:{port}/invalid"), true)
+                .expect_err("invalid response must fail");
         assert!(error.contains("status"));
         handle.join().unwrap();
     }
@@ -7975,6 +8518,107 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         let error = validate_subscription_redirect(&https, &downgraded)
             .expect_err("HTTPS redirect downgrade must fail");
         assert!(error.contains("cannot downgrade"));
+    }
+
+    #[test]
+    fn subscription_destination_policy_rejects_special_ranges_by_default() {
+        let forbidden = [
+            ("0.0.0.0", "unspecified"),
+            ("10.1.2.3", "private"),
+            ("127.0.0.1", "loopback"),
+            ("100.64.0.1", "shared"),
+            ("169.254.1.1", "link-local"),
+            ("192.0.2.1", "documentation"),
+            ("198.18.0.1", "benchmarking"),
+            ("203.0.113.9", "documentation"),
+            ("224.0.0.1", "multicast"),
+            ("255.255.255.255", "reserved"),
+            ("::", "unspecified"),
+            ("::1", "loopback"),
+            ("fc00::1", "private"),
+            ("fe80::1", "link-local"),
+            ("ff02::1", "multicast"),
+            ("2001:db8::1", "documentation"),
+            ("::ffff:127.0.0.1", "loopback"),
+        ];
+        for (address, expected_reason) in forbidden {
+            let error = validate_subscription_address(address.parse().unwrap(), false)
+                .expect_err("special-use destination must be rejected");
+            assert!(
+                error.contains(expected_reason),
+                "{address} returned unexpected error: {error}"
+            );
+        }
+
+        for address in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
+            validate_subscription_address(address.parse().unwrap(), false)
+                .unwrap_or_else(|error| panic!("public address {address} was rejected: {error}"));
+        }
+    }
+
+    #[test]
+    fn explicit_private_policy_never_allows_metadata_or_other_special_ranges() {
+        for address in ["10.1.2.3", "127.0.0.1", "192.168.50.2", "fd12::1"] {
+            validate_subscription_address(address.parse().unwrap(), true)
+                .unwrap_or_else(|error| panic!("explicit private address was rejected: {error}"));
+        }
+        for address in [
+            "169.254.169.254",
+            "100.100.100.200",
+            "192.0.0.192",
+            "fd00:ec2::254",
+            "fe80::1",
+            "224.0.0.1",
+            "2001:db8::1",
+        ] {
+            assert!(
+                validate_subscription_address(address.parse().unwrap(), true).is_err(),
+                "metadata and non-private special range {address} must remain forbidden"
+            );
+        }
+        assert!(is_cloud_metadata_host("metadata.google.internal."));
+        assert!(is_cloud_metadata_host("INSTANCE-DATA.EC2.INTERNAL"));
+    }
+
+    #[test]
+    fn default_subscription_fetch_rejects_loopback_before_connecting() {
+        let error = fetch_subscription_url("http://127.0.0.1:9/subscription")
+            .expect_err("default subscription policy must reject loopback");
+        assert!(error.contains("loopback"));
+    }
+
+    #[test]
+    fn redirect_destination_is_revalidated_before_second_connection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let response = b"HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
+        let handle = spawn_subscription_server(listener, vec![response]);
+
+        let error =
+            fetch_subscription_url_with_policy(&format!("http://127.0.0.1:{port}/start"), true)
+                .expect_err("redirect to metadata must be rejected before connection");
+        assert!(error.contains("cloud metadata"));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn strict_subscription_transport_uses_only_preapproved_addresses() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello".to_vec();
+        let handle = spawn_subscription_server(listener, vec![response]);
+        let url = SubscriptionUrl::parse(&format!(
+            "http://dns-name-that-must-not-resolve.invalid:{}/subscription",
+            address.port()
+        ))
+        .unwrap();
+
+        let response = strict_subscription_request(&url, Duration::from_secs(2), &[address])
+            .expect("approved resolver must bind the connection to the validated address");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"hello");
+        handle.join().unwrap();
     }
 
     #[test]
