@@ -22,6 +22,7 @@ import {
   xrayAdvancedRoundTripJsonFixture,
   xrayFullConfigJsonFixture,
   xrayManagedReferenceGraphJsonFixture,
+  xrayReversePortalJsonFixture,
 } from "./subscriptionFixtures";
 
 const mockVMessNode: ProxyNode = {
@@ -499,6 +500,44 @@ describe("buildXrayClientConfigDraft", () => {
       expect.arrayContaining([
         expect.objectContaining({ tag: "tachyon-direct", protocol: "freedom" }),
       ]),
+    );
+  });
+
+  it("preserves reverse portal and runtime handler references in Raw and Managed modes", () => {
+    const source = JSON.parse(xrayReversePortalJsonFixture) as Record<string, unknown>;
+    const raw = parseXrayConfigText(xrayReversePortalJsonFixture);
+    const rawDraft = buildXrayClientConfigDraft(undefined, {
+      configMode: "raw",
+      rawConfig: raw,
+    });
+    const [selected] = parseSubscription(xrayReversePortalJsonFixture);
+    const managed = buildXrayClientConfigDraft(selected, { routingMode: "rule" });
+    const managedRules = (managed.routing as Record<string, unknown>).rules as Array<
+      Record<string, unknown>
+    >;
+    const importedTargets = managedRules
+      .filter(
+        (rule) =>
+          Array.isArray(rule.domain) &&
+          rule.domain.some(
+            (domain) =>
+              domain === "full:reverse.example.test" ||
+              domain === "full:dynamic.example.test",
+          ),
+      )
+      .map((rule) => rule.outboundTag);
+
+    expect(rawDraft).toEqual(source);
+    expect(managed.reverse).toEqual(source.reverse);
+    expect(importedTargets).toEqual(["reverse-portal", "runtime-registered-handler"]);
+    expect(managed.outbounds).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ tag: "reverse-portal" }),
+        expect.objectContaining({ tag: "runtime-registered-handler" }),
+      ]),
+    );
+    expect(managedRules[managedRules.length - 1].outboundTag).toBe(
+      "selected-static-proxy",
     );
   });
 
@@ -1135,74 +1174,32 @@ describe("complete Xray JSON editing", () => {
     expect(parseXrayConfigText(JSON.stringify(raw), "zh-CN")).toEqual(raw);
   });
 
-  it("rejects dangling outbound and balancer routing references", () => {
-    expect(() =>
-      parseXrayConfigText(
-        JSON.stringify({
-          outbounds: [{ tag: "existing", protocol: "freedom" }],
-          routing: {
-            rules: [{ type: "field", outboundTag: "missing" }],
+  it("defers imported handler and balancer existence checks to Xray run -test", () => {
+    const config = {
+      outbounds: [
+        {
+          tag: "existing",
+          protocol: "freedom",
+          proxySettings: { tag: "runtime-chain-handler" },
+          streamSettings: { sockopt: { dialerProxy: "runtime-dialer-handler" } },
+        },
+      ],
+      routing: {
+        balancers: [
+          {
+            tag: "known-balancer",
+            selector: ["runtime-"],
+            fallbackTag: "runtime-fallback-handler",
           },
-        }),
-      ),
-    ).toThrow(/Xray routing target does not exist.*outboundTag -> missing/);
+        ],
+        rules: [
+          { type: "field", outboundTag: "runtime-rule-handler" },
+          { type: "field", balancerTag: "runtime-balancer" },
+        ],
+      },
+    };
 
-    expect(() =>
-      parseXrayConfigText(
-        JSON.stringify({
-          outbounds: [{ tag: "existing", protocol: "freedom" }],
-          routing: {
-            rules: [{ type: "field", balancerTag: "missing-balancer" }],
-          },
-        }),
-      ),
-    ).toThrow(/Xray routing target does not exist.*balancerTag -> missing-balancer/);
-
-    for (const [location, config] of [
-      [
-        "proxySettings.tag",
-        {
-          outbounds: [
-            {
-              tag: "existing",
-              protocol: "freedom",
-              proxySettings: { tag: "missing-chain" },
-            },
-          ],
-        },
-      ],
-      [
-        "streamSettings.sockopt.dialerProxy",
-        {
-          outbounds: [
-            {
-              tag: "existing",
-              protocol: "freedom",
-              streamSettings: { sockopt: { dialerProxy: "missing-dialer" } },
-            },
-          ],
-        },
-      ],
-      [
-        "fallbackTag",
-        {
-          outbounds: [{ tag: "existing", protocol: "freedom" }],
-          routing: {
-            balancers: [
-              {
-                tag: "available-balancer",
-                selector: ["existing"],
-                fallbackTag: "missing-fallback",
-              },
-            ],
-          },
-        },
-      ],
-    ] as const) {
-      expect(() => parseXrayConfigText(JSON.stringify(config))).toThrow(
-        new RegExp(`Xray routing target does not exist.*${location}`),
-      );
-    }
+    expect(parseXrayConfigText(JSON.stringify(config))).toEqual(config);
   });
 
   it("accepts declared balancer references and Xray's outboundTag precedence", () => {

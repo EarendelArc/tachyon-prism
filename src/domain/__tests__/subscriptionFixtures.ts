@@ -258,6 +258,43 @@ export const xrayManagedReferenceGraphJsonFixture = JSON.stringify({
   },
 });
 
+export const xrayReversePortalJsonFixture = JSON.stringify({
+  reverse: {
+    portals: [
+      {
+        tag: "reverse-portal",
+        domain: "reverse.example.test",
+      },
+    ],
+  },
+  outbounds: [
+    {
+      tag: "selected-static-proxy",
+      protocol: "vmess",
+      settings: {
+        address: "selected.example.com",
+        port: 443,
+        id: "selected-static-id",
+      },
+    },
+  ],
+  routing: {
+    domainStrategy: "AsIs",
+    rules: [
+      {
+        type: "field",
+        domain: ["full:reverse.example.test"],
+        outboundTag: "reverse-portal",
+      },
+      {
+        type: "field",
+        domain: ["full:dynamic.example.test"],
+        outboundTag: "runtime-registered-handler",
+      },
+    ],
+  },
+});
+
 export const xrayAdvancedRoundTripJsonFixture = JSON.stringify(
   {
     log: { loglevel: "warning" },

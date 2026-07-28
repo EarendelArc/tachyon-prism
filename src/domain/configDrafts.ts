@@ -46,7 +46,6 @@ export type XrayConfigTextErrorCode =
   | "field-object"
   | "field-array"
   | "array-entry-object"
-  | "duplicate-tag"
   | "tag-string"
   | "managed-reference-rewrite"
   | "routing-reference"
@@ -130,7 +129,7 @@ export function parseXrayConfigText(
     }
   }
 
-  validateXrayRoutingReferences(value, language);
+  validateXrayReferenceShapes(value, language);
   return value;
 }
 
@@ -187,7 +186,7 @@ export function buildXrayClientConfigDraft(
       throw new Error("Raw Xray config mode requires a complete config object");
     }
     const rawConfig = cloneRecord(options.rawConfig);
-    validateXrayRoutingReferences(rawConfig, "en");
+    validateXrayReferenceShapes(rawConfig, "en");
     return rawConfig;
   }
   if (!node) {
@@ -196,7 +195,7 @@ export function buildXrayClientConfigDraft(
   const xrayOutbound = buildXrayOutboundDraft(node);
   let importedConfig = cloneRecord(xrayConfigTemplateForNode(node) ?? {});
   if (Object.keys(importedConfig).length > 0) {
-    validateXrayRoutingReferences(importedConfig, "en");
+    validateXrayReferenceShapes(importedConfig, "en");
   }
   const originalInbounds = recordArray(importedConfig.inbounds);
   const originalOutbounds = recordArray(importedConfig.outbounds);
@@ -321,17 +320,25 @@ export function buildXrayClientConfigDraft(
   ];
   config.inbounds = inbounds;
   config.outbounds = outbounds;
+  const managedRouting = xrayRouting(options.routingMode ?? "rule", statsEnabled, {
+    apiInboundTag,
+    apiTag,
+    blockTag,
+    directTag,
+    httpTag,
+    proxyTag,
+    socksTag,
+  });
+  const managedOutboundTags = new Set(
+    outbounds.map((managedOutbound) => stringValue(managedOutbound.tag)).filter(Boolean),
+  );
+  if (apiTag) {
+    managedOutboundTags.add(apiTag);
+  }
+  validatePrismManagedRoutingTargets(managedRouting, managedOutboundTags);
   config.routing = mergeXrayRouting(
     importedConfig.routing,
-    xrayRouting(options.routingMode ?? "rule", statsEnabled, {
-      apiInboundTag,
-      apiTag,
-      blockTag,
-      directTag,
-      httpTag,
-      proxyTag,
-      socksTag,
-    }),
+    managedRouting,
     options.routingMode ?? "rule",
   );
   if (statsEnabled) {
@@ -365,7 +372,7 @@ export function buildXrayClientConfigDraft(
       ? cloneRecord(importedConfig.stats)
       : {};
   }
-  validateXrayRoutingReferences(config, "en");
+  validateXrayReferenceShapes(config, "en");
   return config;
 }
 
@@ -387,11 +394,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function validateXrayRoutingReferences(
+function validateXrayReferenceShapes(
   config: Record<string, unknown>,
   language: XrayConfigLanguage,
 ): void {
-  const outboundTags = new Set<string>();
   const outboundEntries: Array<Record<string, unknown>> = [];
   const outbounds = config.outbounds;
   if (outbounds !== undefined && !Array.isArray(outbounds)) {
@@ -406,31 +412,18 @@ function validateXrayRoutingReferences(
     if (tag !== undefined && typeof tag !== "string") {
       throw xrayTextError("tag-string", language, `outbounds[${index}].tag`);
     }
-    if (typeof tag === "string" && tag) {
-      if (outboundTags.has(tag)) {
-        throw xrayTextError("duplicate-tag", language, `outbounds: ${tag}`);
-      }
-      outboundTags.add(tag);
-    }
   }
   const api = asRecord(config.api);
-  const apiTag = stringValue(api.tag);
-  if (apiTag) {
-    if (outboundTags.has(apiTag)) {
-      throw xrayTextError("duplicate-tag", language, `api/outbounds: ${apiTag}`);
-    }
-    outboundTags.add(apiTag);
+  if (api.tag !== undefined && typeof api.tag !== "string") {
+    throw xrayTextError("tag-string", language, "api.tag");
   }
 
-  const requireOutbound = (value: unknown, location: string): void => {
+  const validateReference = (value: unknown, location: string): void => {
     if (value === undefined || value === "") {
       return;
     }
     if (typeof value !== "string") {
       throw xrayTextError("tag-string", language, location);
-    }
-    if (!outboundTags.has(value)) {
-      throw xrayTextError("routing-reference", language, `${location} -> ${value}`);
     }
   };
   const validateSelectors = (value: unknown, location: string): void => {
@@ -447,7 +440,7 @@ function validateXrayRoutingReferences(
     if (proxySettings !== undefined && !isRecord(proxySettings)) {
       throw xrayTextError("field-object", language, `outbounds[${index}].proxySettings`);
     }
-    requireOutbound(
+    validateReference(
       isRecord(proxySettings) ? proxySettings.tag : undefined,
       `outbounds[${index}].proxySettings.tag`,
     );
@@ -459,14 +452,13 @@ function validateXrayRoutingReferences(
     if (sockopt !== undefined && !isRecord(sockopt)) {
       throw xrayTextError("field-object", language, `outbounds[${index}].streamSettings.sockopt`);
     }
-    requireOutbound(
+    validateReference(
       isRecord(sockopt) ? sockopt.dialerProxy : undefined,
       `outbounds[${index}].streamSettings.sockopt.dialerProxy`,
     );
   }
 
   const routing = asRecord(config.routing);
-  const balancerTags = new Set<string>();
   const balancers = routing.balancers;
   if (balancers !== undefined && !Array.isArray(balancers)) {
     throw xrayTextError("field-array", language, "routing.balancers");
@@ -479,14 +471,8 @@ function validateXrayRoutingReferences(
     if (tag !== undefined && typeof tag !== "string") {
       throw xrayTextError("tag-string", language, `routing.balancers[${index}].tag`);
     }
-    if (typeof tag === "string" && tag) {
-      if (balancerTags.has(tag)) {
-        throw xrayTextError("duplicate-tag", language, `routing.balancers: ${tag}`);
-      }
-      balancerTags.add(tag);
-    }
     validateSelectors(balancer.selector, `routing.balancers[${index}].selector`);
-    requireOutbound(balancer.fallbackTag, `routing.balancers[${index}].fallbackTag`);
+    validateReference(balancer.fallbackTag, `routing.balancers[${index}].fallbackTag`);
   }
 
   const rules = routing.rules;
@@ -505,14 +491,8 @@ function validateXrayRoutingReferences(
     if (balancerTag !== undefined && typeof balancerTag !== "string") {
       throw xrayTextError("tag-string", language, `routing.rules[${index}].balancerTag`);
     }
-    requireOutbound(outboundTag, `routing.rules[${index}].outboundTag`);
-    if (typeof balancerTag === "string" && !balancerTags.has(balancerTag)) {
-      throw xrayTextError(
-        "routing-reference",
-        language,
-        `routing.rules[${index}].balancerTag -> ${balancerTag}`,
-      );
-    }
+    validateReference(outboundTag, `routing.rules[${index}].outboundTag`);
+    validateReference(balancerTag, `routing.rules[${index}].balancerTag`);
   }
   validateSelectors(
     asRecord(config.observatory).subjectSelector,
@@ -522,6 +502,22 @@ function validateXrayRoutingReferences(
     asRecord(config.burstObservatory).subjectSelector,
     "burstObservatory.subjectSelector",
   );
+}
+
+function validatePrismManagedRoutingTargets(
+  managedRouting: Record<string, unknown>,
+  managedOutboundTags: Set<string>,
+): void {
+  for (const [index, rule] of recordArray(managedRouting.rules).entries()) {
+    const outboundTag = stringValue(rule.outboundTag);
+    if (outboundTag && !managedOutboundTags.has(outboundTag)) {
+      throw xrayTextError(
+        "routing-reference",
+        "en",
+        `Prism routing.rules[${index}].outboundTag -> ${outboundTag}`,
+      );
+    }
+  }
 }
 
 function managedProxyTagConflicts(tag: string): boolean {
@@ -578,10 +574,6 @@ function xrayTextError(
     "array-entry-object": {
       en: `Xray JSON array entry must be an object${suffix}`,
       "zh-CN": `Xray JSON 数组项必须是对象${suffix}`,
-    },
-    "duplicate-tag": {
-      en: `Xray JSON tag must be unique${suffix}`,
-      "zh-CN": `Xray JSON 标签必须唯一${suffix}`,
     },
     "tag-string": {
       en: `Xray JSON tag must be a string${suffix}`,
@@ -670,6 +662,9 @@ function rewriteManagedOutboundTagReferences(
   managedTag: string,
   finalOutboundTags: string[],
 ): Record<string, unknown> {
+  if (!finalOutboundTags.includes(managedTag)) {
+    throw managedReferenceRewriteError(`managed target does not exist: ${managedTag}`);
+  }
   const rewritten = cloneRecord(config);
   const originalOutboundTags = recordArray(config.outbounds)
     .map((outbound) => stringValue(outbound.tag))
@@ -739,7 +734,7 @@ function rewriteManagedOutboundTagReferences(
     }
   }
 
-  validateXrayRoutingReferences(rewritten, "en");
+  validateXrayReferenceShapes(rewritten, "en");
   return rewritten;
 }
 
