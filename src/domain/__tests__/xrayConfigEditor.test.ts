@@ -15,7 +15,14 @@ describe("advanced Xray JSON UI wiring", () => {
   it("exposes edit, import, export, and both restore paths", () => {
     expect(appSource).toContain("data-xray-advanced-toggle");
     expect(appSource).toContain('data-xray-json-import');
-    expect(appSource).toContain('data-xray-advanced-editor={xrayAdvancedEditor.enabled');
+    expect(appSource).toContain(
+      'data-xray-advanced-editor={xrayAdvancedEditor.mode === "raw" ? "enabled" : "disabled"}',
+    );
+    expect(appSource).toContain('data-xray-config-mode={xrayAdvancedEditor.mode}');
+    expect(appSource).toContain("data-xray-raw-mode-notice");
+    expect(appSource).toContain(
+      "Raw config keeps its own routing semantics; the selected node does not control its default outbound.",
+    );
     expect(appSource).toContain("onExportAdvancedXray");
     expect(appSource).toContain("onRestoreAdvancedXray(false)");
     expect(appSource).toContain("onRestoreAdvancedXray(true)");

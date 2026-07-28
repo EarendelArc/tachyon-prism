@@ -15,6 +15,7 @@ import {
   parseXrayConfigText,
   stringifyDraft,
   type CanonicalXrayLoadState,
+  type XrayConfigMode,
   type XrayRoutingMode,
 } from "./domain/configDrafts";
 import {
@@ -222,6 +223,7 @@ interface XrayProbeStatus {
 
 interface XrayAdvancedEditorState {
   enabled: boolean;
+  mode: XrayConfigMode;
   text: string;
 }
 
@@ -429,6 +431,9 @@ const zh = {
   advancedXrayConfig: "高级 Xray JSON",
   advancedXrayDescription: "直接编辑完整配置；未知字段与未来协议保持原样。保存和启动前会运行 Xray 配置测试。",
   advancedXrayEnable: "使用高级完整配置",
+  xrayManagedConfigMode: "节点托管模式",
+  xrayRawConfigMode: "原始配置模式",
+  xrayRawModeDescription: "原始配置保持自身路由语义；当前节点选择不会控制其默认出口。",
   advancedXrayExport: "导出 JSON",
   advancedXrayExportFailed: "Xray JSON 导出失败",
   advancedXrayImport: "导入 JSON",
@@ -862,6 +867,9 @@ const en: typeof zh = {
   advancedXrayConfig: "Advanced Xray JSON",
   advancedXrayDescription: "Edit the complete config directly. Unknown fields and future protocols remain untouched. Xray config-test runs before save and start.",
   advancedXrayEnable: "Use advanced complete config",
+  xrayManagedConfigMode: "Node-managed mode",
+  xrayRawConfigMode: "Raw config mode",
+  xrayRawModeDescription: "Raw config keeps its own routing semantics; the selected node does not control its default outbound.",
   advancedXrayExport: "Export JSON",
   advancedXrayExportFailed: "Xray JSON export failed",
   advancedXrayImport: "Import JSON",
@@ -1335,11 +1343,18 @@ function saveRoutingMode(mode: XrayRoutingMode): void {
 
 function xrayAdvancedEditorFromStored(value: unknown): XrayAdvancedEditorState {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return { enabled: false, text: "" };
+    return { enabled: false, mode: "managed", text: "" };
   }
   const stored = value as Partial<XrayAdvancedEditorState>;
+  const mode: XrayConfigMode =
+    stored.mode === "raw" || stored.mode === "managed"
+      ? stored.mode
+      : stored.enabled === true
+        ? "raw"
+        : "managed";
   return {
-    enabled: stored.enabled === true,
+    enabled: mode === "raw",
+    mode,
     text: typeof stored.text === "string" ? stored.text : "",
   };
 }
@@ -1605,6 +1620,7 @@ function draftText(
     }
     xray = stringifyDraft(
       buildXrayClientConfigDraft(activeNode, {
+        configMode: "managed",
         enableStats: runtimeSettings.xrayStatsEnabled,
         httpListen: runtimeSettings.xrayHttpListen,
         httpPort: runtimeSettings.xrayHttpPort,
@@ -1754,7 +1770,7 @@ export function App() {
   );
   const [routingMode, setRoutingMode] = useState<XrayRoutingMode>(loadRoutingMode);
   const [xrayAdvancedEditor, setXrayAdvancedEditor] =
-    useState<XrayAdvancedEditorState>({ enabled: false, text: "" });
+    useState<XrayAdvancedEditorState>({ enabled: false, mode: "managed", text: "" });
   const [secureStorageReady, setSecureStorageReady] = useState(false);
   const [canonicalXrayText, setCanonicalXrayText] = useState("");
   const [canonicalXrayLoadState, setCanonicalXrayLoadState] =
@@ -1827,7 +1843,7 @@ export function App() {
     [activeNode, effectiveRuntimeInputs, gameRoutes, launcherSettings, language, profiles, routingMode],
   );
   const drafts = useMemo(() => {
-    if (!xrayAdvancedEditor.enabled) {
+    if (xrayAdvancedEditor.mode === "managed") {
       return generatedDrafts;
     }
     let xrayError = "";
@@ -1842,7 +1858,7 @@ export function App() {
       xray: xrayAdvancedEditor.text,
       xrayError,
     };
-  }, [generatedDrafts, language, xrayAdvancedEditor.enabled, xrayAdvancedEditor.text]);
+  }, [generatedDrafts, language, xrayAdvancedEditor.mode, xrayAdvancedEditor.text]);
   const trafficTotals = useMemo(
     () => trafficTotalsFromSources(telemetry.latestTelemetry, xrayTrafficStats),
     [telemetry.latestTelemetry, xrayTrafficStats],
@@ -1855,7 +1871,7 @@ export function App() {
       ? xrayOutboundCompatibilityForNode(activeNode)
       : null;
     items.push(
-      xrayAdvancedEditor.enabled && drafts.xray && !drafts.xrayError
+      xrayAdvancedEditor.mode === "raw" && drafts.xray && !drafts.xrayError
         ? {
             detail: ui.advancedXrayDescription,
             label: ui.advancedXrayConfig,
@@ -2074,7 +2090,7 @@ export function App() {
     runtimeInputs.tachyonCoreBinaryPath,
     runtimeInputs.xrayBinaryPath,
     tachyonPreflight,
-    xrayAdvancedEditor.enabled,
+    xrayAdvancedEditor.mode,
     language,
   ]);
   const readinessErrors = useMemo(
@@ -2580,6 +2596,7 @@ export function App() {
     setXrayAdvancedEditor((current) => ({
       ...current,
       enabled,
+      mode: enabled ? "raw" : "managed",
       text: initializeAdvancedXrayDraftText({
         canonicalText: canonicalXrayText,
         enabled,
@@ -2591,7 +2608,7 @@ export function App() {
   }
 
   function updateAdvancedXrayText(text: string) {
-    setXrayAdvancedEditor((current) => ({ ...current, enabled: true, text }));
+    setXrayAdvancedEditor((current) => ({ ...current, enabled: true, mode: "raw", text }));
   }
 
   async function importAdvancedXray(file: File | undefined) {
@@ -2601,7 +2618,7 @@ export function App() {
     try {
       const text = await file.text();
       parseXrayConfigText(text, language);
-      setXrayAdvancedEditor((current) => ({ ...current, enabled: true, text }));
+      setXrayAdvancedEditor((current) => ({ ...current, enabled: true, mode: "raw", text }));
       setMessage(ui.advancedXrayImported);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : ui.advancedXrayImportFailed);
@@ -2623,7 +2640,7 @@ export function App() {
     if (!text) {
       return;
     }
-    setXrayAdvancedEditor((current) => ({ ...current, enabled: true, text }));
+    setXrayAdvancedEditor((current) => ({ ...current, enabled: true, mode: "raw", text }));
     setMessage(useGenerated ? ui.advancedXrayRestoreGenerated : ui.advancedXrayRestored);
   }
 
@@ -5899,7 +5916,7 @@ function SettingsView({
                     <span>Xray</span>
                     <label className="mini-check">
                       <input
-                        checked={xrayAdvancedEditor.enabled}
+                        checked={xrayAdvancedEditor.mode === "raw"}
                         data-xray-advanced-toggle
                         type="checkbox"
                         onChange={(event) => onSetAdvancedXrayEnabled(event.currentTarget.checked)}
@@ -5908,12 +5925,25 @@ function SettingsView({
                     </label>
                   </div>
                   <p className="field-hint">{ui.advancedXrayDescription}</p>
+                  <p
+                    className="field-hint"
+                    data-xray-config-mode={xrayAdvancedEditor.mode}
+                  >
+                    {xrayAdvancedEditor.mode === "raw"
+                      ? ui.xrayRawConfigMode
+                      : ui.xrayManagedConfigMode}
+                  </p>
+                  {xrayAdvancedEditor.mode === "raw" ? (
+                    <p className="field-hint" data-xray-raw-mode-notice>
+                      {ui.xrayRawModeDescription}
+                    </p>
+                  ) : null}
                   {canonicalXrayReadError ? (
                     <p className="xray-canonical-error" role="alert">
                       {ui.canonicalXrayReadFailed}
                     </p>
                   ) : null}
-                  {xrayAdvancedEditor.enabled ? (
+                  {xrayAdvancedEditor.mode === "raw" ? (
                     <div className="xray-editor-actions row-actions">
                       <label className="file-action-button">
                         {ui.advancedXrayImport}
@@ -5947,8 +5977,8 @@ function SettingsView({
                   <textarea
                     aria-label={ui.advancedXrayConfig}
                     data-config-draft="xray"
-                    data-xray-advanced-editor={xrayAdvancedEditor.enabled ? "enabled" : "disabled"}
-                    readOnly={!xrayAdvancedEditor.enabled}
+                    data-xray-advanced-editor={xrayAdvancedEditor.mode === "raw" ? "enabled" : "disabled"}
+                    readOnly={xrayAdvancedEditor.mode !== "raw"}
                     spellCheck={false}
                     value={drafts.xray}
                     onChange={(event) => onUpdateAdvancedXrayText(event.currentTarget.value)}
