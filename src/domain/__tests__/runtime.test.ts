@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   buildReleaseDiagnosticsDisplay,
   commitValidatedXrayConfig,
+  getXrayGenerationStatus,
   readCanonicalXrayConfig,
   tachyonCorePreflightCheckMessage,
   tachyonCorePreflightFallbackMessage,
@@ -95,6 +96,44 @@ describe("readCanonicalXrayConfig", () => {
     await expect(readCanonicalXrayConfig()).resolves.toEqual({
       exists: false,
       contents: null,
+    });
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("getXrayGenerationStatus", () => {
+  it("reads only the sanitized generation status from Rust", async () => {
+    root.isTauri = true;
+    const status = {
+      desired: {
+        generationId: 3,
+        configSha256: "a".repeat(64),
+        nodeId: "node-b",
+        routingRevision: 9,
+        pid: null,
+        managedListenerAddresses: ["127.0.0.1:10808"],
+        readiness: "desired",
+      },
+      active: null,
+      proxyGeneration: null,
+      phase: "pendingApply",
+      proxyReady: false,
+      lastErrorCode: null,
+    };
+    invokeMock.mockResolvedValueOnce(status);
+
+    await expect(getXrayGenerationStatus()).resolves.toEqual(status);
+    expect(invokeMock).toHaveBeenCalledWith("xray_generation_status", undefined);
+  });
+
+  it("keeps preview mode stopped and side-effect free", async () => {
+    await expect(getXrayGenerationStatus()).resolves.toEqual({
+      desired: null,
+      active: null,
+      proxyGeneration: null,
+      phase: "idle",
+      proxyReady: false,
+      lastErrorCode: null,
     });
     expect(invokeMock).not.toHaveBeenCalled();
   });

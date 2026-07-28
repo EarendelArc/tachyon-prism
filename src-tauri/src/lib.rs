@@ -18,6 +18,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 mod secure_vault;
 mod system_proxy;
+mod xray_generation;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -408,6 +409,7 @@ struct SteamScanResult {
 
 struct RuntimeState {
     processes: Mutex<RuntimeProcesses>,
+    xray_generations: Mutex<xray_generation::GenerationRuntime>,
     window_restore_bounds: Mutex<Option<WindowBounds>>,
 }
 
@@ -653,6 +655,7 @@ impl Default for RuntimeState {
     fn default() -> Self {
         Self {
             processes: Mutex::new(RuntimeProcesses::default()),
+            xray_generations: Mutex::new(xray_generation::GenerationRuntime::default()),
             window_restore_bounds: Mutex::new(None),
         }
     }
@@ -1017,6 +1020,17 @@ fn runtime_status(
         })?;
     }
     Ok(status)
+}
+
+#[tauri::command]
+fn xray_generation_status(
+    state: tauri::State<RuntimeState>,
+) -> Result<xray_generation::GenerationStatus, String> {
+    let runtime = state
+        .xray_generations
+        .lock()
+        .map_err(|err| format!("lock Xray generation state: {err}"))?;
+    Ok(runtime.status())
 }
 
 #[tauri::command]
@@ -10001,6 +10015,7 @@ pub fn run() {
             migrate_secure_vault,
             clear_secure_vault,
             runtime_status,
+            xray_generation_status,
             runtime_process_logs,
             runtime_privilege_status,
             xray_traffic_stats,

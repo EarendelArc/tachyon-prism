@@ -139,6 +139,44 @@ export interface RuntimeStatus {
   xray: ProcessStatus;
 }
 
+export type XrayGenerationReadiness =
+  | "desired"
+  | "configValidated"
+  | "processReady"
+  | "listenerReady"
+  | "degraded";
+
+export type XrayGenerationPhase =
+  | "idle"
+  | "pendingApply"
+  | "switching"
+  | "rollingBack"
+  | "degraded";
+
+export interface XrayGeneration {
+  generationId: number;
+  configSha256: string;
+  nodeId: string;
+  routingRevision: number;
+  pid: number | null;
+  managedListenerAddresses: string[];
+  readiness: XrayGenerationReadiness;
+}
+
+export interface XrayProxyGeneration {
+  generationId: number;
+  pid: number;
+}
+
+export interface XrayGenerationStatus {
+  desired: XrayGeneration | null;
+  active: XrayGeneration | null;
+  proxyGeneration: XrayProxyGeneration | null;
+  phase: XrayGenerationPhase;
+  proxyReady: boolean;
+  lastErrorCode: string | null;
+}
+
 export interface RuntimePrivilegeStatus {
   platform: string;
   elevated: boolean;
@@ -387,6 +425,13 @@ export async function getRuntimeStatus(): Promise<RuntimeStatus> {
     return previewRuntimeStatus();
   }
   return invokeDesktop<RuntimeStatus>("runtime_status");
+}
+
+export async function getXrayGenerationStatus(): Promise<XrayGenerationStatus> {
+  if (!isTauriRuntime()) {
+    return previewXrayGenerationStatus();
+  }
+  return invokeDesktop<XrayGenerationStatus>("xray_generation_status");
 }
 
 export async function getRuntimePrivilegeStatus(): Promise<RuntimePrivilegeStatus> {
@@ -872,6 +917,17 @@ function previewRuntimeStatus(): RuntimeStatus {
   return {
     tachyonCore: stoppedPreviewProcess(),
     xray: stoppedPreviewProcess(),
+  };
+}
+
+function previewXrayGenerationStatus(): XrayGenerationStatus {
+  return {
+    desired: null,
+    active: null,
+    proxyGeneration: null,
+    phase: "idle",
+    proxyReady: false,
+    lastErrorCode: null,
   };
 }
 
