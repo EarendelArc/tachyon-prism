@@ -408,9 +408,30 @@ struct SteamScanResult {
 }
 
 struct RuntimeState {
-    processes: Mutex<RuntimeProcesses>,
-    xray_generations: Mutex<xray_generation::GenerationRuntime>,
+    xray: Mutex<XrayCoordinator>,
     window_restore_bounds: Mutex<Option<WindowBounds>>,
+}
+
+// Lock order is always XrayCoordinator first, then SystemProxyRuntime's internal lock.
+// No caller may retain either lock while acquiring XrayCoordinator again.
+#[derive(Default)]
+struct XrayCoordinator {
+    processes: RuntimeProcesses,
+    generations: xray_generation::GenerationRuntime,
+}
+
+impl std::ops::Deref for XrayCoordinator {
+    type Target = RuntimeProcesses;
+
+    fn deref(&self) -> &Self::Target {
+        &self.processes
+    }
+}
+
+impl std::ops::DerefMut for XrayCoordinator {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.processes
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -654,8 +675,7 @@ mod native_titlebar {
 impl Default for RuntimeState {
     fn default() -> Self {
         Self {
-            processes: Mutex::new(RuntimeProcesses::default()),
-            xray_generations: Mutex::new(xray_generation::GenerationRuntime::default()),
+            xray: Mutex::new(XrayCoordinator::default()),
             window_restore_bounds: Mutex::new(None),
         }
     }
@@ -1004,13 +1024,11 @@ fn runtime_status(
     state: tauri::State<RuntimeState>,
     proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
 ) -> Result<RuntimeStatus, String> {
-    let status = {
-        let mut processes = state
-            .processes
-            .lock()
-            .map_err(|err| format!("lock runtime state: {err}"))?;
-        processes.status()
-    };
+    let mut processes = state
+        .xray
+        .lock()
+        .map_err(|err| format!("lock runtime state: {err}"))?;
+    let status = processes.status();
     if should_restore_proxy_for_runtime(&status) {
         system_proxy::restore_if_pending(&app, &proxy_state).map_err(|error| {
             format!(
@@ -1027,10 +1045,10 @@ fn xray_generation_status(
     state: tauri::State<RuntimeState>,
 ) -> Result<xray_generation::GenerationStatus, String> {
     let runtime = state
-        .xray_generations
+        .xray
         .lock()
         .map_err(|err| format!("lock Xray generation state: {err}"))?;
-    Ok(runtime.status())
+    Ok(runtime.generations.status())
 }
 
 #[tauri::command]
@@ -1039,7 +1057,7 @@ fn runtime_process_logs(
     kind: String,
 ) -> Result<ProcessLogs, String> {
     let processes = state
-        .processes
+        .xray
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
     processes.logs(&kind)
@@ -1344,8 +1362,12 @@ fn system_proxy_apply(
     state: tauri::State<system_proxy::SystemProxyRuntime>,
     enabled: bool,
 ) -> Result<system_proxy::SystemProxyTransactionResult, String> {
+    let mut coordinator = runtime_state
+        .xray
+        .lock()
+        .map_err(|err| format!("lock Xray coordinator: {err}"))?;
     if enabled {
-        require_running_xray(&runtime_state)?;
+        require_running_xray_locked(&mut coordinator)?;
     }
     system_proxy::apply(&app, &state, enabled)
 }
@@ -1353,9 +1375,14 @@ fn system_proxy_apply(
 #[tauri::command]
 fn system_proxy_restore(
     app: tauri::AppHandle,
+    runtime_state: tauri::State<RuntimeState>,
     state: tauri::State<system_proxy::SystemProxyRuntime>,
     transaction_id: Option<String>,
 ) -> Result<system_proxy::SystemProxyTransactionResult, String> {
+    let _coordinator = runtime_state
+        .xray
+        .lock()
+        .map_err(|err| format!("lock Xray coordinator: {err}"))?;
     system_proxy::restore(&app, &state, transaction_id.as_deref())
 }
 
@@ -1373,16 +1400,16 @@ fn enable_system_proxy(
     runtime_state: tauri::State<RuntimeState>,
     state: tauri::State<system_proxy::SystemProxyRuntime>,
 ) -> Result<system_proxy::SystemProxyState, String> {
-    require_running_xray(&runtime_state)?;
+    let mut coordinator = runtime_state
+        .xray
+        .lock()
+        .map_err(|err| format!("lock Xray coordinator: {err}"))?;
+    require_running_xray_locked(&mut coordinator)?;
     Ok(system_proxy::apply(&app, &state, true)?.current)
 }
 
-fn require_running_xray(state: &RuntimeState) -> Result<(), String> {
-    let mut processes = state
-        .processes
-        .lock()
-        .map_err(|err| format!("lock runtime state: {err}"))?;
-    validate_system_proxy_owner_state(&processes.xray.status().state)
+fn require_running_xray_locked(coordinator: &mut XrayCoordinator) -> Result<(), String> {
+    validate_system_proxy_owner_state(&coordinator.xray.status().state)
 }
 
 fn validate_system_proxy_owner_state(xray_state: &str) -> Result<(), String> {
@@ -1396,8 +1423,13 @@ fn validate_system_proxy_owner_state(xray_state: &str) -> Result<(), String> {
 #[tauri::command]
 fn disable_system_proxy(
     app: tauri::AppHandle,
+    runtime_state: tauri::State<RuntimeState>,
     state: tauri::State<system_proxy::SystemProxyRuntime>,
 ) -> Result<system_proxy::SystemProxyState, String> {
+    let _coordinator = runtime_state
+        .xray
+        .lock()
+        .map_err(|err| format!("lock Xray coordinator: {err}"))?;
     system_proxy::disable_legacy(&app, &state)
 }
 
@@ -1411,7 +1443,7 @@ fn start_xray(
 ) -> Result<ProcessStatus, String> {
     let result = (|| {
         let mut processes = state
-            .processes
+            .xray
             .lock()
             .map_err(|err| format!("lock runtime state: {err}"))?;
         if processes.xray.status().state == "running" {
@@ -1435,16 +1467,12 @@ fn stop_xray(
     state: tauri::State<RuntimeState>,
     proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
 ) -> Result<ProcessStatus, String> {
-    stop_xray_transaction(
-        || system_proxy::restore_if_pending(&app, &proxy_state).map(|_| ()),
-        || {
-            let mut processes = state
-                .processes
-                .lock()
-                .map_err(|err| format!("lock runtime state: {err}"))?;
-            processes.xray.stop("xray")
-        },
-    )
+    let mut coordinator = state
+        .xray
+        .lock()
+        .map_err(|err| format!("lock Xray coordinator: {err}"))?;
+    system_proxy::restore_if_pending(&app, &proxy_state)?;
+    coordinator.xray.stop("xray")
 }
 
 fn stop_xray_transaction<T>(
@@ -1462,7 +1490,7 @@ fn start_tachyon_core(
     config_path: String,
 ) -> Result<ProcessStatus, String> {
     let mut processes = state
-        .processes
+        .xray
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
     processes.tachyon_core.start(
@@ -1477,7 +1505,7 @@ fn start_tachyon_core(
 #[tauri::command]
 fn stop_tachyon_core(state: tauri::State<RuntimeState>) -> Result<ProcessStatus, String> {
     let mut processes = state
-        .processes
+        .xray
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
     processes.tachyon_core.stop("tachyon-core")
@@ -1499,7 +1527,7 @@ fn start_all(
 ) -> Result<StartAllResult, String> {
     let settings = load_runtime_settings(&app)?;
     let mut processes = state
-        .processes
+        .xray
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
     let current = processes.status();
@@ -1527,11 +1555,11 @@ fn stop_all(
     proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
 ) -> Result<StopAllResult, String> {
     let mut processes = state
-        .processes
+        .xray
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
     let outcome = execute_runtime_shutdown(
-        &mut *processes,
+        &mut processes.processes,
         || system_proxy::restore_if_pending(&app, &proxy_state),
         thread::sleep,
     );
@@ -6729,11 +6757,11 @@ fn cleanup_runtime(handle: &tauri::AppHandle) -> Result<(), String> {
     let proxy_runtime = handle.state::<system_proxy::SystemProxyRuntime>();
     let runtime = handle.state::<RuntimeState>();
     let mut processes = runtime
-        .processes
+        .xray
         .lock()
         .map_err(|error| format!("lock runtime state during shutdown: {error}"))?;
     let outcome = execute_runtime_shutdown(
-        &mut *processes,
+        &mut processes.processes,
         || system_proxy::restore_if_pending(handle, &proxy_runtime),
         thread::sleep,
     );
@@ -9972,7 +10000,22 @@ stat: <
 
 pub fn run() {
     tauri::Builder::default()
+        .manage(RuntimeState::default())
+        .manage(system_proxy::SystemProxyRuntime::default())
         .setup(|app| {
+            let paths = draft_paths(app.handle())?;
+            let clock_path = PathBuf::from(paths.config_dir)
+                .join("xray-generations")
+                .join("clock.json");
+            let runtime = app.state::<RuntimeState>();
+            let mut coordinator = runtime
+                .xray
+                .lock()
+                .map_err(|error| format!("lock Xray coordinator during setup: {error}"))?;
+            coordinator.generations =
+                xray_generation::GenerationRuntime::with_persistent_clock(clock_path)?;
+            drop(coordinator);
+
             let window_config = app
                 .config()
                 .app
@@ -9986,8 +10029,6 @@ pub fn run() {
             let _ = window;
             Ok(())
         })
-        .manage(RuntimeState::default())
-        .manage(system_proxy::SystemProxyRuntime::default())
         .invoke_handler(tauri::generate_handler![
             core_status,
             list_game_profiles,
@@ -10052,11 +10093,17 @@ pub fn run() {
         .run(|handle, event| {
             if matches!(&event, tauri::RunEvent::Ready) {
                 let proxy_runtime = handle.state::<system_proxy::SystemProxyRuntime>();
+                let runtime = handle.state::<RuntimeState>();
+                let _coordinator = runtime
+                    .xray
+                    .lock()
+                    .expect("lock Xray coordinator during startup recovery");
                 if let Err(error) = system_proxy::restore_if_pending(handle, &proxy_runtime) {
                     let sanitized = sanitize_xray_ui_error(error);
                     eprintln!("Tachyon Prism startup proxy recovery failed: {sanitized}");
                     let _ = handle.emit("runtime-cleanup-error", sanitized);
                 }
+                drop(_coordinator);
                 for (_, window) in handle.webview_windows() {
                     let default_size = tauri::Size::Logical(tauri::LogicalSize {
                         width: 800.0,

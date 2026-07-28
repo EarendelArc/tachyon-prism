@@ -106,10 +106,10 @@ describe("getXrayGenerationStatus", () => {
     root.isTauri = true;
     const status = {
       desired: {
-        generationId: 3,
+        generationId: "0123456789abcdef0123456789abcdef-0000000000000003",
         configSha256: "a".repeat(64),
         nodeId: "node-b",
-        routingRevision: 9,
+        routingRevision: "9",
         pid: null,
         managedListenerAddresses: ["127.0.0.1:10808"],
         readiness: "desired",

@@ -154,17 +154,17 @@ export type XrayGenerationPhase =
   | "degraded";
 
 export interface XrayGeneration {
-  generationId: number;
+  generationId: string;
   configSha256: string;
   nodeId: string;
-  routingRevision: number;
+  routingRevision: string;
   pid: number | null;
   managedListenerAddresses: string[];
   readiness: XrayGenerationReadiness;
 }
 
 export interface XrayProxyGeneration {
-  generationId: number;
+  generationId: string;
   pid: number;
 }
 
