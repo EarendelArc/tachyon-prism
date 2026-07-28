@@ -48,9 +48,9 @@ export type XrayConfigTextErrorCode =
   | "array-entry-object"
   | "duplicate-tag"
   | "tag-string"
-  | "managed-tag-conflict"
+  | "managed-reference-rewrite"
   | "routing-reference"
-  | "routing-target-conflict";
+  | "selector-array";
 
 export class XrayConfigTextError extends Error {
   readonly code: XrayConfigTextErrorCode;
@@ -130,7 +130,6 @@ export function parseXrayConfigText(
     }
   }
 
-  validateManagedXrayTags(value, language);
   validateXrayRoutingReferences(value, language);
   return value;
 }
@@ -188,7 +187,6 @@ export function buildXrayClientConfigDraft(
       throw new Error("Raw Xray config mode requires a complete config object");
     }
     const rawConfig = cloneRecord(options.rawConfig);
-    validateManagedXrayTags(rawConfig, "en");
     validateXrayRoutingReferences(rawConfig, "en");
     return rawConfig;
   }
@@ -196,26 +194,26 @@ export function buildXrayClientConfigDraft(
     throw new Error("Managed Xray config mode requires a selected node");
   }
   const xrayOutbound = buildXrayOutboundDraft(node);
-  const importedConfig = xrayConfigTemplateForNode(node) ?? {};
-  const importedInbounds = recordArray(importedConfig.inbounds);
-  const importedOutbounds = recordArray(importedConfig.outbounds);
-  const importedApi = asRecord(importedConfig.api);
-  const importedApiTag = stringValue(importedApi.tag);
+  let importedConfig = cloneRecord(xrayConfigTemplateForNode(node) ?? {});
   if (Object.keys(importedConfig).length > 0) {
     validateXrayRoutingReferences(importedConfig, "en");
   }
+  const originalInbounds = recordArray(importedConfig.inbounds);
+  const originalOutbounds = recordArray(importedConfig.outbounds);
+  const importedApiTag = stringValue(asRecord(importedConfig.api).tag);
   const importedOutboundIndex = node.xrayOutboundIndex;
   const selectedOutboundIndex =
-    Number.isInteger(importedOutboundIndex) && importedOutbounds[importedOutboundIndex!]
+    Number.isInteger(importedOutboundIndex) && originalOutbounds[importedOutboundIndex!]
       ? importedOutboundIndex!
       : -1;
   const importedSelectedOutbound =
-    selectedOutboundIndex >= 0 ? importedOutbounds[selectedOutboundIndex] : undefined;
-  const importedProxyTag = stringValue(importedSelectedOutbound?.tag);
+    selectedOutboundIndex >= 0 ? originalOutbounds[selectedOutboundIndex] : undefined;
+  const importedProxyTag =
+    stringValue(importedSelectedOutbound?.tag) || stringValue(xrayOutbound.tag);
   const usedTags = new Set(
     [
-      ...importedInbounds,
-      ...importedOutbounds.filter((_, index) => index !== selectedOutboundIndex),
+      ...originalInbounds,
+      ...originalOutbounds.filter((_, index) => index !== selectedOutboundIndex),
     ]
       .map((item) => stringValue(item.tag))
       .filter(Boolean),
@@ -223,7 +221,11 @@ export function buildXrayClientConfigDraft(
   if (importedApiTag) {
     usedTags.add(importedApiTag);
   }
-  const proxyTag = uniqueManagedTag("tachyon-proxy", usedTags);
+  const proxyTag =
+    importedProxyTag && !managedProxyTagConflicts(importedProxyTag)
+      ? importedProxyTag
+      : uniqueManagedOutboundTag("tachyon-proxy", usedTags);
+  usedTags.add(proxyTag);
   const directTag = uniqueManagedTag("tachyon-direct", usedTags);
   const blockTag = uniqueManagedTag("tachyon-block", usedTags);
   const socksTag = uniqueManagedTag("tachyon-socks", usedTags);
@@ -235,14 +237,47 @@ export function buildXrayClientConfigDraft(
   const apiInboundTag = statsEnabled
     ? uniqueManagedTag("tachyon-xray-api-in", usedTags)
     : "";
+  const finalOutboundTags = [
+    ...originalOutbounds
+      .map((outbound, index) =>
+        index === selectedOutboundIndex ? proxyTag : stringValue(outbound.tag),
+      )
+      .filter(Boolean),
+    directTag,
+    blockTag,
+    ...(apiTag ? [apiTag] : []),
+  ];
   if (importedSelectedOutbound) {
-    importedSelectedOutbound.tag = proxyTag;
+    if (importedProxyTag && importedProxyTag !== proxyTag) {
+      importedConfig = rewriteManagedOutboundTagReferences(
+        importedConfig,
+        selectedOutboundIndex,
+        importedProxyTag,
+        proxyTag,
+        finalOutboundTags,
+      );
+    } else if (!importedProxyTag) {
+      const outbounds = recordArray(importedConfig.outbounds);
+      outbounds[selectedOutboundIndex].tag = proxyTag;
+      importedConfig.outbounds = outbounds;
+    }
   }
-  const importedRouting = rewriteRoutingOutboundTag(
-    importedConfig.routing,
-    importedProxyTag,
-    proxyTag,
+  const expectedImportedOutboundTags = [
+    ...originalOutbounds
+      .map((outbound, index) =>
+        index === selectedOutboundIndex ? proxyTag : stringValue(outbound.tag),
+      )
+      .filter(Boolean),
+    ...(importedApiTag ? [importedApiTag] : []),
+  ];
+  assertManagedSelectorsDoNotCaptureInjectedTags(
+    importedConfig,
+    expectedImportedOutboundTags,
+    finalOutboundTags,
   );
+  const importedInbounds = recordArray(importedConfig.inbounds);
+  const importedOutbounds = recordArray(importedConfig.outbounds);
+  const importedApi = asRecord(importedConfig.api);
   const outbound = withTag(xrayOutbound, proxyTag);
   const config: Record<string, unknown> = {
     ...importedConfig,
@@ -287,7 +322,7 @@ export function buildXrayClientConfigDraft(
   config.inbounds = inbounds;
   config.outbounds = outbounds;
   config.routing = mergeXrayRouting(
-    importedRouting,
+    importedConfig.routing,
     xrayRouting(options.routingMode ?? "rule", statsEnabled, {
       apiInboundTag,
       apiTag,
@@ -352,43 +387,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function validateManagedXrayTags(
-  config: Record<string, unknown>,
-  language: XrayConfigLanguage,
-): void {
-  const seen = new Map<string, string>();
-  const taggedEntries: Array<{ owner: "api" | "inbounds" | "outbounds"; tag: string }> = [];
-  for (const owner of ["inbounds", "outbounds"] as const) {
-    for (const entry of (config[owner] as Array<Record<string, unknown>> | undefined) ?? []) {
-      if (typeof entry.tag === "string") {
-        taggedEntries.push({ owner, tag: entry.tag });
-      }
-    }
-  }
-  const api = isRecord(config.api) ? config.api : undefined;
-  if (typeof api?.tag === "string") {
-    taggedEntries.push({ owner: "api", tag: api.tag });
-  }
-
-  for (const entry of taggedEntries) {
-    const managed = managedXrayTagOwners.find(({ tag }) => managedTagMatches(entry.tag, tag));
-    if (!managed) {
-      continue;
-    }
-    const previousOwner = seen.get(entry.tag);
-    if (managed.owner !== entry.owner || previousOwner !== undefined) {
-      const location = previousOwner ? `${previousOwner}, ${entry.owner}` : entry.owner;
-      throw xrayTextError("managed-tag-conflict", language, `${entry.tag} (${location})`);
-    }
-    seen.set(entry.tag, entry.owner);
-  }
-}
-
 function validateXrayRoutingReferences(
   config: Record<string, unknown>,
   language: XrayConfigLanguage,
 ): void {
   const outboundTags = new Set<string>();
+  const outboundEntries: Array<Record<string, unknown>> = [];
   const outbounds = config.outbounds;
   if (outbounds !== undefined && !Array.isArray(outbounds)) {
     throw xrayTextError("field-array", language, "outbounds");
@@ -397,6 +401,7 @@ function validateXrayRoutingReferences(
     if (!isRecord(outbound)) {
       throw xrayTextError("array-entry-object", language, `outbounds[${index}]`);
     }
+    outboundEntries.push(outbound);
     const tag = outbound.tag;
     if (tag !== undefined && typeof tag !== "string") {
       throw xrayTextError("tag-string", language, `outbounds[${index}].tag`);
@@ -415,6 +420,49 @@ function validateXrayRoutingReferences(
       throw xrayTextError("duplicate-tag", language, `api/outbounds: ${apiTag}`);
     }
     outboundTags.add(apiTag);
+  }
+
+  const requireOutbound = (value: unknown, location: string): void => {
+    if (value === undefined || value === "") {
+      return;
+    }
+    if (typeof value !== "string") {
+      throw xrayTextError("tag-string", language, location);
+    }
+    if (!outboundTags.has(value)) {
+      throw xrayTextError("routing-reference", language, `${location} -> ${value}`);
+    }
+  };
+  const validateSelectors = (value: unknown, location: string): void => {
+    if (value === undefined) {
+      return;
+    }
+    if (!Array.isArray(value) || value.some((selector) => typeof selector !== "string")) {
+      throw xrayTextError("selector-array", language, location);
+    }
+  };
+
+  for (const [index, outbound] of outboundEntries.entries()) {
+    const proxySettings = outbound.proxySettings;
+    if (proxySettings !== undefined && !isRecord(proxySettings)) {
+      throw xrayTextError("field-object", language, `outbounds[${index}].proxySettings`);
+    }
+    requireOutbound(
+      isRecord(proxySettings) ? proxySettings.tag : undefined,
+      `outbounds[${index}].proxySettings.tag`,
+    );
+    const streamSettings = outbound.streamSettings;
+    if (streamSettings !== undefined && !isRecord(streamSettings)) {
+      throw xrayTextError("field-object", language, `outbounds[${index}].streamSettings`);
+    }
+    const sockopt = isRecord(streamSettings) ? streamSettings.sockopt : undefined;
+    if (sockopt !== undefined && !isRecord(sockopt)) {
+      throw xrayTextError("field-object", language, `outbounds[${index}].streamSettings.sockopt`);
+    }
+    requireOutbound(
+      isRecord(sockopt) ? sockopt.dialerProxy : undefined,
+      `outbounds[${index}].streamSettings.sockopt.dialerProxy`,
+    );
   }
 
   const routing = asRecord(config.routing);
@@ -437,6 +485,8 @@ function validateXrayRoutingReferences(
       }
       balancerTags.add(tag);
     }
+    validateSelectors(balancer.selector, `routing.balancers[${index}].selector`);
+    requireOutbound(balancer.fallbackTag, `routing.balancers[${index}].fallbackTag`);
   }
 
   const rules = routing.rules;
@@ -455,16 +505,7 @@ function validateXrayRoutingReferences(
     if (balancerTag !== undefined && typeof balancerTag !== "string") {
       throw xrayTextError("tag-string", language, `routing.rules[${index}].balancerTag`);
     }
-    if (typeof outboundTag === "string" && typeof balancerTag === "string") {
-      throw xrayTextError("routing-target-conflict", language, `routing.rules[${index}]`);
-    }
-    if (typeof outboundTag === "string" && !outboundTags.has(outboundTag)) {
-      throw xrayTextError(
-        "routing-reference",
-        language,
-        `routing.rules[${index}].outboundTag -> ${outboundTag}`,
-      );
-    }
+    requireOutbound(outboundTag, `routing.rules[${index}].outboundTag`);
     if (typeof balancerTag === "string" && !balancerTags.has(balancerTag)) {
       throw xrayTextError(
         "routing-reference",
@@ -473,6 +514,21 @@ function validateXrayRoutingReferences(
       );
     }
   }
+  validateSelectors(
+    asRecord(config.observatory).subjectSelector,
+    "observatory.subjectSelector",
+  );
+  validateSelectors(
+    asRecord(config.burstObservatory).subjectSelector,
+    "burstObservatory.subjectSelector",
+  );
+}
+
+function managedProxyTagConflicts(tag: string): boolean {
+  const managed = managedXrayTagOwners.find(({ tag: managedTag }) =>
+    managedTagMatches(tag, managedTag),
+  );
+  return Boolean(managed && managed.tag !== "tachyon-proxy");
 }
 
 export function managedTagMatches(value: string, managedTag: string): boolean {
@@ -531,17 +587,17 @@ function xrayTextError(
       en: `Xray JSON tag must be a string${suffix}`,
       "zh-CN": `Xray JSON 标签必须是字符串${suffix}`,
     },
-    "managed-tag-conflict": {
-      en: `Prism managed tag conflict${suffix}`,
-      "zh-CN": `Prism 管理标签冲突${suffix}`,
+    "managed-reference-rewrite": {
+      en: `Prism cannot safely rewrite managed Xray outbound references; use Raw config mode${suffix}`,
+      "zh-CN": `Prism 无法安全重写托管 Xray 出站引用；请改用原始配置模式${suffix}`,
     },
     "routing-reference": {
       en: `Xray routing target does not exist${suffix}`,
       "zh-CN": `Xray 路由目标不存在${suffix}`,
     },
-    "routing-target-conflict": {
-      en: `Xray routing rule cannot use outboundTag and balancerTag together${suffix}`,
-      "zh-CN": `Xray 路由规则不能同时使用 outboundTag 和 balancerTag${suffix}`,
+    "selector-array": {
+      en: `Xray outbound selector must be an array of strings${suffix}`,
+      "zh-CN": `Xray 出站选择器必须是字符串数组${suffix}`,
     },
   };
   return new XrayConfigTextError(code, messages[code][language]);
@@ -559,6 +615,17 @@ function uniqueManagedTag(preferred: string, usedTags: Set<string>): string {
   let tag = preferred;
   let suffix = 2;
   while (usedTags.has(tag)) {
+    tag = `${preferred}-${suffix}`;
+    suffix += 1;
+  }
+  usedTags.add(tag);
+  return tag;
+}
+
+function uniqueManagedOutboundTag(preferred: string, usedTags: Set<string>): string {
+  let tag = preferred;
+  let suffix = 2;
+  while (usedTags.has(tag) || [...usedTags].some((usedTag) => usedTag.startsWith(tag))) {
     tag = `${preferred}-${suffix}`;
     suffix += 1;
   }
@@ -596,19 +663,158 @@ function mergeXrayRouting(
   };
 }
 
-function rewriteRoutingOutboundTag(
-  imported: unknown,
+function rewriteManagedOutboundTagReferences(
+  config: Record<string, unknown>,
+  selectedOutboundIndex: number,
   previousTag: string,
   managedTag: string,
+  finalOutboundTags: string[],
 ): Record<string, unknown> {
-  const routing = cloneRecord(asRecord(imported));
-  if (!previousTag || previousTag === managedTag) {
-    return routing;
+  const rewritten = cloneRecord(config);
+  const originalOutboundTags = recordArray(config.outbounds)
+    .map((outbound) => stringValue(outbound.tag))
+    .filter(Boolean);
+  const outbounds = recordArray(rewritten.outbounds);
+  const selectedOutbound = outbounds[selectedOutboundIndex];
+  if (!selectedOutbound || selectedOutbound.tag !== previousTag) {
+    throw managedReferenceRewriteError("selected outbound identity changed");
   }
-  routing.rules = recordArray(routing.rules).map((rule) =>
-    rule.outboundTag === previousTag ? { ...rule, outboundTag: managedTag } : rule,
-  );
-  return routing;
+  selectedOutbound.tag = managedTag;
+
+  const rewriteExact = (owner: Record<string, unknown>, key: string): void => {
+    if (owner[key] === previousTag) {
+      owner[key] = managedTag;
+    }
+  };
+  for (const outbound of outbounds) {
+    const proxySettings = asRecord(outbound.proxySettings);
+    rewriteExact(proxySettings, "tag");
+    const streamSettings = asRecord(outbound.streamSettings);
+    const sockopt = asRecord(streamSettings.sockopt);
+    rewriteExact(sockopt, "dialerProxy");
+  }
+  rewritten.outbounds = outbounds;
+
+  const routing = asRecord(rewritten.routing);
+  if (routing.rules !== undefined) {
+    const rules = recordArray(routing.rules);
+    for (const rule of rules) {
+      rewriteExact(rule, "outboundTag");
+    }
+    routing.rules = rules;
+  }
+  if (routing.balancers !== undefined) {
+    const balancers = recordArray(routing.balancers);
+    for (const [index, balancer] of balancers.entries()) {
+      rewriteExact(balancer, "fallbackTag");
+      if (balancer.selector !== undefined) {
+        balancer.selector = rewritePrefixSelectors(
+          balancer.selector,
+          previousTag,
+          managedTag,
+          originalOutboundTags,
+          finalOutboundTags,
+          `routing.balancers[${index}].selector`,
+        );
+      }
+    }
+    routing.balancers = balancers;
+  }
+  if (rewritten.routing !== undefined) {
+    rewritten.routing = routing;
+  }
+
+  for (const field of ["observatory", "burstObservatory"] as const) {
+    const observer = asRecord(rewritten[field]);
+    if (observer.subjectSelector !== undefined) {
+      observer.subjectSelector = rewritePrefixSelectors(
+        observer.subjectSelector,
+        previousTag,
+        managedTag,
+        originalOutboundTags,
+        finalOutboundTags,
+        `${field}.subjectSelector`,
+      );
+      rewritten[field] = observer;
+    }
+  }
+
+  validateXrayRoutingReferences(rewritten, "en");
+  return rewritten;
+}
+
+function rewritePrefixSelectors(
+  value: unknown,
+  previousTag: string,
+  managedTag: string,
+  originalOutboundTags: string[],
+  finalOutboundTags: string[],
+  location: string,
+): string[] {
+  if (!Array.isArray(value) || value.some((selector) => typeof selector !== "string")) {
+    throw managedReferenceRewriteError(`${location} is not a string array`);
+  }
+  return value.map((selector) => {
+    if (previousTag.startsWith(selector)) {
+      const originalMatches = originalOutboundTags.filter((tag) => tag.startsWith(selector));
+      const managedMatches = finalOutboundTags.filter((tag) => tag.startsWith(managedTag));
+      if (
+        selector !== previousTag ||
+        originalMatches.length !== 1 ||
+        originalMatches[0] !== previousTag ||
+        managedMatches.length !== 1 ||
+        managedMatches[0] !== managedTag
+      ) {
+        throw managedReferenceRewriteError(`${location}: ${selector}`);
+      }
+      return managedTag;
+    }
+    if (managedTag.startsWith(selector)) {
+      throw managedReferenceRewriteError(`${location}: ${selector}`);
+    }
+    return selector;
+  });
+}
+
+function assertManagedSelectorsDoNotCaptureInjectedTags(
+  config: Record<string, unknown>,
+  expectedImportedOutboundTags: string[],
+  finalOutboundTags: string[],
+): void {
+  const expected = new Set(expectedImportedOutboundTags);
+  const injected = finalOutboundTags.filter((tag) => !expected.has(tag));
+  const selectorFields: Array<{ location: string; value: unknown }> = [];
+  const routing = asRecord(config.routing);
+  for (const [index, balancer] of recordArray(routing.balancers).entries()) {
+    selectorFields.push({
+      location: `routing.balancers[${index}].selector`,
+      value: balancer.selector,
+    });
+  }
+  for (const field of ["observatory", "burstObservatory"] as const) {
+    selectorFields.push({
+      location: `${field}.subjectSelector`,
+      value: asRecord(config[field]).subjectSelector,
+    });
+  }
+  for (const { location, value } of selectorFields) {
+    if (value === undefined) {
+      continue;
+    }
+    if (!Array.isArray(value) || value.some((selector) => typeof selector !== "string")) {
+      throw managedReferenceRewriteError(`${location} is not a string array`);
+    }
+    const captured = injected.filter((tag) =>
+      value.some((selector) => tag.startsWith(selector as string)),
+    );
+    if (captured.length > 0) {
+      throw managedReferenceRewriteError(`${location} captures ${captured.join(", ")}`);
+    }
+  }
+}
+
+function managedReferenceRewriteError(detail: string): XrayConfigTextError {
+  return xrayTextError("managed-reference-rewrite", "en", detail);
 }
 
 export function buildCoreClientConfigDraft(

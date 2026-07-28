@@ -196,6 +196,68 @@ export const xrayFullConfigJsonFixture = JSON.stringify({
   },
 });
 
+export const xrayManagedReferenceGraphJsonFixture = JSON.stringify({
+  outbounds: [
+    {
+      tag: "tachyon-direct",
+      protocol: "vmess",
+      settings: {
+        address: "selected.example.com",
+        port: 443,
+        id: "selected-node-id",
+      },
+      userSelectedField: { retained: true },
+    },
+    {
+      tag: "chain-hop",
+      protocol: "freedom",
+      proxySettings: {
+        tag: "tachyon-direct",
+      },
+    },
+    {
+      tag: "dial-hop",
+      protocol: "freedom",
+      streamSettings: {
+        sockopt: {
+          dialerProxy: "tachyon-direct",
+        },
+      },
+    },
+  ],
+  routing: {
+    rules: [
+      {
+        type: "field",
+        domain: ["full:managed-reference.example"],
+        outboundTag: "tachyon-direct",
+      },
+    ],
+    balancers: [
+      {
+        tag: "managed-balancer",
+        selector: ["tachyon-direct"],
+        fallbackTag: "tachyon-direct",
+        strategy: { type: "roundRobin" },
+      },
+    ],
+  },
+  observatory: {
+    subjectSelector: ["tachyon-direct"],
+    probeUrl: "https://www.gstatic.com/generate_204",
+    probeInterval: "30s",
+  },
+  burstObservatory: {
+    subjectSelector: ["tachyon-direct"],
+    pingConfig: {
+      destination: "https://connectivitycheck.gstatic.com/generate_204",
+      interval: "30s",
+      sampling: 3,
+      timeout: "5s",
+    },
+  },
+});
+
 export const xrayAdvancedRoundTripJsonFixture = JSON.stringify(
   {
     log: { loglevel: "warning" },

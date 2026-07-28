@@ -21,6 +21,7 @@ import {
   subscriptionCompatibilityFixtures,
   xrayAdvancedRoundTripJsonFixture,
   xrayFullConfigJsonFixture,
+  xrayManagedReferenceGraphJsonFixture,
 } from "./subscriptionFixtures";
 
 const mockVMessNode: ProxyNode = {
@@ -377,13 +378,13 @@ describe("buildXrayClientConfigDraft", () => {
     const ordered = build(sourceOutbounds);
     const reversed = build([...sourceOutbounds].reverse());
 
-    expect(ordered.fallbackTag).toBe("tachyon-proxy");
-    expect(reversed.fallbackTag).toBe("tachyon-proxy");
+    expect(ordered.fallbackTag).toBe("node-b");
+    expect(reversed.fallbackTag).toBe("node-b");
     expect(ordered.fallback.settings).toMatchObject({ address: "b.example.com" });
     expect(reversed.fallback.settings).toMatchObject({ address: "b.example.com" });
     expect(ordered.rules[ordered.rules.length - 1]).toEqual({
       type: "field",
-      outboundTag: "tachyon-proxy",
+      outboundTag: "node-b",
     });
   });
 
@@ -443,18 +444,124 @@ describe("buildXrayClientConfigDraft", () => {
     expect(rules.some((rule) => rule.outboundTag === "tachyon-block-2")).toBe(true);
   });
 
+  it("preserves a non-conflicting imported outbound tag as the managed fallback", () => {
+    const [selected] = parseSubscription(xrayFullConfigJsonFixture);
+    const config = buildXrayClientConfigDraft(selected, { routingMode: "rule" });
+    const rules = (config.routing as Record<string, unknown>).rules as Array<
+      Record<string, unknown>
+    >;
+    const fallbackTag = rules[rules.length - 1].outboundTag;
+
+    expect(fallbackTag).toBe("Xray Full Trojan TLS");
+    expect(config.outbounds).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tag: "Xray Full Trojan TLS",
+          userOutboundField: { retained: true },
+        }),
+      ]),
+    );
+  });
+
+  it("rewrites the complete managed outbound reference graph without losing metadata", () => {
+    const [selected] = parseSubscription(xrayManagedReferenceGraphJsonFixture);
+    const config = buildXrayClientConfigDraft(selected, { routingMode: "rule" });
+    const outbounds = config.outbounds as Array<Record<string, unknown>>;
+    const routing = config.routing as Record<string, unknown>;
+    const rules = routing.rules as Array<Record<string, unknown>>;
+    const balancer = (routing.balancers as Array<Record<string, unknown>>)[0];
+    const selectedOutbound = outbounds.find((outbound) => outbound.tag === "tachyon-proxy");
+    const chainOutbound = outbounds.find((outbound) => outbound.tag === "chain-hop")!;
+    const dialOutbound = outbounds.find((outbound) => outbound.tag === "dial-hop")!;
+    const importedRule = rules.find((rule) =>
+      Array.isArray(rule.domain) && rule.domain.includes("full:managed-reference.example"),
+    );
+
+    expect(selectedOutbound).toMatchObject({
+      protocol: "vmess",
+      userSelectedField: { retained: true },
+    });
+    expect(importedRule?.outboundTag).toBe("tachyon-proxy");
+    expect(balancer).toMatchObject({
+      selector: ["tachyon-proxy"],
+      fallbackTag: "tachyon-proxy",
+    });
+    expect(config.observatory).toMatchObject({ subjectSelector: ["tachyon-proxy"] });
+    expect(config.burstObservatory).toMatchObject({ subjectSelector: ["tachyon-proxy"] });
+    expect(chainOutbound.proxySettings).toMatchObject({ tag: "tachyon-proxy" });
+    expect(
+      ((dialOutbound.streamSettings as Record<string, unknown>).sockopt as Record<
+        string,
+        unknown
+      >).dialerProxy,
+    ).toBe("tachyon-proxy");
+    expect(outbounds).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ tag: "tachyon-direct", protocol: "freedom" }),
+      ]),
+    );
+  });
+
+  it("fails closed when a managed rename cannot preserve prefix selector semantics", () => {
+    const [selected] = parseSubscription(
+      JSON.stringify({
+        outbounds: [
+          {
+            tag: "tachyon-direct",
+            protocol: "vmess",
+            settings: { address: "selected.example.com", port: 443, id: "selected" },
+          },
+          {
+            tag: "tachyon-direct-backup",
+            protocol: "freedom",
+          },
+        ],
+        routing: {
+          balancers: [
+            {
+              tag: "broad-prefix",
+              selector: ["tachyon-direct"],
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(() => buildXrayClientConfigDraft(selected)).toThrow(
+      /cannot safely rewrite managed Xray outbound references; use Raw config mode.*selector/,
+    );
+  });
+
   it("preserves a raw complete config without applying node or routing selections", () => {
     const raw = parseXrayConfigText(
       JSON.stringify({
         log: { loglevel: "debug" },
         outbounds: [
-          { tag: "raw-b", protocol: "freedom", settings: { domainStrategy: "UseIPv6" } },
-          { tag: "raw-a", protocol: "blackhole" },
+          {
+            tag: "tachyon-proxy",
+            protocol: "freedom",
+            settings: { domainStrategy: "UseIPv6" },
+          },
+          { tag: "tachyon-direct", protocol: "blackhole" },
         ],
         routing: {
           domainStrategy: "AsIs",
-          rules: [{ type: "field", domain: ["example.test"], outboundTag: "raw-a" }],
+          rules: [
+            {
+              type: "field",
+              domain: ["example.test"],
+              outboundTag: "tachyon-direct",
+              balancerTag: "raw-balancer",
+            },
+          ],
+          balancers: [
+            {
+              tag: "raw-balancer",
+              selector: ["tachyon-"],
+            },
+          ],
         },
+        observatory: { subjectSelector: ["tachyon-"] },
       }),
     );
 
@@ -466,7 +573,8 @@ describe("buildXrayClientConfigDraft", () => {
 
     expect(config).toEqual(raw);
     expect(config).not.toBe(raw);
-    expect(config).not.toHaveProperty("outbounds.0.tag", "tachyon-proxy");
+    expect(config).toHaveProperty("outbounds.0.tag", "tachyon-proxy");
+    expect(config).toHaveProperty("outbounds.1.tag", "tachyon-direct");
   });
 
   it("preserves parsed subscription outbound details in generated Xray configs", () => {
@@ -567,7 +675,11 @@ describe("buildXrayClientConfigDraft", () => {
       );
       const restored = selectSubscriptionNode(persisted, node.id);
 
-      expect(selectedTag).toMatch(/^tachyon-proxy(?:-[2-9]|-[1-9]\d+)?$/);
+      if (typeof originalTag === "string" && originalTag) {
+        expect(selectedTag).toBe(originalTag);
+      } else {
+        expect(selectedTag).toMatch(/^tachyon-proxy(?:-[2-9]|-[1-9]\d+)?$/);
+      }
       expect(proxy).toMatchObject({
         ...outboundMatch,
         tag: selectedTag,
@@ -1010,17 +1122,17 @@ describe("complete Xray JSON editing", () => {
     );
   });
 
-  it("reports managed tag conflicts without restricting protocols", () => {
-    const conflict = JSON.stringify({
+  it("does not reserve Prism-like tags while parsing a raw complete config", () => {
+    const raw = {
       inbounds: [{ tag: "tachyon-proxy", protocol: "future-inbound" }],
-      outbounds: [{ tag: "custom", protocol: "future-outbound" }],
-    });
-    expect(() => parseXrayConfigText(conflict, "en")).toThrow(
-      /Prism managed tag conflict: tachyon-proxy/,
-    );
-    expect(() => parseXrayConfigText(conflict, "zh-CN")).toThrow(
-      /Prism 管理标签冲突: tachyon-proxy/,
-    );
+      outbounds: [
+        { tag: "tachyon-direct", protocol: "future-outbound" },
+        { tag: "tachyon-block-10", protocol: "blackhole" },
+      ],
+    };
+
+    expect(parseXrayConfigText(JSON.stringify(raw), "en")).toEqual(raw);
+    expect(parseXrayConfigText(JSON.stringify(raw), "zh-CN")).toEqual(raw);
   });
 
   it("rejects dangling outbound and balancer routing references", () => {
@@ -1045,9 +1157,55 @@ describe("complete Xray JSON editing", () => {
         }),
       ),
     ).toThrow(/Xray routing target does not exist.*balancerTag -> missing-balancer/);
+
+    for (const [location, config] of [
+      [
+        "proxySettings.tag",
+        {
+          outbounds: [
+            {
+              tag: "existing",
+              protocol: "freedom",
+              proxySettings: { tag: "missing-chain" },
+            },
+          ],
+        },
+      ],
+      [
+        "streamSettings.sockopt.dialerProxy",
+        {
+          outbounds: [
+            {
+              tag: "existing",
+              protocol: "freedom",
+              streamSettings: { sockopt: { dialerProxy: "missing-dialer" } },
+            },
+          ],
+        },
+      ],
+      [
+        "fallbackTag",
+        {
+          outbounds: [{ tag: "existing", protocol: "freedom" }],
+          routing: {
+            balancers: [
+              {
+                tag: "available-balancer",
+                selector: ["existing"],
+                fallbackTag: "missing-fallback",
+              },
+            ],
+          },
+        },
+      ],
+    ] as const) {
+      expect(() => parseXrayConfigText(JSON.stringify(config))).toThrow(
+        new RegExp(`Xray routing target does not exist.*${location}`),
+      );
+    }
   });
 
-  it("accepts declared balancer references and rejects ambiguous rule targets", () => {
+  it("accepts declared balancer references and Xray's outboundTag precedence", () => {
     const valid = {
       outbounds: [{ tag: "existing", protocol: "freedom" }],
       routing: {
@@ -1057,23 +1215,20 @@ describe("complete Xray JSON editing", () => {
     };
 
     expect(parseXrayConfigText(JSON.stringify(valid))).toEqual(valid);
-    expect(() =>
-      parseXrayConfigText(
-        JSON.stringify({
-          ...valid,
-          routing: {
-            ...valid.routing,
-            rules: [
-              {
-                type: "field",
-                outboundTag: "existing",
-                balancerTag: "available-balancer",
-              },
-            ],
+    const dualTarget = {
+      ...valid,
+      routing: {
+        ...valid.routing,
+        rules: [
+          {
+            type: "field",
+            outboundTag: "existing",
+            balancerTag: "available-balancer",
           },
-        }),
-      ),
-    ).toThrow(/cannot use outboundTag and balancerTag together/);
+        ],
+      },
+    };
+    expect(parseXrayConfigText(JSON.stringify(dualTarget))).toEqual(dualTarget);
   });
 
   it("matches only exact managed tags or canonical numeric suffixes", () => {
@@ -1087,14 +1242,12 @@ describe("complete Xray JSON editing", () => {
     expect(managedTagMatches("same-length--10", "tachyon-proxy")).toBe(false);
   });
 
-  it("reports a suffixed managed tag conflict at -10", () => {
-    const conflict = JSON.stringify({
+  it("preserves a Prism-like suffixed tag in raw mode", () => {
+    const raw = {
       inbounds: [{ tag: "tachyon-proxy-10", protocol: "socks" }],
       outbounds: [],
-    });
+    };
 
-    expect(() => parseXrayConfigText(conflict, "en")).toThrow(
-      /Prism managed tag conflict: tachyon-proxy-10/,
-    );
+    expect(parseXrayConfigText(JSON.stringify(raw), "en")).toEqual(raw);
   });
 });
