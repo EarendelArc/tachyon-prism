@@ -72,9 +72,46 @@ pub struct GenerationStatus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CandidateHandle {
+pub struct RunnerHandle {
     pub pid: u32,
     pub runner_token: String,
+}
+
+#[derive(Debug)]
+pub struct ConfigLease {
+    path: PathBuf,
+}
+
+impl ConfigLease {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ConfigLease {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[derive(Debug)]
+pub struct CandidateHandle {
+    runner: RunnerHandle,
+    config: ConfigLease,
+}
+
+impl CandidateHandle {
+    pub fn pid(&self) -> u32 {
+        self.runner.pid
+    }
+
+    pub fn runner_token(&self) -> &str {
+        &self.runner.runner_token
+    }
+
+    pub fn config_path(&self) -> &Path {
+        self.config.path()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,7 +154,6 @@ pub enum ApplyFailure {
 
 pub trait ApplyBackend {
     fn validate_config(&mut self, plan: &ApplyPlan) -> Result<(), BackendFailure>;
-    fn persist_generation(&mut self, plan: &ApplyPlan) -> Result<(), BackendFailure>;
     fn capture_proxy_snapshot(&mut self) -> Result<Option<ProxySnapshotHandle>, BackendFailure>;
     fn restore_proxy_snapshot(
         &mut self,
@@ -125,7 +161,11 @@ pub trait ApplyBackend {
     ) -> Result<ProxyReadback, BackendFailure>;
     fn stop_active(&mut self, active: &CandidateHandle) -> Result<(), BackendFailure>;
     fn confirm_exit(&mut self, handle: &CandidateHandle) -> Result<(), BackendFailure>;
-    fn start_candidate(&mut self, plan: &ApplyPlan) -> Result<CandidateHandle, BackendFailure>;
+    fn start_candidate(
+        &mut self,
+        plan: &ApplyPlan,
+        config: &ConfigLease,
+    ) -> Result<RunnerHandle, BackendFailure>;
     fn stop_candidate(&mut self, handle: &CandidateHandle) -> Result<(), BackendFailure>;
     fn confirm_process_identity(
         &mut self,
@@ -142,7 +182,7 @@ pub trait ApplyBackend {
         &mut self,
         active: &GenerationView,
         previous_handle: &CandidateHandle,
-    ) -> Result<CandidateHandle, BackendFailure>;
+    ) -> Result<RunnerHandle, BackendFailure>;
     fn bind_proxy(
         &mut self,
         generation_id: &GenerationId,
@@ -262,10 +302,6 @@ impl ApplyPlan {
         &self.desired.generation_id
     }
 
-    pub fn config_sha256(&self) -> &str {
-        &self.desired.config_sha256
-    }
-
     pub fn config(&self) -> &[u8] {
         &self.config
     }
@@ -277,6 +313,7 @@ impl ApplyPlan {
 
 pub struct GenerationRuntime {
     clock: GenerationClock,
+    store: GenerationStore,
     next_transaction_id: u64,
     desired: Option<DesiredRecord>,
     active: Option<GenerationView>,
@@ -291,6 +328,9 @@ impl Default for GenerationRuntime {
     fn default() -> Self {
         Self {
             clock: GenerationClock::ephemeral(),
+            store: GenerationStore::new(
+                std::env::temp_dir().join(format!("tachyon-prism-xray-{}", random_epoch())),
+            ),
             next_transaction_id: 0,
             desired: None,
             active: None,
@@ -304,9 +344,12 @@ impl Default for GenerationRuntime {
 }
 
 impl GenerationRuntime {
-    pub fn with_persistent_clock(path: PathBuf) -> Result<Self, String> {
+    pub fn with_persistent_storage(path: PathBuf, generation_dir: PathBuf) -> Result<Self, String> {
+        let store = GenerationStore::new(generation_dir);
+        store.sweep_orphans()?;
         Ok(Self {
             clock: GenerationClock::open(path)?,
+            store,
             ..Self::default()
         })
     }
@@ -363,7 +406,7 @@ impl GenerationRuntime {
                 if active.readiness == ReadinessLevel::ListenerReady
                     && active.generation_id == proxy.generation_id
                     && active.pid == Some(proxy.pid)
-                    && handle.pid == proxy.pid
+                    && handle.pid() == proxy.pid
         );
         GenerationStatus {
             desired: self.desired.as_ref().map(|desired| desired.view.clone()),
@@ -392,8 +435,8 @@ impl GenerationRuntime {
             transaction_id,
             desired: desired.view.clone(),
             config: desired.config.clone(),
-            previous_active: self.active.clone(),
-            previous_handle: self.active_handle.clone(),
+            previous_active: self.active.take(),
+            previous_handle: self.active_handle.take(),
             previous_proxy: self.proxy_generation.clone(),
             proxy_snapshot: None,
         })
@@ -406,43 +449,50 @@ impl GenerationRuntime {
         let mut plan = self.begin_apply()?;
         plan.proxy_snapshot = match backend.capture_proxy_snapshot() {
             Ok(snapshot) => snapshot,
-            Err(_) => return self.finish_proxy_uncertain(&plan, ApplyFailure::ProxyRestoreFailed),
+            Err(_) => return self.finish_proxy_uncertain(plan, ApplyFailure::ProxyRestoreFailed),
         };
         if backend.validate_config(&plan).is_err() {
-            return self.finish_before_proxy_change(&plan, ApplyFailure::ConfigValidationFailed);
+            return self.finish_before_proxy_change(plan, ApplyFailure::ConfigValidationFailed);
         }
         self.set_desired_readiness(&plan, ReadinessLevel::ConfigValidated)?;
-        if backend.persist_generation(&plan).is_err() {
-            return self.finish_before_proxy_change(&plan, ApplyFailure::GenerationPersistFailed);
-        }
+        let config_lease = match self.store.stage(&plan) {
+            Ok(lease) => lease,
+            Err(_) => {
+                return self.finish_before_proxy_change(plan, ApplyFailure::GenerationPersistFailed)
+            }
+        };
         if let Some(snapshot) = &plan.proxy_snapshot {
             match backend.restore_proxy_snapshot(snapshot) {
                 Ok(ProxyReadback::Restored) => self.proxy_generation = None,
-                _ => return self.finish_proxy_uncertain(&plan, ApplyFailure::ProxyRestoreFailed),
+                _ => return self.finish_proxy_uncertain(plan, ApplyFailure::ProxyRestoreFailed),
             }
         }
         if let Some(active_handle) = &plan.previous_handle {
             let stop_result = backend.stop_active(active_handle);
             let exit_result = backend.confirm_exit(active_handle);
             if stop_result.is_err() || exit_result.is_err() {
-                return self.finish_proxy_uncertain(&plan, ApplyFailure::ActiveStopFailed);
+                return self.finish_proxy_uncertain(plan, ApplyFailure::ActiveStopFailed);
             }
         }
         self.active = None;
         self.active_handle = None;
-        let candidate = match backend.start_candidate(&plan) {
-            Ok(candidate) => candidate,
+        let runner = match backend.start_candidate(&plan, &config_lease) {
+            Ok(runner) => runner,
             Err(BackendFailure::Cancelled) => {
-                return self.rollback_previous(&plan, backend, ApplyFailure::Cancelled, false)
+                return self.rollback_previous(plan, backend, ApplyFailure::Cancelled, false)
             }
             Err(BackendFailure::Failed) => {
                 return self.rollback_previous(
-                    &plan,
+                    plan,
                     backend,
                     ApplyFailure::CandidateStartFailed,
                     false,
                 )
             }
+        };
+        let candidate = CandidateHandle {
+            runner,
+            config: config_lease,
         };
         let readiness_failure =
             match backend.confirm_process_identity(plan.generation_id(), &candidate) {
@@ -464,21 +514,21 @@ impl GenerationRuntime {
                 Err(BackendFailure::Failed) => Some(ApplyFailure::ProcessReadinessFailed),
             };
         if let Some(failure) = readiness_failure {
-            return self.cleanup_candidate_and_rollback(&plan, backend, &candidate, failure, false);
+            return self.cleanup_candidate_and_rollback(plan, backend, candidate, failure, false);
         }
         let proxy_binding = if plan.proxy_snapshot.is_some() {
             match backend.bind_proxy(plan.generation_id(), &candidate) {
                 Ok(ProxyReadback::Bound(binding))
                     if binding.generation_id == *plan.generation_id()
-                        && binding.pid == candidate.pid =>
+                        && binding.pid == candidate.pid() =>
                 {
                     Some(binding)
                 }
                 _ => {
                     return self.cleanup_candidate_and_rollback(
-                        &plan,
+                        plan,
                         backend,
-                        &candidate,
+                        candidate,
                         ApplyFailure::ProxyConfirmationFailed,
                         true,
                     )
@@ -487,19 +537,125 @@ impl GenerationRuntime {
         } else {
             None
         };
-        self.finish_success(&plan, candidate, proxy_binding)
+        self.finish_success(plan, candidate, proxy_binding)
+    }
+
+    pub fn stop_active<B: ApplyBackend>(
+        &mut self,
+        backend: &mut B,
+    ) -> Result<GenerationStatus, ApplyFailure> {
+        if self.in_flight_transaction.is_some() {
+            return Err(ApplyFailure::Busy);
+        }
+        let snapshot = backend
+            .capture_proxy_snapshot()
+            .map_err(|_| ApplyFailure::ProxyRestoreFailed)?;
+        if let Some(snapshot) = snapshot {
+            if !matches!(
+                backend.restore_proxy_snapshot(&snapshot),
+                Ok(ProxyReadback::Restored)
+            ) {
+                self.proxy_generation = None;
+                self.phase = GenerationPhase::Degraded;
+                self.last_error_code = Some("proxyRestoreFailed".to_string());
+                return Err(ApplyFailure::ProxyRestoreFailed);
+            }
+        }
+        self.proxy_generation = None;
+        let Some(handle) = self.active_handle.take() else {
+            self.active = None;
+            self.phase = if self.desired.is_some() {
+                GenerationPhase::PendingApply
+            } else {
+                GenerationPhase::Idle
+            };
+            return Ok(self.status());
+        };
+        let stop_result = backend.stop_active(&handle);
+        let exit_result = backend.confirm_exit(&handle);
+        if stop_result.is_err() || exit_result.is_err() {
+            self.active_handle = Some(handle);
+            if let Some(active) = self.active.as_mut() {
+                active.readiness = ReadinessLevel::Degraded;
+            }
+            self.phase = GenerationPhase::Degraded;
+            self.last_error_code = Some("activeStopFailed".to_string());
+            return Err(ApplyFailure::ActiveStopFailed);
+        }
+        drop(handle);
+        self.active = None;
+        self.phase = if self.desired.is_some() {
+            GenerationPhase::PendingApply
+        } else {
+            GenerationPhase::Idle
+        };
+        self.last_error_code = None;
+        Ok(self.status())
+    }
+
+    pub fn bind_proxy_active<B: ApplyBackend>(
+        &mut self,
+        backend: &mut B,
+    ) -> Result<GenerationStatus, ApplyFailure> {
+        if self.in_flight_transaction.is_some() {
+            return Err(ApplyFailure::Busy);
+        }
+        let (Some(active), Some(handle)) = (&self.active, &self.active_handle) else {
+            return Err(ApplyFailure::NoDesired);
+        };
+        match backend.bind_proxy(&active.generation_id, handle) {
+            Ok(ProxyReadback::Bound(binding))
+                if binding.generation_id == active.generation_id && binding.pid == handle.pid() =>
+            {
+                self.proxy_generation = Some(binding);
+                self.last_error_code = None;
+                Ok(self.status())
+            }
+            _ => {
+                self.proxy_generation = None;
+                self.phase = GenerationPhase::Degraded;
+                self.last_error_code = Some("proxyConfirmationFailed".to_string());
+                Err(ApplyFailure::ProxyConfirmationFailed)
+            }
+        }
+    }
+
+    pub fn restore_proxy<B: ApplyBackend>(
+        &mut self,
+        backend: &mut B,
+    ) -> Result<GenerationStatus, ApplyFailure> {
+        if self.in_flight_transaction.is_some() {
+            return Err(ApplyFailure::Busy);
+        }
+        let snapshot = backend
+            .capture_proxy_snapshot()
+            .map_err(|_| ApplyFailure::ProxyRestoreFailed)?;
+        if let Some(snapshot) = snapshot {
+            if !matches!(
+                backend.restore_proxy_snapshot(&snapshot),
+                Ok(ProxyReadback::Restored)
+            ) {
+                self.proxy_generation = None;
+                self.phase = GenerationPhase::Degraded;
+                self.last_error_code = Some("proxyRestoreFailed".to_string());
+                return Err(ApplyFailure::ProxyRestoreFailed);
+            }
+        }
+        self.proxy_generation = None;
+        self.last_error_code = None;
+        Ok(self.status())
     }
 
     fn cleanup_candidate_and_rollback<B: ApplyBackend>(
         &mut self,
-        plan: &ApplyPlan,
+        plan: ApplyPlan,
         backend: &mut B,
-        candidate: &CandidateHandle,
+        candidate: CandidateHandle,
         failure: ApplyFailure,
         proxy_uncertain: bool,
     ) -> Result<GenerationStatus, ApplyFailure> {
-        let stop_result = backend.stop_candidate(candidate);
-        let exit_result = backend.confirm_exit(candidate);
+        let stop_result = backend.stop_candidate(&candidate);
+        let exit_result = backend.confirm_exit(&candidate);
         if stop_result.is_err() || exit_result.is_err() {
             return self.finish_degraded(plan, ApplyFailure::CandidateCleanupFailed);
         }
@@ -508,27 +664,28 @@ impl GenerationRuntime {
 
     fn rollback_previous<B: ApplyBackend>(
         &mut self,
-        plan: &ApplyPlan,
+        mut plan: ApplyPlan,
         backend: &mut B,
         failure: ApplyFailure,
         proxy_uncertain: bool,
     ) -> Result<GenerationStatus, ApplyFailure> {
-        self.require_current(plan)?;
+        self.require_current(&plan)?;
         self.phase = GenerationPhase::RollingBack;
         self.proxy_generation = None;
-        match (&plan.previous_active, &plan.previous_handle) {
+        match (&plan.previous_active, plan.previous_handle.as_mut()) {
             (Some(previous), Some(previous_handle)) => {
                 match backend.rollback(previous, previous_handle) {
-                    Ok(handle) => {
+                    Ok(runner) => {
                         let mut active = previous.clone();
-                        active.pid = Some(handle.pid);
+                        active.pid = Some(runner.pid);
                         active.readiness = if proxy_uncertain {
                             ReadinessLevel::Degraded
                         } else {
                             ReadinessLevel::ListenerReady
                         };
                         self.active = Some(active);
-                        self.active_handle = Some(handle);
+                        previous_handle.runner = runner;
+                        self.active_handle = plan.previous_handle.take();
                         self.in_flight_transaction = None;
                         self.phase = if proxy_uncertain {
                             GenerationPhase::Degraded
@@ -547,13 +704,13 @@ impl GenerationRuntime {
 
     fn finish_success(
         &mut self,
-        plan: &ApplyPlan,
+        plan: ApplyPlan,
         candidate: CandidateHandle,
         proxy_binding: Option<ProxyGenerationView>,
     ) -> Result<GenerationStatus, ApplyFailure> {
-        self.require_current(plan)?;
+        self.require_current(&plan)?;
         let mut active = plan.desired.clone();
-        active.pid = Some(candidate.pid);
+        active.pid = Some(candidate.pid());
         active.readiness = ReadinessLevel::ListenerReady;
         let active_pid = active.pid;
         self.active = Some(active);
@@ -577,13 +734,13 @@ impl GenerationRuntime {
 
     fn finish_before_proxy_change(
         &mut self,
-        plan: &ApplyPlan,
+        mut plan: ApplyPlan,
         failure: ApplyFailure,
     ) -> Result<GenerationStatus, ApplyFailure> {
-        self.require_current(plan)?;
+        self.require_current(&plan)?;
         self.in_flight_transaction = None;
         self.active = plan.previous_active.clone();
-        self.active_handle = plan.previous_handle.clone();
+        self.active_handle = plan.previous_handle.take();
         self.proxy_generation = plan.previous_proxy.clone();
         self.phase = GenerationPhase::PendingApply;
         self.last_error_code = Some(failure_code(failure).to_string());
@@ -592,17 +749,17 @@ impl GenerationRuntime {
 
     fn finish_proxy_uncertain(
         &mut self,
-        plan: &ApplyPlan,
+        mut plan: ApplyPlan,
         failure: ApplyFailure,
     ) -> Result<GenerationStatus, ApplyFailure> {
-        self.require_current(plan)?;
+        self.require_current(&plan)?;
         self.proxy_generation = None;
         self.in_flight_transaction = None;
         self.active = plan.previous_active.clone().map(|mut active| {
             active.readiness = ReadinessLevel::Degraded;
             active
         });
-        self.active_handle = plan.previous_handle.clone();
+        self.active_handle = plan.previous_handle.take();
         self.phase = GenerationPhase::Degraded;
         self.last_error_code = Some(failure_code(failure).to_string());
         Err(failure)
@@ -610,10 +767,10 @@ impl GenerationRuntime {
 
     fn finish_degraded(
         &mut self,
-        plan: &ApplyPlan,
+        plan: ApplyPlan,
         failure: ApplyFailure,
     ) -> Result<GenerationStatus, ApplyFailure> {
-        self.require_current(plan)?;
+        self.require_current(&plan)?;
         self.active = None;
         self.active_handle = None;
         self.proxy_generation = None;
@@ -665,7 +822,7 @@ impl GenerationStore {
         }
     }
 
-    pub fn persist(&self, plan: &ApplyPlan) -> Result<PathBuf, String> {
+    pub fn stage(&self, plan: &ApplyPlan) -> Result<ConfigLease, String> {
         fs::create_dir_all(&self.root).map_err(|_| "generation-dir-create-failed".to_string())?;
         let path = self
             .root
@@ -674,7 +831,29 @@ impl GenerationStore {
             .map_err(|_| "generation-config-not-utf8".to_string())?;
         write_atomic(&path, config).map_err(|_| "generation-config-write-failed".to_string())?;
         self.cleanup_stale(&path)?;
-        Ok(path)
+        Ok(ConfigLease { path })
+    }
+
+    pub fn sweep_orphans(&self) -> Result<(), String> {
+        if !self.root.exists() {
+            return Ok(());
+        }
+        for entry in
+            fs::read_dir(&self.root).map_err(|_| "generation-dir-read-failed".to_string())?
+        {
+            let path = entry
+                .map_err(|_| "generation-dir-read-failed".to_string())?
+                .path();
+            let is_generation = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.starts_with("generation-") && name.ends_with(".json"));
+            if is_generation {
+                fs::remove_file(path)
+                    .map_err(|_| "generation-orphan-cleanup-failed".to_string())?;
+            }
+        }
+        Ok(())
     }
 
     fn cleanup_stale(&self, current: &Path) -> Result<(), String> {
@@ -737,10 +916,8 @@ fn failure_code(failure: ApplyFailure) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     struct FakeBackend {
-        root: TempDir,
         events: Vec<String>,
         live: Vec<String>,
         proxy_enabled: bool,
@@ -760,7 +937,6 @@ mod tests {
     impl Default for FakeBackend {
         fn default() -> Self {
             Self {
-                root: tempfile::tempdir().unwrap(),
                 events: vec![],
                 live: vec![],
                 proxy_enabled: false,
@@ -780,10 +956,10 @@ mod tests {
     }
 
     impl FakeBackend {
-        fn handle(&mut self, token: String) -> CandidateHandle {
+        fn handle(&mut self, token: String) -> RunnerHandle {
             self.next_pid += 1;
             self.live.push(token.clone());
-            CandidateHandle {
+            RunnerHandle {
                 pid: self.next_pid,
                 runner_token: token,
             }
@@ -795,15 +971,6 @@ mod tests {
             self.events
                 .push(format!("validate:{}", plan.generation_id().as_str()));
             self.validate_failure.take().map_or(Ok(()), Err)
-        }
-
-        fn persist_generation(&mut self, plan: &ApplyPlan) -> Result<(), BackendFailure> {
-            self.events
-                .push(format!("persist:{}", plan.config_sha256()));
-            GenerationStore::new(self.root.path().join("generations"))
-                .persist(plan)
-                .map(|_| ())
-                .map_err(|_| BackendFailure::Failed)
         }
 
         fn capture_proxy_snapshot(
@@ -826,28 +993,37 @@ mod tests {
 
         fn stop_active(&mut self, active: &CandidateHandle) -> Result<(), BackendFailure> {
             self.events
-                .push(format!("stopActive:{}", active.runner_token));
+                .push(format!("stopActive:{}", active.runner_token()));
             if self.stop_active_fails {
                 Err(BackendFailure::Failed)
             } else {
-                self.live.retain(|token| token != &active.runner_token);
+                self.live.retain(|token| token != active.runner_token());
                 Ok(())
             }
         }
 
         fn confirm_exit(&mut self, handle: &CandidateHandle) -> Result<(), BackendFailure> {
             self.events
-                .push(format!("confirmExit:{}", handle.runner_token));
-            if self.confirm_exit_fails || self.live.contains(&handle.runner_token) {
+                .push(format!("confirmExit:{}", handle.runner_token()));
+            if self.confirm_exit_fails
+                || self.live.iter().any(|token| token == handle.runner_token())
+            {
                 Err(BackendFailure::Failed)
             } else {
                 Ok(())
             }
         }
 
-        fn start_candidate(&mut self, plan: &ApplyPlan) -> Result<CandidateHandle, BackendFailure> {
-            self.events
-                .push(format!("start:{}", plan.generation_id().as_str()));
+        fn start_candidate(
+            &mut self,
+            plan: &ApplyPlan,
+            config: &ConfigLease,
+        ) -> Result<RunnerHandle, BackendFailure> {
+            self.events.push(format!(
+                "start:{}:{}",
+                plan.generation_id().as_str(),
+                config.path().display()
+            ));
             if let Some(failure) = self.start_failure.take() {
                 Err(failure)
             } else {
@@ -857,11 +1033,11 @@ mod tests {
 
         fn stop_candidate(&mut self, handle: &CandidateHandle) -> Result<(), BackendFailure> {
             self.events
-                .push(format!("stopCandidate:{}", handle.runner_token));
+                .push(format!("stopCandidate:{}", handle.runner_token()));
             if self.stop_candidate_fails {
                 Err(BackendFailure::Failed)
             } else {
-                self.live.retain(|token| token != &handle.runner_token);
+                self.live.retain(|token| token != handle.runner_token());
                 Ok(())
             }
         }
@@ -889,7 +1065,7 @@ mod tests {
             &mut self,
             active: &GenerationView,
             _previous_handle: &CandidateHandle,
-        ) -> Result<CandidateHandle, BackendFailure> {
+        ) -> Result<RunnerHandle, BackendFailure> {
             self.events
                 .push(format!("rollback:{}", active.generation_id.as_str()));
             if self.rollback_fails {
@@ -908,7 +1084,7 @@ mod tests {
             Ok(self.bind_readback.clone().unwrap_or_else(|| {
                 ProxyReadback::Bound(ProxyGenerationView {
                     generation_id: generation_id.clone(),
-                    pid: handle.pid,
+                    pid: handle.pid(),
                 })
             }))
         }
@@ -1160,18 +1336,16 @@ mod tests {
     }
 
     #[test]
-    fn generation_store_keeps_only_recent_atomic_files_without_secret_status() {
+    fn active_lease_is_exclusive_private_and_dropped_with_replaced_generation() {
         let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         let mut backend = FakeBackend::default();
         for index in 0..5 {
             select(&mut runtime, &format!("N{index}"), index);
             runtime.execute_latest(&mut backend).unwrap();
         }
-        let count = fs::read_dir(backend.root.path().join("generations"))
-            .unwrap()
-            .count();
-        assert_eq!(count, RETAINED_GENERATIONS);
-        let generation_path = fs::read_dir(backend.root.path().join("generations"))
+        let count = fs::read_dir(&runtime.store.root).unwrap().count();
+        assert_eq!(count, 1);
+        let generation_path = fs::read_dir(&runtime.store.root)
             .unwrap()
             .next()
             .unwrap()
@@ -1193,5 +1367,52 @@ mod tests {
         let json = serde_json::to_string(&runtime.status()).unwrap();
         assert!(!json.contains("hidden-"));
         assert!(!json.contains("secret"));
+    }
+
+    #[test]
+    fn stop_releases_active_lease_and_orphan_sweep_cleans_crash_residue() {
+        let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let mut backend = FakeBackend::default();
+        select(&mut runtime, "A", 1);
+        runtime.execute_latest(&mut backend).unwrap();
+        let active_path = runtime
+            .active_handle
+            .as_ref()
+            .unwrap()
+            .config_path()
+            .to_path_buf();
+        assert!(active_path.is_file());
+        runtime.stop_active(&mut backend).unwrap();
+        assert!(!active_path.exists());
+
+        let orphan = runtime.store.root.join("generation-crash.json");
+        write_atomic(&orphan, "{\"secret\":true}").unwrap();
+        assert!(orphan.exists());
+        runtime.store.sweep_orphans().unwrap();
+        assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn every_failed_initial_start_releases_its_config_lease() {
+        let scenarios = ["validation", "start", "cancel", "readiness"];
+        for scenario in scenarios {
+            let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            let mut backend = FakeBackend::default();
+            select(&mut runtime, "A", 1);
+            match scenario {
+                "validation" => backend.validate_failure = Some(BackendFailure::Failed),
+                "start" => backend.start_failure = Some(BackendFailure::Failed),
+                "cancel" => backend.process_failure = Some(BackendFailure::Cancelled),
+                "readiness" => backend.listener_failure = Some(BackendFailure::Failed),
+                _ => unreachable!(),
+            }
+            assert!(runtime.execute_latest(&mut backend).is_err());
+            let files = fs::read_dir(&runtime.store.root)
+                .map(|entries| entries.count())
+                .unwrap_or_default();
+            assert_eq!(files, 0, "{scenario} left an orphan generation config");
+            assert!(runtime.status().active.is_none());
+            assert!(runtime.status().proxy_generation.is_none());
+        }
     }
 }

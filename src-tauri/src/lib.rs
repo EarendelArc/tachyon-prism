@@ -420,20 +420,6 @@ struct XrayCoordinator {
     generations: xray_generation::GenerationRuntime,
 }
 
-impl std::ops::Deref for XrayCoordinator {
-    type Target = RuntimeProcesses;
-
-    fn deref(&self) -> &Self::Target {
-        &self.processes
-    }
-}
-
-impl std::ops::DerefMut for XrayCoordinator {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.processes
-    }
-}
-
 #[derive(Clone, Copy)]
 struct WindowBounds {
     position: tauri::PhysicalPosition<i32>,
@@ -701,6 +687,446 @@ struct ManagedProcess {
     stderr_reader: Option<thread::JoinHandle<()>>,
     stop_method: Option<String>,
     sanitize_diagnostics: bool,
+}
+
+struct ProductionXrayBackend<'a> {
+    app: &'a tauri::AppHandle,
+    proxy: &'a system_proxy::SystemProxyRuntime,
+    process: &'a mut ManagedProcess,
+    settings: &'a RuntimeSettings,
+    binary: PathBuf,
+    validation_target: PathBuf,
+}
+
+impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
+    fn validate_config(
+        &mut self,
+        plan: &xray_generation::ApplyPlan,
+    ) -> Result<(), xray_generation::BackendFailure> {
+        let contents = std::str::from_utf8(plan.config())
+            .map_err(|_| xray_generation::BackendFailure::Failed)?;
+        let candidate = SyncedTempFile::create(&self.validation_target, contents)
+            .map_err(|_| xray_generation::BackendFailure::Failed)?;
+        let validation = validate_xray_config_file(&self.binary, &candidate.path)
+            .map_err(|_| xray_generation::BackendFailure::Failed)?;
+        if validation.ok {
+            Ok(())
+        } else {
+            Err(xray_generation::BackendFailure::Failed)
+        }
+    }
+
+    fn capture_proxy_snapshot(
+        &mut self,
+    ) -> Result<Option<xray_generation::ProxySnapshotHandle>, xray_generation::BackendFailure> {
+        let query = system_proxy::query(self.app, self.proxy)
+            .map_err(|_| xray_generation::BackendFailure::Failed)?;
+        if query.current.error.is_some() {
+            return Err(xray_generation::BackendFailure::Failed);
+        }
+        if !query.current.enabled {
+            return Ok(None);
+        }
+        if !query.current.matches_prism || query.pending_transaction.is_none() {
+            return Err(xray_generation::BackendFailure::Failed);
+        }
+        Ok(Some(xray_generation::ProxySnapshotHandle {
+            token: "system-proxy-journal".to_string(),
+        }))
+    }
+
+    fn restore_proxy_snapshot(
+        &mut self,
+        snapshot: &xray_generation::ProxySnapshotHandle,
+    ) -> Result<xray_generation::ProxyReadback, xray_generation::BackendFailure> {
+        if snapshot.token != "system-proxy-journal" {
+            return Ok(xray_generation::ProxyReadback::Unknown);
+        }
+        system_proxy::restore_if_pending(self.app, self.proxy)
+            .map_err(|_| xray_generation::BackendFailure::Failed)?;
+        let current = system_proxy::query(self.app, self.proxy)
+            .map_err(|_| xray_generation::BackendFailure::Failed)?
+            .current;
+        if current.error.is_none() && !current.enabled {
+            Ok(xray_generation::ProxyReadback::Restored)
+        } else {
+            Ok(xray_generation::ProxyReadback::Unknown)
+        }
+    }
+
+    fn stop_active(
+        &mut self,
+        active: &xray_generation::CandidateHandle,
+    ) -> Result<(), xray_generation::BackendFailure> {
+        let status = self.process.status();
+        if status.state != "running" || status.pid != Some(active.pid()) {
+            return Err(xray_generation::BackendFailure::Failed);
+        }
+        self.process
+            .stop("xray")
+            .map(|_| ())
+            .map_err(|_| xray_generation::BackendFailure::Failed)
+    }
+
+    fn confirm_exit(
+        &mut self,
+        handle: &xray_generation::CandidateHandle,
+    ) -> Result<(), xray_generation::BackendFailure> {
+        let status = self.process.status();
+        if status.state != "running" && status.pid != Some(handle.pid()) {
+            Ok(())
+        } else {
+            Err(xray_generation::BackendFailure::Failed)
+        }
+    }
+
+    fn start_candidate(
+        &mut self,
+        plan: &xray_generation::ApplyPlan,
+        config: &xray_generation::ConfigLease,
+    ) -> Result<xray_generation::RunnerHandle, xray_generation::BackendFailure> {
+        let status = self
+            .process
+            .start(
+                "xray",
+                ManagedBinaryKind::Xray,
+                path_string(&self.binary),
+                path_string(config.path()),
+                &["run", "-config"],
+            )
+            .map_err(|_| xray_generation::BackendFailure::Failed)?;
+        let pid = status.pid.ok_or(xray_generation::BackendFailure::Failed)?;
+        Ok(xray_generation::RunnerHandle {
+            pid,
+            runner_token: plan.generation_id().as_str().to_string(),
+        })
+    }
+
+    fn stop_candidate(
+        &mut self,
+        handle: &xray_generation::CandidateHandle,
+    ) -> Result<(), xray_generation::BackendFailure> {
+        self.stop_active(handle)
+    }
+
+    fn confirm_process_identity(
+        &mut self,
+        _generation_id: &xray_generation::GenerationId,
+        handle: &xray_generation::CandidateHandle,
+    ) -> Result<(), xray_generation::BackendFailure> {
+        self.process
+            .confirm_running("xray")
+            .map_err(|_| xray_generation::BackendFailure::Failed)?;
+        let status = self.process.status();
+        if status.pid == Some(handle.pid())
+            && status.config_path.as_deref() == Some(&path_string(handle.config_path()))
+        {
+            Ok(())
+        } else {
+            Err(xray_generation::BackendFailure::Failed)
+        }
+    }
+
+    fn confirm_listener_readiness(
+        &mut self,
+        _generation_id: &xray_generation::GenerationId,
+        _handle: &xray_generation::CandidateHandle,
+        _listeners: &[String],
+    ) -> Result<(), xray_generation::BackendFailure> {
+        verify_xray_readiness(self.settings, &self.binary, STARTUP_PROBE_TIMEOUT)
+            .map_err(|_| xray_generation::BackendFailure::Failed)
+    }
+
+    fn rollback(
+        &mut self,
+        active: &xray_generation::GenerationView,
+        previous_handle: &xray_generation::CandidateHandle,
+    ) -> Result<xray_generation::RunnerHandle, xray_generation::BackendFailure> {
+        let status = self
+            .process
+            .start(
+                "xray",
+                ManagedBinaryKind::Xray,
+                path_string(&self.binary),
+                path_string(previous_handle.config_path()),
+                &["run", "-config"],
+            )
+            .map_err(|_| xray_generation::BackendFailure::Failed)?;
+        let pid = status.pid.ok_or(xray_generation::BackendFailure::Failed)?;
+        verify_xray_readiness(self.settings, &self.binary, STARTUP_PROBE_TIMEOUT)
+            .map_err(|_| xray_generation::BackendFailure::Failed)?;
+        Ok(xray_generation::RunnerHandle {
+            pid,
+            runner_token: active.generation_id.as_str().to_string(),
+        })
+    }
+
+    fn bind_proxy(
+        &mut self,
+        generation_id: &xray_generation::GenerationId,
+        handle: &xray_generation::CandidateHandle,
+    ) -> Result<xray_generation::ProxyReadback, xray_generation::BackendFailure> {
+        system_proxy::apply(self.app, self.proxy, true)
+            .map_err(|_| xray_generation::BackendFailure::Failed)?;
+        let current = system_proxy::query(self.app, self.proxy)
+            .map_err(|_| xray_generation::BackendFailure::Failed)?
+            .current;
+        if current.error.is_none() && current.enabled && current.matches_prism {
+            Ok(xray_generation::ProxyReadback::Bound(
+                xray_generation::ProxyGenerationView {
+                    generation_id: generation_id.clone(),
+                    pid: handle.pid(),
+                },
+            ))
+        } else {
+            Ok(xray_generation::ProxyReadback::Unknown)
+        }
+    }
+}
+
+impl XrayCoordinator {
+    fn apply_xray(
+        &mut self,
+        app: &tauri::AppHandle,
+        proxy: &system_proxy::SystemProxyRuntime,
+        binary_path: String,
+        config_path: String,
+    ) -> Result<ProcessStatus, String> {
+        let binary = PathBuf::from(clean_path_input(&binary_path));
+        let source = PathBuf::from(clean_path_input(&config_path));
+        let config =
+            fs::read(&source).map_err(|error| format!("read Xray desired config: {error}"))?;
+        if config.len() > CANONICAL_XRAY_CONFIG_LIMIT_BYTES {
+            return Err("Xray desired config exceeds the managed size limit".to_string());
+        }
+        let config_text = std::str::from_utf8(&config)
+            .map_err(|_| "Xray desired config is not UTF-8".to_string())?;
+        ensure_json_object("Xray desired config", config_text)?;
+        use sha2::{Digest, Sha256};
+        let settings = load_runtime_settings(app)?;
+        let digest = Sha256::digest(&config)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let node_id = format!("managed-config-{}", &digest[..16]);
+        self.generations
+            .select_desired(
+                &config,
+                node_id,
+                digest,
+                vec![
+                    format!(
+                        "{}:{}",
+                        settings.xray_socks_listen, settings.xray_socks_port
+                    ),
+                    format!("{}:{}", settings.xray_http_listen, settings.xray_http_port),
+                ],
+            )
+            .map_err(generation_apply_error)?;
+        let (processes, generations) = (&mut self.processes, &mut self.generations);
+        let mut backend = ProductionXrayBackend {
+            app,
+            proxy,
+            process: &mut processes.xray,
+            settings: &settings,
+            binary,
+            validation_target: source,
+        };
+        generations
+            .execute_latest(&mut backend)
+            .map_err(generation_apply_error)?;
+        Ok(processes.xray.status())
+    }
+
+    fn stop_xray(
+        &mut self,
+        app: &tauri::AppHandle,
+        proxy: &system_proxy::SystemProxyRuntime,
+    ) -> Result<ProcessStatus, String> {
+        let process_status = self.processes.xray.status();
+        let generation_status = self.generations.status();
+        if process_status.state == "running" && generation_status.active.is_none() {
+            return Err("refusing to stop uncoordinated Xray process".to_string());
+        }
+        if generation_status.active.is_none() {
+            self.set_proxy_binding(app, proxy, false)?;
+            return Ok(process_status);
+        }
+        let settings = load_runtime_settings(app)?;
+        let binary = PathBuf::from(
+            process_status
+                .binary_path
+                .clone()
+                .unwrap_or_else(|| settings.xray_binary_path.clone()),
+        );
+        let validation_target =
+            PathBuf::from(process_status.config_path.clone().unwrap_or_else(|| {
+                draft_paths(app)
+                    .map(|paths| paths.xray_config_path)
+                    .unwrap_or_default()
+            }));
+        let (processes, generations) = (&mut self.processes, &mut self.generations);
+        let mut backend = ProductionXrayBackend {
+            app,
+            proxy,
+            process: &mut processes.xray,
+            settings: &settings,
+            binary,
+            validation_target,
+        };
+        generations
+            .stop_active(&mut backend)
+            .map_err(generation_apply_error)?;
+        Ok(processes.xray.status())
+    }
+
+    fn start_all(
+        &mut self,
+        app: &tauri::AppHandle,
+        proxy: &system_proxy::SystemProxyRuntime,
+        xray_binary_path: String,
+        xray_config_path: String,
+        tachyon_core_binary_path: String,
+        tachyon_core_config_path: String,
+    ) -> Result<(), String> {
+        let current = self.processes.status();
+        if current.xray.state == "running" || current.tachyon_core.state == "running" {
+            return Err("start_all requires both managed cores to be stopped".to_string());
+        }
+        self.apply_xray(app, proxy, xray_binary_path, xray_config_path)?;
+        let settings = load_runtime_settings(app)?;
+        let tachyon_start = self
+            .processes
+            .tachyon_core
+            .start(
+                "tachyon-core",
+                ManagedBinaryKind::TachyonCore,
+                tachyon_core_binary_path,
+                tachyon_core_config_path,
+                &["run", "--config"],
+            )
+            .and_then(|_| {
+                wait_for_readiness(
+                    "Tachyon Core",
+                    STARTUP_READINESS_TIMEOUT,
+                    STARTUP_READINESS_INTERVAL,
+                    |remaining| {
+                        self.processes
+                            .tachyon_core
+                            .confirm_running("tachyon-core")?;
+                        let status = core_health_check_with_timeout(
+                            &settings,
+                            remaining.min(STARTUP_PROBE_TIMEOUT),
+                        )?;
+                        if status == "ok" {
+                            Ok(())
+                        } else {
+                            Err(format!("Tachyon Core returned status {status:?}"))
+                        }
+                    },
+                )
+            });
+        if let Err(error) = tachyon_start {
+            let mut rollback_errors = Vec::new();
+            if let Err(stop_error) = self.processes.tachyon_core.stop("tachyon-core") {
+                rollback_errors.push(stop_error);
+            }
+            if let Err(stop_error) = self.stop_xray(app, proxy) {
+                rollback_errors.push(stop_error);
+            }
+            return Err(start_all_rollback_error(error, rollback_errors));
+        }
+        Ok(())
+    }
+
+    fn stop_all(
+        &mut self,
+        app: &tauri::AppHandle,
+        proxy: &system_proxy::SystemProxyRuntime,
+    ) -> RuntimeShutdownOutcome {
+        let mut errors = Vec::new();
+        if let Err(error) = self.processes.tachyon_core.stop("tachyon-core") {
+            errors.push(error);
+        }
+        let mut proxy_restored = false;
+        let mut proxy_restore_status = "failed".to_string();
+        let mut xray_stop_blocked = false;
+        let mut last_error = None;
+        for attempt in 1..=PROXY_RESTORE_ATTEMPTS {
+            match self.stop_xray(app, proxy) {
+                Ok(_) => {
+                    proxy_restored = true;
+                    proxy_restore_status = if attempt == 1 {
+                        "restored".to_string()
+                    } else {
+                        format!("restoredAfterRetry{attempt}")
+                    };
+                    last_error = None;
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt < PROXY_RESTORE_ATTEMPTS {
+                        thread::sleep(PROXY_RESTORE_RETRY_DELAY);
+                    }
+                }
+            }
+        }
+        if let Some(error) = last_error {
+            xray_stop_blocked = true;
+            errors.push(sanitize_xray_ui_error(error));
+        }
+        RuntimeShutdownOutcome {
+            proxy_restored,
+            proxy_restore_status,
+            xray_stop_blocked,
+            errors,
+        }
+    }
+
+    fn set_proxy_binding(
+        &mut self,
+        app: &tauri::AppHandle,
+        proxy: &system_proxy::SystemProxyRuntime,
+        enabled: bool,
+    ) -> Result<system_proxy::SystemProxyState, String> {
+        let settings = load_runtime_settings(app)?;
+        let status = self.processes.xray.status();
+        let binary = PathBuf::from(
+            status
+                .binary_path
+                .clone()
+                .unwrap_or_else(|| settings.xray_binary_path.clone()),
+        );
+        let validation_target = PathBuf::from(status.config_path.clone().unwrap_or_else(|| {
+            draft_paths(app)
+                .map(|paths| paths.xray_config_path)
+                .unwrap_or_default()
+        }));
+        let (processes, generations) = (&mut self.processes, &mut self.generations);
+        let mut backend = ProductionXrayBackend {
+            app,
+            proxy,
+            process: &mut processes.xray,
+            settings: &settings,
+            binary,
+            validation_target,
+        };
+        if enabled {
+            generations
+                .bind_proxy_active(&mut backend)
+                .map_err(generation_apply_error)?;
+        } else {
+            generations
+                .restore_proxy(&mut backend)
+                .map_err(generation_apply_error)?;
+        }
+        Ok(system_proxy::query(app, proxy)?.current)
+    }
+}
+
+fn generation_apply_error(error: xray_generation::ApplyFailure) -> String {
+    format!("Xray coordinator transaction failed: {error:?}")
 }
 
 #[derive(Serialize)]
@@ -1024,18 +1450,20 @@ fn runtime_status(
     state: tauri::State<RuntimeState>,
     proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
 ) -> Result<RuntimeStatus, String> {
-    let mut processes = state
+    let mut coordinator = state
         .xray
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
-    let status = processes.status();
+    let status = coordinator.processes.status();
     if should_restore_proxy_for_runtime(&status) {
-        system_proxy::restore_if_pending(&app, &proxy_state).map_err(|error| {
-            format!(
-                "restore system proxy for stopped Xray: {}",
-                sanitize_xray_ui_error(error)
-            )
-        })?;
+        coordinator
+            .set_proxy_binding(&app, &proxy_state, false)
+            .map_err(|error| {
+                format!(
+                    "restore system proxy for stopped Xray: {}",
+                    sanitize_xray_ui_error(error)
+                )
+            })?;
     }
     Ok(status)
 }
@@ -1060,7 +1488,7 @@ fn runtime_process_logs(
         .xray
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
-    processes.logs(&kind)
+    processes.processes.logs(&kind)
 }
 
 #[tauri::command]
@@ -1361,15 +1789,12 @@ fn system_proxy_apply(
     runtime_state: tauri::State<RuntimeState>,
     state: tauri::State<system_proxy::SystemProxyRuntime>,
     enabled: bool,
-) -> Result<system_proxy::SystemProxyTransactionResult, String> {
+) -> Result<system_proxy::SystemProxyState, String> {
     let mut coordinator = runtime_state
         .xray
         .lock()
         .map_err(|err| format!("lock Xray coordinator: {err}"))?;
-    if enabled {
-        require_running_xray_locked(&mut coordinator)?;
-    }
-    system_proxy::apply(&app, &state, enabled)
+    coordinator.set_proxy_binding(&app, &state, enabled)
 }
 
 #[tauri::command]
@@ -1378,12 +1803,17 @@ fn system_proxy_restore(
     runtime_state: tauri::State<RuntimeState>,
     state: tauri::State<system_proxy::SystemProxyRuntime>,
     transaction_id: Option<String>,
-) -> Result<system_proxy::SystemProxyTransactionResult, String> {
-    let _coordinator = runtime_state
+) -> Result<system_proxy::SystemProxyState, String> {
+    let mut coordinator = runtime_state
         .xray
         .lock()
         .map_err(|err| format!("lock Xray coordinator: {err}"))?;
-    system_proxy::restore(&app, &state, transaction_id.as_deref())
+    if transaction_id.is_some() {
+        return Err(
+            "transaction-specific proxy restore is unavailable outside XrayCoordinator".to_string(),
+        );
+    }
+    coordinator.set_proxy_binding(&app, &state, false)
 }
 
 #[tauri::command]
@@ -1404,12 +1834,7 @@ fn enable_system_proxy(
         .xray
         .lock()
         .map_err(|err| format!("lock Xray coordinator: {err}"))?;
-    require_running_xray_locked(&mut coordinator)?;
-    Ok(system_proxy::apply(&app, &state, true)?.current)
-}
-
-fn require_running_xray_locked(coordinator: &mut XrayCoordinator) -> Result<(), String> {
-    validate_system_proxy_owner_state(&coordinator.xray.status().state)
+    coordinator.set_proxy_binding(&app, &state, true)
 }
 
 fn validate_system_proxy_owner_state(xray_state: &str) -> Result<(), String> {
@@ -1426,11 +1851,11 @@ fn disable_system_proxy(
     runtime_state: tauri::State<RuntimeState>,
     state: tauri::State<system_proxy::SystemProxyRuntime>,
 ) -> Result<system_proxy::SystemProxyState, String> {
-    let _coordinator = runtime_state
+    let mut coordinator = runtime_state
         .xray
         .lock()
         .map_err(|err| format!("lock Xray coordinator: {err}"))?;
-    system_proxy::disable_legacy(&app, &state)
+    coordinator.set_proxy_binding(&app, &state, false)
 }
 
 #[tauri::command]
@@ -1442,21 +1867,11 @@ fn start_xray(
     config_path: String,
 ) -> Result<ProcessStatus, String> {
     let result = (|| {
-        let mut processes = state
+        let mut coordinator = state
             .xray
             .lock()
             .map_err(|err| format!("lock runtime state: {err}"))?;
-        if processes.xray.status().state == "running" {
-            return Err("xray is already running".to_string());
-        }
-        system_proxy::restore_if_pending(&app, &proxy_state)?;
-        processes.xray.start(
-            "xray",
-            ManagedBinaryKind::Xray,
-            binary_path,
-            config_path,
-            &["run", "-config"],
-        )
+        coordinator.apply_xray(&app, &proxy_state, binary_path, config_path)
     })();
     sanitize_xray_ui_result(result)
 }
@@ -1471,10 +1886,10 @@ fn stop_xray(
         .xray
         .lock()
         .map_err(|err| format!("lock Xray coordinator: {err}"))?;
-    system_proxy::restore_if_pending(&app, &proxy_state)?;
-    coordinator.xray.stop("xray")
+    coordinator.stop_xray(&app, &proxy_state)
 }
 
+#[cfg(test)]
 fn stop_xray_transaction<T>(
     restore_proxy: impl FnOnce() -> Result<(), String>,
     stop_process: impl FnOnce() -> Result<T, String>,
@@ -1493,7 +1908,7 @@ fn start_tachyon_core(
         .xray
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
-    processes.tachyon_core.start(
+    processes.processes.tachyon_core.start(
         "tachyon-core",
         ManagedBinaryKind::TachyonCore,
         binary_path,
@@ -1508,7 +1923,7 @@ fn stop_tachyon_core(state: tauri::State<RuntimeState>) -> Result<ProcessStatus,
         .xray
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
-    processes.tachyon_core.stop("tachyon-core")
+    processes.processes.tachyon_core.stop("tachyon-core")
 }
 
 fn should_restore_proxy_for_runtime(status: &RuntimeStatus) -> bool {
@@ -1525,25 +1940,20 @@ fn start_all(
     tachyon_core_binary_path: String,
     tachyon_core_config_path: String,
 ) -> Result<StartAllResult, String> {
-    let settings = load_runtime_settings(&app)?;
-    let mut processes = state
+    let mut coordinator = state
         .xray
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
-    let current = processes.status();
-    if current.xray.state == "running" || current.tachyon_core.state == "running" {
-        return Err("start_all requires both managed cores to be stopped".to_string());
-    }
-    system_proxy::restore_if_pending(&app, &proxy_state)?;
-    sanitize_xray_ui_result(processes.start_all(
-        &settings,
+    sanitize_xray_ui_result(coordinator.start_all(
+        &app,
+        &proxy_state,
         xray_binary_path,
         xray_config_path,
         tachyon_core_binary_path,
         tachyon_core_config_path,
     ))?;
     Ok(StartAllResult {
-        runtime: processes.status(),
+        runtime: coordinator.processes.status(),
         confirmation: "readinessVerified".to_string(),
     })
 }
@@ -1554,16 +1964,12 @@ fn stop_all(
     state: tauri::State<RuntimeState>,
     proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
 ) -> Result<StopAllResult, String> {
-    let mut processes = state
+    let mut coordinator = state
         .xray
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
-    let outcome = execute_runtime_shutdown(
-        &mut processes.processes,
-        || system_proxy::restore_if_pending(&app, &proxy_state),
-        thread::sleep,
-    );
-    let runtime = processes.status();
+    let outcome = coordinator.stop_all(&app, &proxy_state);
+    let runtime = coordinator.processes.status();
     Ok(StopAllResult {
         runtime,
         proxy_restored: outcome.proxy_restored,
@@ -1572,6 +1978,7 @@ fn stop_all(
     })
 }
 
+#[cfg(test)]
 trait RuntimeStopControl {
     fn stop_tachyon_core_checked(&mut self) -> Result<(), String>;
     fn stop_xray_checked(&mut self) -> Result<(), String>;
@@ -1585,6 +1992,7 @@ struct RuntimeShutdownOutcome {
     errors: Vec<String>,
 }
 
+#[cfg(test)]
 fn execute_runtime_shutdown(
     runtime: &mut impl RuntimeStopControl,
     mut restore_proxy: impl FnMut() -> Result<bool, String>,
@@ -6169,43 +6577,9 @@ impl RuntimeProcesses {
             capacity_bytes_per_stream,
         })
     }
-
-    fn stop_all_checked(&mut self) -> Vec<String> {
-        let mut errors = Vec::new();
-        if let Err(error) = self.tachyon_core.stop("tachyon-core") {
-            errors.push(error);
-        }
-        if let Err(error) = self.xray.stop("xray") {
-            errors.push(error);
-        }
-        errors
-    }
-
-    fn start_all(
-        &mut self,
-        settings: &RuntimeSettings,
-        xray_binary_path: String,
-        xray_config_path: String,
-        tachyon_core_binary_path: String,
-        tachyon_core_config_path: String,
-    ) -> Result<(), String> {
-        let current = self.status();
-        if current.xray.state == "running" || current.tachyon_core.state == "running" {
-            return Err("start_all requires both managed cores to be stopped".to_string());
-        }
-
-        let mut transaction = RuntimeStartAllTransaction {
-            processes: self,
-            settings,
-            xray_binary_path,
-            xray_config_path,
-            tachyon_core_binary_path,
-            tachyon_core_config_path,
-        };
-        execute_start_all(&mut transaction)
-    }
 }
 
+#[cfg(test)]
 impl RuntimeStopControl for RuntimeProcesses {
     fn stop_tachyon_core_checked(&mut self) -> Result<(), String> {
         self.tachyon_core.stop("tachyon-core").map(|_| ())
@@ -6216,6 +6590,7 @@ impl RuntimeStopControl for RuntimeProcesses {
     }
 }
 
+#[cfg(test)]
 trait StartAllTransaction {
     fn start_xray(&mut self) -> Result<(), String>;
     fn wait_xray_ready(&mut self) -> Result<(), String>;
@@ -6224,6 +6599,7 @@ trait StartAllTransaction {
     fn rollback(&mut self) -> Vec<String>;
 }
 
+#[cfg(test)]
 fn execute_start_all(transaction: &mut impl StartAllTransaction) -> Result<(), String> {
     if let Err(error) = transaction.start_xray() {
         return Err(start_all_rollback_error(error, transaction.rollback()));
@@ -6238,88 +6614,6 @@ fn execute_start_all(transaction: &mut impl StartAllTransaction) -> Result<(), S
         return Err(start_all_rollback_error(error, transaction.rollback()));
     }
     Ok(())
-}
-
-struct RuntimeStartAllTransaction<'a> {
-    processes: &'a mut RuntimeProcesses,
-    settings: &'a RuntimeSettings,
-    xray_binary_path: String,
-    xray_config_path: String,
-    tachyon_core_binary_path: String,
-    tachyon_core_config_path: String,
-}
-
-impl StartAllTransaction for RuntimeStartAllTransaction<'_> {
-    fn start_xray(&mut self) -> Result<(), String> {
-        self.processes
-            .xray
-            .start(
-                "xray",
-                ManagedBinaryKind::Xray,
-                self.xray_binary_path.clone(),
-                self.xray_config_path.clone(),
-                &["run", "-config"],
-            )
-            .map(|_| ())
-    }
-
-    fn wait_xray_ready(&mut self) -> Result<(), String> {
-        wait_for_readiness(
-            "Xray",
-            STARTUP_READINESS_TIMEOUT,
-            STARTUP_READINESS_INTERVAL,
-            |remaining| {
-                self.processes.xray.confirm_running("xray")?;
-                let binary_path = clean_path_input(&self.xray_binary_path);
-                verify_xray_readiness(
-                    self.settings,
-                    Path::new(&binary_path),
-                    remaining.min(STARTUP_PROBE_TIMEOUT),
-                )
-            },
-        )
-    }
-
-    fn start_tachyon_core(&mut self) -> Result<(), String> {
-        self.processes
-            .tachyon_core
-            .start(
-                "tachyon-core",
-                ManagedBinaryKind::TachyonCore,
-                self.tachyon_core_binary_path.clone(),
-                self.tachyon_core_config_path.clone(),
-                &["run", "--config"],
-            )
-            .map(|_| ())
-    }
-
-    fn wait_tachyon_core_ready(&mut self) -> Result<(), String> {
-        wait_for_readiness(
-            "Tachyon Core",
-            STARTUP_READINESS_TIMEOUT,
-            STARTUP_READINESS_INTERVAL,
-            |remaining| {
-                self.processes
-                    .tachyon_core
-                    .confirm_running("tachyon-core")?;
-                let health_url = core_health_url(self.settings)
-                    .map_err(|error| format!("Tachyon Core IPC readiness: {error}"))?;
-                let status = core_health_check_with_timeout(
-                    self.settings,
-                    remaining.min(STARTUP_PROBE_TIMEOUT),
-                )?;
-                if status == "ok" {
-                    Ok(())
-                } else {
-                    Err(format!("{health_url} returned status {status:?}"))
-                }
-            },
-        )
-    }
-
-    fn rollback(&mut self) -> Vec<String> {
-        self.processes.stop_all_checked()
-    }
 }
 
 fn wait_for_readiness(
@@ -6756,15 +7050,11 @@ fn epoch_seconds(time: SystemTime) -> Option<u64> {
 fn cleanup_runtime(handle: &tauri::AppHandle) -> Result<(), String> {
     let proxy_runtime = handle.state::<system_proxy::SystemProxyRuntime>();
     let runtime = handle.state::<RuntimeState>();
-    let mut processes = runtime
+    let mut coordinator = runtime
         .xray
         .lock()
         .map_err(|error| format!("lock runtime state during shutdown: {error}"))?;
-    let outcome = execute_runtime_shutdown(
-        &mut processes.processes,
-        || system_proxy::restore_if_pending(handle, &proxy_runtime),
-        thread::sleep,
-    );
+    let outcome = coordinator.stop_all(handle, &proxy_runtime);
     if outcome.errors.is_empty() {
         Ok(())
     } else {
@@ -8078,6 +8368,50 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
     fn process_logs_query_rejects_unknown_kind() {
         let processes = RuntimeProcesses::default();
         assert!(processes.logs("not-a-core").is_err());
+    }
+
+    #[test]
+    fn production_xray_commands_have_no_process_bypass() {
+        let source = include_str!("lib.rs");
+        let forbidden_deref = ["impl std::ops::Deref", " for XrayCoordinator"].concat();
+        assert!(!source.contains(&forbidden_deref));
+        for (name, expected) in [
+            ("start_xray", "coordinator.apply_xray"),
+            ("stop_xray", "coordinator.stop_xray"),
+            ("start_all", "coordinator.start_all"),
+            ("stop_all", "coordinator.stop_all"),
+        ] {
+            let body = tauri_command_body(source, name);
+            assert!(body.contains(expected), "{name} must call {expected}");
+            assert!(!body.contains(".processes.xray.start"));
+            assert!(!body.contains(".processes.xray.stop"));
+        }
+        let cleanup = rust_function_body(source, "fn cleanup_runtime(");
+        assert!(cleanup.contains("coordinator.stop_all"));
+        assert!(!cleanup.contains(".processes.xray.stop"));
+    }
+
+    fn tauri_command_body<'a>(source: &'a str, name: &str) -> &'a str {
+        rust_function_body(source, &format!("#[tauri::command]\nfn {name}("))
+    }
+
+    fn rust_function_body<'a>(source: &'a str, marker: &str) -> &'a str {
+        let start = source.find(marker).expect("function marker");
+        let open = source[start..].find('{').expect("function open") + start;
+        let mut depth = 0_i32;
+        for (offset, character) in source[open..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open..=open + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unterminated function for {marker}")
     }
 
     #[test]
@@ -10004,16 +10338,17 @@ pub fn run() {
         .manage(system_proxy::SystemProxyRuntime::default())
         .setup(|app| {
             let paths = draft_paths(app.handle())?;
-            let clock_path = PathBuf::from(paths.config_dir)
-                .join("xray-generations")
-                .join("clock.json");
+            let generation_dir = PathBuf::from(paths.config_dir).join("xray-generations");
+            let clock_path = generation_dir.join("clock.json");
             let runtime = app.state::<RuntimeState>();
             let mut coordinator = runtime
                 .xray
                 .lock()
                 .map_err(|error| format!("lock Xray coordinator during setup: {error}"))?;
-            coordinator.generations =
-                xray_generation::GenerationRuntime::with_persistent_clock(clock_path)?;
+            coordinator.generations = xray_generation::GenerationRuntime::with_persistent_storage(
+                clock_path,
+                generation_dir,
+            )?;
             drop(coordinator);
 
             let window_config = app
@@ -10094,16 +10429,16 @@ pub fn run() {
             if matches!(&event, tauri::RunEvent::Ready) {
                 let proxy_runtime = handle.state::<system_proxy::SystemProxyRuntime>();
                 let runtime = handle.state::<RuntimeState>();
-                let _coordinator = runtime
+                let mut coordinator = runtime
                     .xray
                     .lock()
                     .expect("lock Xray coordinator during startup recovery");
-                if let Err(error) = system_proxy::restore_if_pending(handle, &proxy_runtime) {
+                if let Err(error) = coordinator.set_proxy_binding(handle, &proxy_runtime, false) {
                     let sanitized = sanitize_xray_ui_error(error);
                     eprintln!("Tachyon Prism startup proxy recovery failed: {sanitized}");
                     let _ = handle.emit("runtime-cleanup-error", sanitized);
                 }
-                drop(_coordinator);
+                drop(coordinator);
                 for (_, window) in handle.webview_windows() {
                     let default_size = tauri::Size::Logical(tauri::LogicalSize {
                         width: 800.0,

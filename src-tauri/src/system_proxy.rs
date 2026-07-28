@@ -159,24 +159,6 @@ pub(crate) fn apply(
     )
 }
 
-pub(crate) fn restore(
-    app: &tauri::AppHandle,
-    runtime: &SystemProxyRuntime,
-    transaction_id: Option<&str>,
-) -> Result<SystemProxyTransactionResult, String> {
-    let _guard = runtime
-        .transaction
-        .lock()
-        .map_err(|error| format!("lock system proxy transaction: {error}"))?;
-    let settings = load_runtime_settings(app).or_else(|_| default_runtime_settings(app))?;
-    restore_transaction(
-        &PlatformProxyBackend,
-        &settings,
-        &journal_path(app)?,
-        transaction_id,
-    )
-}
-
 pub(crate) fn restore_if_pending(
     app: &tauri::AppHandle,
     runtime: &SystemProxyRuntime,
@@ -192,31 +174,6 @@ pub(crate) fn restore_if_pending(
     let settings = load_runtime_settings(app).or_else(|_| default_runtime_settings(app))?;
     restore_transaction(&PlatformProxyBackend, &settings, &path, None)?;
     Ok(true)
-}
-
-pub(crate) fn disable_legacy(
-    app: &tauri::AppHandle,
-    runtime: &SystemProxyRuntime,
-) -> Result<SystemProxyState, String> {
-    let _guard = runtime
-        .transaction
-        .lock()
-        .map_err(|error| format!("lock system proxy transaction: {error}"))?;
-    let backend = PlatformProxyBackend;
-    let path = journal_path(app)?;
-    if read_optional_journal(&path)?.is_some() {
-        let settings = load_runtime_settings(app).or_else(|_| default_runtime_settings(app))?;
-        return Ok(restore_transaction(&backend, &settings, &path, None)?.current);
-    }
-
-    let settings = load_runtime_settings(app)?;
-    let current = backend.query(&settings)?;
-    if !current.enabled || !current.matches_prism {
-        return Ok(current);
-    }
-    let result = apply_transaction(&backend, &settings, &path, false)?;
-    remove_journal(&path)?;
-    Ok(result.current)
 }
 
 fn apply_transaction<B: ProxyBackend>(
