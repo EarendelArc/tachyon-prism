@@ -13,7 +13,9 @@
         "test": "vitest run",
         "test:core-contract": "vitest run --config vitest.contract.config.ts --reporter=verbose",
         "test:ui": "vite build --configLoader runner --mode ui-smoke && python scripts/prism_ui_smoke.py",
-        "test:native-window": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prism_native_window_smoke.ps1",
+        "test:native-window": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prism_native_window_smoke.ps1 -Level L1",
+        "test:native-input": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prism_native_window_smoke.ps1 -Level L2",
+        "test:native-window:strict": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prism_native_window_smoke.ps1 -Level Strict",
         "verify:production-bundle": "python scripts/verify_production_bundle.py --dist dist"
     },
     "dependencies": {

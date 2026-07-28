@@ -863,6 +863,25 @@ def choose_node(cdp: CDP, node_name: str) -> str:
     )
 
 
+def choose_subscription(cdp: CDP, subscription_name: str) -> str:
+    return str(
+        cdp.evaluate(
+            f"""
+            new Promise((resolve) => {{
+              const card = Array.from(document.querySelectorAll('.subscription-card')).find((item) =>
+                item.querySelector('strong')?.textContent?.trim() === {json.dumps(subscription_name)}
+              );
+              const button = card?.querySelector('button');
+              if (!button) throw new Error('subscription card not found: ' + {json.dumps(subscription_name)});
+              button.click();
+              setTimeout(() => resolve(document.body.innerText), 400);
+            }})
+            """,
+            await_promise=True,
+        ),
+    )
+
+
 def switch_routing_mode(cdp: CDP, mode: str) -> str:
     return str(
         cdp.evaluate(
@@ -1551,28 +1570,83 @@ def assert_ui_smoke_vault_migration_and_reload(cdp: CDP) -> None:
           const vault = JSON.parse(localStorage.getItem(vaultKey) || 'null');
           const subscriptions = vault?.payload?.subscriptions;
           if (!subscriptions) return { prepared: false, reason: 'subscription section missing' };
+          const profiles = Array.isArray(subscriptions.subscriptions) ? subscriptions.subscriptions : [];
+          const active = profiles.find((profile) => profile.id === subscriptions.selectedSubscriptionId);
+          const selected = active?.nodes?.find((node) => node.id === subscriptions.selectedNodeId);
+          const nodeNames = profiles
+            .flatMap((profile) => profile.nodes ?? [])
+            .map((node) => node.name)
+            .sort();
           localStorage.removeItem(vaultKey);
           localStorage.setItem(legacyKey, JSON.stringify(subscriptions));
-          return { prepared: true };
+          return {
+            prepared: true,
+            nodeNames,
+            selectedNodeName: selected?.name ?? '',
+            selectedSubscriptionName: active?.name ?? ''
+          };
         })()
         """,
     )
-    if not prepared.get("prepared"):
+    if prepared != {
+        "prepared": True,
+        "nodeNames": [
+            "Clash Smoke SS",
+            "Clash Smoke VLESS",
+            "Smoke Hysteria",
+            "Smoke Trojan",
+            "Smoke URL Trojan",
+            "Smoke URL VLESS",
+            "Smoke VLESS",
+        ],
+        "selectedNodeName": "Clash Smoke SS",
+        "selectedSubscriptionName": "Clash Smoke",
+    }:
         raise AssertionError(f"UI smoke vault migration fixture was not prepared: {prepared}")
     cdp.call("Page.reload", {"ignoreCache": True})
-    text = wait_for_shell(cdp)
+    wait_for_shell(cdp)
     text = navigate_hash(cdp, "subscriptions")
-    assert_contains(text, "Smoke URL", "Clash Smoke SS")
+    assert_contains(text, "Smoke URL", "Clash Smoke", "Clash Smoke SS")
+    initial_selection = cdp.evaluate(
+        """
+        (() => ({
+          activeCard: document.querySelector('.subscription-card.active strong')?.textContent?.trim() ?? '',
+          activeNode: document.querySelector('.node-tile.active strong')?.textContent?.trim() ?? ''
+        }))()
+        """
+    )
+    if initial_selection != {"activeCard": "Clash Smoke", "activeNode": "Clash Smoke SS"}:
+        raise AssertionError(f"UI smoke migration did not restore the selected node: {initial_selection}")
+    text = choose_subscription(cdp, "Smoke URL")
+    assert_contains(text, "Smoke URL VLESS", "Smoke URL Trojan")
+    text = choose_subscription(cdp, "Clash Smoke")
+    assert_contains(text, "Clash Smoke SS", "Clash Smoke VLESS")
+    text = choose_node(cdp, "Clash Smoke SS")
+    assert_contains(text, "Clash Smoke SS")
+    cdp.call("Page.reload", {"ignoreCache": True})
+    wait_for_shell(cdp)
+    navigate_hash(cdp, "subscriptions")
     migrated = cdp.evaluate(
         """
         (() => {
           const raw = localStorage.getItem('tachyon.prism.uiSmokeVault.v1');
           const subscriptions = raw ? JSON.parse(raw)?.payload?.subscriptions : null;
+          const profiles = Array.isArray(subscriptions?.subscriptions) ? subscriptions.subscriptions : [];
+          const active = profiles.find((profile) => profile.id === subscriptions?.selectedSubscriptionId);
+          const selected = active?.nodes?.find((node) => node.id === subscriptions?.selectedNodeId);
+          const nodeNames = profiles.flatMap((profile) => profile.nodes ?? []).map((node) => node.name);
+          const activeCard = document.querySelector('.subscription-card.active strong')?.textContent?.trim() ?? '';
+          const activeNode = document.querySelector('.node-tile.active strong')?.textContent?.trim() ?? '';
           return {
             legacyRemoved: localStorage.getItem('tachyon.prism.subscription.v1') === null,
             vaultPresent: Boolean(raw),
             marker: localStorage.getItem('tachyon.prism.secureMigration.v1'),
-            hiddenNodePreserved: JSON.stringify(subscriptions).includes('Smoke URL VLESS')
+            urlNodePreserved: nodeNames.includes('Smoke URL VLESS'),
+            clashNodePreserved: nodeNames.includes('Clash Smoke SS'),
+            selectedSubscriptionName: active?.name ?? '',
+            selectedNodeName: selected?.name ?? '',
+            activeCard,
+            activeNode
           };
         })()
         """,
@@ -1581,7 +1655,12 @@ def assert_ui_smoke_vault_migration_and_reload(cdp: CDP) -> None:
         "legacyRemoved": True,
         "vaultPresent": True,
         "marker": "complete",
-        "hiddenNodePreserved": True,
+        "urlNodePreserved": True,
+        "clashNodePreserved": True,
+        "selectedSubscriptionName": "Clash Smoke",
+        "selectedNodeName": "Clash Smoke SS",
+        "activeCard": "Clash Smoke",
+        "activeNode": "Clash Smoke SS",
     }:
         raise AssertionError(f"UI smoke vault migration did not verify and delete legacy data: {migrated}")
 

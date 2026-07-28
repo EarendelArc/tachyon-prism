@@ -421,6 +421,7 @@ struct WindowBounds {
 mod native_titlebar {
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -431,8 +432,9 @@ mod native_titlebar {
         WM_SYSCOMMAND, WS_CAPTION, WS_THICKFRAME,
     };
 
-    const TITLEBAR_HEIGHT_PX: i32 = 42;
-    const WINDOW_CONTROL_WIDTH_PX: i32 = 156;
+    const TITLEBAR_HEIGHT_LOGICAL_PX: i32 = 42;
+    const WINDOW_CONTROL_WIDTH_LOGICAL_PX: i32 = 156;
+    const DEFAULT_DPI: u32 = 96;
     const TITLEBAR_SUBCLASS_ID: usize = 1;
 
     pub fn install(window: &tauri::WebviewWindow) -> Result<(), String> {
@@ -554,6 +556,11 @@ mod native_titlebar {
         (x | (y << 16)) as LPARAM
     }
 
+    fn logical_pixels(logical: i32, dpi: u32) -> i32 {
+        let dpi = dpi.max(DEFAULT_DPI);
+        ((logical as i64 * dpi as i64 + (DEFAULT_DPI / 2) as i64) / DEFAULT_DPI as i64) as i32
+    }
+
     fn remove_native_frame(hwnd: HWND) -> Result<(), String> {
         let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
         let borderless = borderless_style(style);
@@ -599,6 +606,13 @@ mod native_titlebar {
             assert_eq!(packed as usize & 0xffff, (-20i16) as u16 as usize);
             assert_eq!((packed as usize >> 16) & 0xffff, 320);
         }
+
+        #[test]
+        fn titlebar_hit_regions_scale_with_window_dpi() {
+            assert_eq!(logical_pixels(TITLEBAR_HEIGHT_LOGICAL_PX, 96), 42);
+            assert_eq!(logical_pixels(TITLEBAR_HEIGHT_LOGICAL_PX, 120), 53);
+            assert_eq!(logical_pixels(WINDOW_CONTROL_WIDTH_LOGICAL_PX, 144), 234);
+        }
     }
 
     unsafe fn is_draggable_titlebar_point(hwnd: HWND) -> bool {
@@ -617,10 +631,14 @@ mod native_titlebar {
             return false;
         }
 
+        let dpi = unsafe { GetDpiForWindow(hwnd) };
+        let titlebar_height = logical_pixels(TITLEBAR_HEIGHT_LOGICAL_PX, dpi);
+        let window_control_width = logical_pixels(WINDOW_CONTROL_WIDTH_LOGICAL_PX, dpi);
+
         point.y >= 0
-            && point.y < TITLEBAR_HEIGHT_PX
+            && point.y < titlebar_height
             && point.x >= 0
-            && point.x < rect.right.saturating_sub(WINDOW_CONTROL_WIDTH_PX)
+            && point.x < rect.right.saturating_sub(window_control_width)
     }
 }
 

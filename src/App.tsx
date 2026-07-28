@@ -6,6 +6,7 @@ import {
   saveAppearancePreferences,
   type AppearancePreferences,
 } from "./domain/appearance";
+import { requestWindowDrag } from "./domain/windowDrag";
 import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
@@ -3377,21 +3378,12 @@ export function App() {
     }
   }
 
-  function titlebarDragBlocked(target: EventTarget | null): boolean {
-    return target instanceof HTMLElement
-      ? Boolean(target.closest("button, input, select, textarea, a, [data-no-window-drag]"))
-      : false;
-  }
-
   function startWindowDrag(event: React.MouseEvent<HTMLElement>) {
-    if (event.button !== 0 || titlebarDragBlocked(event.target)) {
-      return;
-    }
-    event.preventDefault();
-    void getCurrentWindow()
-      .startDragging()
-      .catch(() => invokeDesktop<void>("window_start_dragging"))
-      .catch(() => undefined);
+    void requestWindowDrag(event, () =>
+      getCurrentWindow()
+        .startDragging()
+        .catch(() => invokeDesktop<void>("window_start_dragging")),
+    ).catch(() => undefined);
   }
 
   function changeLanguage(nextLanguage: Language) {
@@ -3720,6 +3712,7 @@ export function App() {
             data-window-action="pin"
             type="button"
             onClick={() => void handleWindowAction("pin")}
+            onMouseDown={(event) => event.stopPropagation()}
           >
             ⌖
           </button>
@@ -3728,6 +3721,7 @@ export function App() {
             data-window-action="minimize"
             type="button"
             onClick={() => void handleWindowAction("minimize")}
+            onMouseDown={(event) => event.stopPropagation()}
           >
             −
           </button>
@@ -3737,6 +3731,7 @@ export function App() {
             disabled
             title={ui.fixedWindow}
             type="button"
+            onMouseDown={(event) => event.stopPropagation()}
           >
             □
           </button>
@@ -3746,6 +3741,7 @@ export function App() {
             data-window-action="close"
             type="button"
             onClick={() => void handleWindowAction("close")}
+            onMouseDown={(event) => event.stopPropagation()}
           >
             ×
           </button>
