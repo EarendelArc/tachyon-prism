@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from prism_ui_smoke import CDP, free_port, wait_for_shell, wait_json
+from smoke_evidence import current_git_commit, sha256_file, write_json
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -719,8 +720,12 @@ def stop_process(process: subprocess.Popen[Any]) -> None:
         process.wait(timeout=5)
 
 
-def run_l1(executable: Path, artifacts: Path) -> dict[str, Any]:
+def run_l1(
+    executable: Path, artifacts: Path, evidence: dict[str, Any]
+) -> dict[str, Any]:
     artifacts.mkdir(parents=True, exist_ok=True)
+    (artifacts / "L1_RESULT.json").unlink(missing_ok=True)
+    (artifacts / "L1_ERROR.json").unlink(missing_ok=True)
     process: subprocess.Popen[Any] | None = None
     cdp: CDP | None = None
     closed_by_control = False
@@ -803,9 +808,9 @@ def run_l1(executable: Path, artifacts: Path) -> dict[str, Any]:
         wait_until(lambda: process.poll() is not None, "close control", timeout=6.0)
         closed_by_control = True
         result = {
+            **evidence,
             "status": "passed",
             "level": "L1",
-            "executable": str(executable),
             "pid": process.pid,
             "style": f"{style:#x}",
             "nativeCaptionAbsent": True,
@@ -823,9 +828,7 @@ def run_l1(executable: Path, artifacts: Path) -> dict[str, Any]:
             "logicalSizeTolerance": LOGICAL_TOLERANCE,
             "measurements": measurements,
         }
-        (artifacts / "L1_RESULT.json").write_text(
-            json.dumps(result, indent=2) + "\n", encoding="utf-8"
-        )
+        write_json(artifacts / "L1_RESULT.json", result)
         return result
     finally:
         if cdp is not None:
@@ -834,8 +837,12 @@ def run_l1(executable: Path, artifacts: Path) -> dict[str, Any]:
             stop_process(process)
 
 
-def run_l2(executable: Path, artifacts: Path) -> dict[str, Any]:
+def run_l2(
+    executable: Path, artifacts: Path, evidence: dict[str, Any]
+) -> dict[str, Any]:
     artifacts.mkdir(parents=True, exist_ok=True)
+    (artifacts / "L2_RESULT.json").unlink(missing_ok=True)
+    (artifacts / "L2_ERROR.json").unlink(missing_ok=True)
     process: subprocess.Popen[Any] | None = None
     cdp: CDP | None = None
     desktop_attachment = attach_to_interactive_desktop()
@@ -846,6 +853,7 @@ def run_l2(executable: Path, artifacts: Path) -> dict[str, Any]:
             drag_before, drag_after, drag_activation = real_drag(hwnd, cdp)
         except InputGateBlocked as error:
             result = {
+                **evidence,
                 "status": "blocked",
                 "level": "L2",
                 "reasonCode": "foreground-or-uipi-denied",
@@ -853,14 +861,12 @@ def run_l2(executable: Path, artifacts: Path) -> dict[str, Any]:
                 "desktopAttachment": desktop_attachment,
                 "titlebarDragWorks": False,
             }
-            (artifacts / "L2_RESULT.json").write_text(
-                json.dumps(result, indent=2) + "\n", encoding="utf-8"
-            )
+            write_json(artifacts / "L2_RESULT.json", result)
             return result
         result = {
+            **evidence,
             "status": "passed",
             "level": "L2",
-            "executable": str(executable),
             "pid": process.pid,
             "desktopAttachment": desktop_attachment,
             "titlebarDragWorks": True,
@@ -872,9 +878,7 @@ def run_l2(executable: Path, artifacts: Path) -> dict[str, Any]:
             },
             "dragActivation": drag_activation,
         }
-        (artifacts / "L2_RESULT.json").write_text(
-            json.dumps(result, indent=2) + "\n", encoding="utf-8"
-        )
+        write_json(artifacts / "L2_RESULT.json", result)
         return result
     finally:
         if cdp is not None:
@@ -883,17 +887,19 @@ def run_l2(executable: Path, artifacts: Path) -> dict[str, Any]:
             stop_process(process)
 
 
-def run_strict(executable: Path, artifacts: Path) -> dict[str, Any]:
-    l1 = run_l1(executable, artifacts / "l1")
-    l2 = run_l2(executable, artifacts / "l2")
-    result = {"status": l2["status"], "level": "strict", "l1": l1, "l2": l2}
-    (artifacts / "STRICT_RESULT.json").write_text(
-        json.dumps(result, indent=2) + "\n", encoding="utf-8"
-    )
-    if l2["status"] != "passed":
-        raise InputGateBlocked(
-            f"strict native gate requires L2 real input: {l2['reasonCode']}: {l2['reason']}"
-        )
+def run_strict(
+    executable: Path, artifacts: Path, evidence: dict[str, Any]
+) -> dict[str, Any]:
+    l1 = run_l1(executable, artifacts / "l1", evidence)
+    l2 = run_l2(executable, artifacts / "l2", evidence)
+    result = {
+        **evidence,
+        "status": l2["status"],
+        "level": "strict",
+        "l1": l1,
+        "l2": l2,
+    }
+    write_json(artifacts / "STRICT_RESULT.json", result)
     return result
 
 
@@ -904,33 +910,42 @@ def main() -> None:
     parser.add_argument("--level", choices=("l1", "l2", "strict"), default="l1")
     args = parser.parse_args()
     executable = Path(args.executable).resolve()
-    if not executable.is_file():
-        raise SystemExit(f"Prism executable not found: {executable}")
     artifacts = Path(args.out).resolve()
+    commit = current_git_commit(ROOT)
+    evidence = {
+        "gitCommit": commit,
+        "executable": str(executable),
+        "executableSha256": sha256_file(executable) if executable.is_file() else None,
+    }
+    result_name = f"{args.level.upper()}_RESULT.json"
+    error_name = f"{args.level.upper()}_ERROR.json"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    (artifacts / result_name).unlink(missing_ok=True)
+    (artifacts / error_name).unlink(missing_ok=True)
     try:
+        if not executable.is_file():
+            raise FileNotFoundError(f"Prism executable not found: {executable}")
         if args.level == "l1":
-            result = run_l1(executable, artifacts)
+            result = run_l1(executable, artifacts, evidence)
         elif args.level == "l2":
-            result = run_l2(executable, artifacts)
+            result = run_l2(executable, artifacts, evidence)
         else:
-            result = run_strict(executable, artifacts)
-    except BaseException as error:
-        artifacts.mkdir(parents=True, exist_ok=True)
-        (artifacts / f"{args.level.upper()}_ERROR.json").write_text(
-            json.dumps(
-                {
-                    "status": "failed",
-                    "level": args.level.upper(),
-                    "errorType": type(error).__name__,
-                    "error": str(error),
-                },
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
+            result = run_strict(executable, artifacts, evidence)
+    except Exception as error:
+        write_json(
+            artifacts / error_name,
+            {
+                **evidence,
+                "status": "failed",
+                "level": args.level.upper(),
+                "errorType": type(error).__name__,
+                "error": str(error),
+            },
         )
         raise
     print(json.dumps(result, separators=(",", ":")))
+    if result["status"] == "blocked":
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

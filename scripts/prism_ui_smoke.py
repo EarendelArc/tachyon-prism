@@ -17,6 +17,8 @@ from typing import Any
 from PIL import Image, ImageStat
 import websocket
 
+from smoke_evidence import current_git_commit, write_json
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
@@ -1665,7 +1667,7 @@ def assert_ui_smoke_vault_migration_and_reload(cdp: CDP) -> None:
         raise AssertionError(f"UI smoke vault migration did not verify and delete legacy data: {migrated}")
 
 
-def run(edge_path: Path, port: int, output_dir: Path) -> None:
+def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     server = start_server(port)
     debug_port = free_port()
@@ -1961,7 +1963,13 @@ def run(edge_path: Path, port: int, output_dir: Path) -> None:
 
         assert_ui_smoke_vault_migration_and_reload(cdp)
 
-        print(f"Prism UI smoke test passed. Artifacts: {output_dir}")
+        return {
+            "status": "passed",
+            "artifactDirectory": str(output_dir.resolve()),
+            "edgeExecutable": str(edge_path.resolve()),
+            "port": port,
+            "viewport": {"width": 800, "height": 540},
+        }
     finally:
         if cdp is not None:
             cdp.close()
@@ -1977,13 +1985,40 @@ def main() -> None:
     parser.add_argument("--edge", default=str(EDGE))
     parser.add_argument("--out", default=str(ARTIFACTS))
     parser.add_argument("--port", default=1422, type=int)
+    parser.add_argument("--run-label", default="ui-smoke")
     args = parser.parse_args()
 
-    edge_path = Path(args.edge)
-    if not edge_path.is_file():
-        raise SystemExit(f"Edge executable not found: {edge_path}")
-
-    run(edge_path, args.port, Path(args.out))
+    output_dir = Path(args.out).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    result_path = output_dir / "RESULT.json"
+    error_path = output_dir / "ERROR.json"
+    result_path.unlink(missing_ok=True)
+    error_path.unlink(missing_ok=True)
+    commit = current_git_commit(ROOT)
+    try:
+        edge_path = Path(args.edge).resolve()
+        if not edge_path.is_file():
+            raise FileNotFoundError(f"Edge executable not found: {edge_path}")
+        port = args.port or free_port()
+        result = {
+            "gitCommit": commit,
+            "runLabel": args.run_label,
+            **run(edge_path, port, output_dir),
+        }
+        write_json(result_path, result)
+    except Exception as error:
+        write_json(
+            error_path,
+            {
+                "status": "failed",
+                "gitCommit": commit,
+                "runLabel": args.run_label,
+                "errorType": type(error).__name__,
+                "error": str(error),
+            },
+        )
+        raise
+    print(f"Prism UI smoke test passed. Evidence: {result_path}")
 
 
 if __name__ == "__main__":

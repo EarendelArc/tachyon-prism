@@ -1,7 +1,8 @@
 param(
   [string]$Executable = "",
   [ValidateSet("L1", "L2", "Strict")]
-  [string]$Level = "L1"
+  [string]$Level = "L1",
+  [string]$Out = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,7 +17,16 @@ if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
 }
 
 $smoke = Join-Path $PSScriptRoot "prism_native_window_smoke.py"
-& python $smoke --executable $Executable --level $Level.ToLowerInvariant()
-if ($LASTEXITCODE -ne 0) {
-  throw "Prism native window smoke failed with exit code $LASTEXITCODE"
+$arguments = @($smoke, "--executable", $Executable, "--level", $Level.ToLowerInvariant())
+if (-not [string]::IsNullOrWhiteSpace($Out)) {
+  $arguments += @("--out", [System.IO.Path]::GetFullPath($Out))
+}
+& python @arguments
+$exitCode = $LASTEXITCODE
+if ($exitCode -eq 2) {
+  Write-Warning "Prism native $Level gate is blocked by foreground/UIPI policy; inspect its RESULT.json."
+  exit 2
+}
+if ($exitCode -ne 0) {
+  throw "Prism native window smoke failed with exit code $exitCode"
 }
