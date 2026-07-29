@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 const CLOCK_VERSION: u32 = 1;
 const RETAINED_GENERATIONS: usize = 3;
+const ORPHAN_JOURNAL_FILE: &str = "orphan-journal.json";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
@@ -80,6 +81,7 @@ pub struct RunnerHandle {
 #[derive(Debug)]
 pub struct ConfigLease {
     path: PathBuf,
+    orphan_journal: PathBuf,
 }
 
 impl ConfigLease {
@@ -90,7 +92,25 @@ impl ConfigLease {
 
 impl Drop for ConfigLease {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        release_config_lease(&self.path, &self.orphan_journal, remove_config_file);
+    }
+}
+
+fn remove_config_file(path: &Path) -> std::io::Result<()> {
+    fs::remove_file(path)
+}
+
+fn release_config_lease(
+    path: &Path,
+    orphan_journal: &Path,
+    remove: impl FnOnce(&Path) -> std::io::Result<()>,
+) {
+    match remove(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            let _ = write_atomic(orphan_journal, "{\"version\":1,\"pending\":true}\n");
+        }
     }
 }
 
@@ -124,6 +144,11 @@ pub enum ProxyReadback {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProxySnapshotHandle {
     pub token: String,
+}
+
+#[derive(Debug)]
+pub struct RollbackFailure {
+    pub runner: Option<RunnerHandle>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,7 +207,7 @@ pub trait ApplyBackend {
         &mut self,
         active: &GenerationView,
         previous_handle: &CandidateHandle,
-    ) -> Result<RunnerHandle, BackendFailure>;
+    ) -> Result<RunnerHandle, RollbackFailure>;
     fn bind_proxy(
         &mut self,
         generation_id: &GenerationId,
@@ -657,7 +682,17 @@ impl GenerationRuntime {
         let stop_result = backend.stop_candidate(&candidate);
         let exit_result = backend.confirm_exit(&candidate);
         if stop_result.is_err() || exit_result.is_err() {
-            return self.finish_degraded(plan, ApplyFailure::CandidateCleanupFailed);
+            self.require_current(&plan)?;
+            let mut active = plan.desired.clone();
+            active.pid = Some(candidate.pid());
+            active.readiness = ReadinessLevel::Degraded;
+            self.active = Some(active);
+            self.active_handle = Some(candidate);
+            self.proxy_generation = None;
+            self.in_flight_transaction = None;
+            self.phase = GenerationPhase::Degraded;
+            self.last_error_code = Some("candidateCleanupFailed".to_string());
+            return Err(ApplyFailure::CandidateCleanupFailed);
         }
         self.rollback_previous(plan, backend, failure, proxy_uncertain)
     }
@@ -695,7 +730,23 @@ impl GenerationRuntime {
                         self.last_error_code = Some(failure_code(failure).to_string());
                         Err(failure)
                     }
-                    Err(_) => self.finish_degraded(plan, ApplyFailure::RollbackFailed),
+                    Err(mut rollback_failure) => {
+                        if let Some(runner) = rollback_failure.runner.take() {
+                            let mut active = previous.clone();
+                            active.pid = Some(runner.pid);
+                            active.readiness = ReadinessLevel::Degraded;
+                            previous_handle.runner = runner;
+                            self.active = Some(active);
+                            self.active_handle = plan.previous_handle.take();
+                            self.proxy_generation = None;
+                            self.in_flight_transaction = None;
+                            self.phase = GenerationPhase::Degraded;
+                            self.last_error_code = Some("rollbackFailed".to_string());
+                            Err(ApplyFailure::RollbackFailed)
+                        } else {
+                            self.finish_degraded(plan, ApplyFailure::RollbackFailed)
+                        }
+                    }
                 }
             }
             _ => self.finish_degraded(plan, failure),
@@ -830,8 +881,12 @@ impl GenerationStore {
         let config = std::str::from_utf8(plan.config())
             .map_err(|_| "generation-config-not-utf8".to_string())?;
         write_atomic(&path, config).map_err(|_| "generation-config-write-failed".to_string())?;
-        self.cleanup_stale(&path)?;
-        Ok(ConfigLease { path })
+        let lease = ConfigLease {
+            path,
+            orphan_journal: self.root.join(ORPHAN_JOURNAL_FILE),
+        };
+        self.cleanup_stale(lease.path())?;
+        Ok(lease)
     }
 
     pub fn sweep_orphans(&self) -> Result<(), String> {
@@ -852,6 +907,12 @@ impl GenerationStore {
                 fs::remove_file(path)
                     .map_err(|_| "generation-orphan-cleanup-failed".to_string())?;
             }
+        }
+        let journal = self.root.join(ORPHAN_JOURNAL_FILE);
+        match fs::remove_file(journal) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("generation-orphan-journal-cleanup-failed".to_string()),
         }
         Ok(())
     }
@@ -931,6 +992,8 @@ mod tests {
         stop_candidate_fails: bool,
         confirm_exit_fails: bool,
         rollback_fails: bool,
+        rollback_readiness_fails: bool,
+        rollback_cleanup_fails: bool,
         next_pid: u32,
     }
 
@@ -950,6 +1013,8 @@ mod tests {
                 stop_candidate_fails: false,
                 confirm_exit_fails: false,
                 rollback_fails: false,
+                rollback_readiness_fails: false,
+                rollback_cleanup_fails: false,
                 next_pid: 4000,
             }
         }
@@ -1065,13 +1130,27 @@ mod tests {
             &mut self,
             active: &GenerationView,
             _previous_handle: &CandidateHandle,
-        ) -> Result<RunnerHandle, BackendFailure> {
+        ) -> Result<RunnerHandle, RollbackFailure> {
             self.events
                 .push(format!("rollback:{}", active.generation_id.as_str()));
             if self.rollback_fails {
-                Err(BackendFailure::Failed)
+                return Err(RollbackFailure { runner: None });
+            }
+            let runner = self.handle(format!("active:{}", active.generation_id.as_str()));
+            if !self.rollback_readiness_fails {
+                return Ok(runner);
+            }
+            self.events.push("rollbackReadinessFailed".to_string());
+            if self.rollback_cleanup_fails {
+                self.events.push("rollbackCleanupFailed".to_string());
+                Err(RollbackFailure {
+                    runner: Some(runner),
+                })
             } else {
-                Ok(self.handle(format!("active:{}", active.generation_id.as_str())))
+                self.live.retain(|token| token != &runner.runner_token);
+                self.events.push("rollbackStopped".to_string());
+                self.events.push("rollbackExitConfirmed".to_string());
+                Err(RollbackFailure { runner: None })
             }
         }
 
@@ -1261,12 +1340,92 @@ mod tests {
         );
         let status = runtime.status();
         assert_eq!(status.phase, GenerationPhase::Degraded);
-        assert!(status.active.is_none());
+        assert_eq!(
+            status.active.as_ref().map(|active| active.node_id.as_str()),
+            Some("B")
+        );
+        assert_eq!(
+            status
+                .active
+                .as_ref()
+                .map(|active| active.readiness.clone()),
+            Some(ReadinessLevel::Degraded)
+        );
         assert!(status.proxy_generation.is_none());
+        assert!(runtime.active_handle.is_some());
         assert!(backend
             .events
             .iter()
             .any(|event| event.starts_with("confirmExit:candidate:")));
+
+        backend.stop_candidate_fails = false;
+        backend.confirm_exit_fails = false;
+        runtime.stop_active(&mut backend).unwrap();
+        assert!(runtime.status().active.is_none());
+        assert!(runtime.active_handle.is_none());
+        assert!(backend.live.is_empty());
+    }
+
+    #[test]
+    fn rollback_readiness_failure_stops_and_confirms_old_process_before_forgetting_it() {
+        let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let mut backend = FakeBackend::default();
+        activate(&mut runtime, &mut backend, "A");
+        select(&mut runtime, "B", 2);
+        backend.listener_failure = Some(BackendFailure::Failed);
+        backend.rollback_readiness_fails = true;
+
+        assert_eq!(
+            runtime.execute_latest(&mut backend),
+            Err(ApplyFailure::RollbackFailed)
+        );
+        assert!(runtime.status().active.is_none());
+        assert!(runtime.active_handle.is_none());
+        assert!(runtime.status().proxy_generation.is_none());
+        assert!(backend.live.is_empty());
+        assert!(backend.events.contains(&"rollbackStopped".to_string()));
+        assert!(backend
+            .events
+            .contains(&"rollbackExitConfirmed".to_string()));
+    }
+
+    #[test]
+    fn failed_rollback_cleanup_retains_handle_until_stop_reclaims_it() {
+        let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let mut backend = FakeBackend::default();
+        activate(&mut runtime, &mut backend, "A");
+        select(&mut runtime, "B", 2);
+        backend.listener_failure = Some(BackendFailure::Failed);
+        backend.rollback_readiness_fails = true;
+        backend.rollback_cleanup_fails = true;
+
+        assert_eq!(
+            runtime.execute_latest(&mut backend),
+            Err(ApplyFailure::RollbackFailed)
+        );
+        let status = runtime.status();
+        assert_eq!(status.phase, GenerationPhase::Degraded);
+        assert_eq!(
+            status.active.as_ref().map(|active| active.node_id.as_str()),
+            Some("A")
+        );
+        assert_eq!(
+            status
+                .active
+                .as_ref()
+                .map(|active| active.readiness.clone()),
+            Some(ReadinessLevel::Degraded)
+        );
+        assert!(status.proxy_generation.is_none());
+        assert!(runtime.active_handle.is_some());
+        assert_eq!(backend.live.len(), 1);
+
+        backend.rollback_cleanup_fails = false;
+        runtime.stop_active(&mut backend).unwrap();
+        assert!(runtime.status().active.is_none());
+        assert!(runtime.active_handle.is_none());
+        assert!(backend.live.is_empty());
+        assert_eq!(fs::read_dir(&runtime.store.root).unwrap().count(), 0);
     }
 
     #[test]
@@ -1390,6 +1549,47 @@ mod tests {
         assert!(orphan.exists());
         runtime.store.sweep_orphans().unwrap();
         assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn failed_lease_delete_writes_private_path_free_journal_and_next_sweep_retries() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("generations");
+        fs::create_dir_all(&root).unwrap();
+        let generation = root.join("generation-secret-node.json");
+        let journal = root.join(ORPHAN_JOURNAL_FILE);
+        write_atomic(&generation, "{\"secret\":\"do-not-log\"}").unwrap();
+
+        release_config_lease(&generation, &journal, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected delete failure",
+            ))
+        });
+
+        assert!(generation.exists());
+        let marker = fs::read_to_string(&journal).unwrap();
+        assert_eq!(marker, "{\"version\":1,\"pending\":true}\n");
+        assert!(!marker.contains("secret-node"));
+        assert!(!marker.contains("do-not-log"));
+        #[cfg(windows)]
+        {
+            let audit = crate::windows_file_dacl_audit(&journal).unwrap();
+            assert!(audit.protected);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&journal).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        let store = GenerationStore::new(root);
+        store.sweep_orphans().unwrap();
+        assert!(!generation.exists());
+        assert!(!journal.exists());
     }
 
     #[test]

@@ -693,7 +693,6 @@ struct ProductionXrayBackend<'a> {
     app: &'a tauri::AppHandle,
     proxy: &'a system_proxy::SystemProxyRuntime,
     process: &'a mut ManagedProcess,
-    settings: &'a RuntimeSettings,
     binary: PathBuf,
     validation_target: PathBuf,
 }
@@ -830,10 +829,10 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
     fn confirm_listener_readiness(
         &mut self,
         _generation_id: &xray_generation::GenerationId,
-        _handle: &xray_generation::CandidateHandle,
-        _listeners: &[String],
+        handle: &xray_generation::CandidateHandle,
+        listeners: &[String],
     ) -> Result<(), xray_generation::BackendFailure> {
-        verify_xray_readiness(self.settings, &self.binary, STARTUP_PROBE_TIMEOUT)
+        verify_owned_managed_listeners(handle.pid(), listeners, STARTUP_READINESS_TIMEOUT)
             .map_err(|_| xray_generation::BackendFailure::Failed)
     }
 
@@ -841,7 +840,7 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
         &mut self,
         active: &xray_generation::GenerationView,
         previous_handle: &xray_generation::CandidateHandle,
-    ) -> Result<xray_generation::RunnerHandle, xray_generation::BackendFailure> {
+    ) -> Result<xray_generation::RunnerHandle, xray_generation::RollbackFailure> {
         let status = self
             .process
             .start(
@@ -851,14 +850,32 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
                 path_string(previous_handle.config_path()),
                 &["run", "-config"],
             )
-            .map_err(|_| xray_generation::BackendFailure::Failed)?;
-        let pid = status.pid.ok_or(xray_generation::BackendFailure::Failed)?;
-        verify_xray_readiness(self.settings, &self.binary, STARTUP_PROBE_TIMEOUT)
-            .map_err(|_| xray_generation::BackendFailure::Failed)?;
-        Ok(xray_generation::RunnerHandle {
+            .map_err(|_| xray_generation::RollbackFailure { runner: None })?;
+        let pid = status
+            .pid
+            .ok_or(xray_generation::RollbackFailure { runner: None })?;
+        let runner = xray_generation::RunnerHandle {
             pid,
             runner_token: active.generation_id.as_str().to_string(),
-        })
+        };
+        if verify_owned_managed_listeners(
+            pid,
+            &active.managed_listener_addresses,
+            STARTUP_READINESS_TIMEOUT,
+        )
+        .is_ok()
+        {
+            return Ok(runner);
+        }
+        let stopped = self.process.stop("xray").is_ok();
+        let exited = self.process.status().state != "running";
+        if stopped && exited {
+            Err(xray_generation::RollbackFailure { runner: None })
+        } else {
+            Err(xray_generation::RollbackFailure {
+                runner: Some(runner),
+            })
+        }
     }
 
     fn bind_proxy(
@@ -902,33 +919,24 @@ impl XrayCoordinator {
         let config_text = std::str::from_utf8(&config)
             .map_err(|_| "Xray desired config is not UTF-8".to_string())?;
         ensure_json_object("Xray desired config", config_text)?;
+        let config_value: Value = serde_json::from_str(config_text)
+            .map_err(|_| "Xray desired config is not valid JSON".to_string())?;
         use sha2::{Digest, Sha256};
         let settings = load_runtime_settings(app)?;
+        let managed_listeners = xray_managed_listener_addresses(&config_value, &settings)?;
         let digest = Sha256::digest(&config)
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let node_id = format!("managed-config-{}", &digest[..16]);
         self.generations
-            .select_desired(
-                &config,
-                node_id,
-                digest,
-                vec![
-                    format!(
-                        "{}:{}",
-                        settings.xray_socks_listen, settings.xray_socks_port
-                    ),
-                    format!("{}:{}", settings.xray_http_listen, settings.xray_http_port),
-                ],
-            )
+            .select_desired(&config, node_id, digest, managed_listeners)
             .map_err(generation_apply_error)?;
         let (processes, generations) = (&mut self.processes, &mut self.generations);
         let mut backend = ProductionXrayBackend {
             app,
             proxy,
             process: &mut processes.xray,
-            settings: &settings,
             binary,
             validation_target: source,
         };
@@ -970,7 +978,6 @@ impl XrayCoordinator {
             app,
             proxy,
             process: &mut processes.xray,
-            settings: &settings,
             binary,
             validation_target,
         };
@@ -1108,7 +1115,6 @@ impl XrayCoordinator {
             app,
             proxy,
             process: &mut processes.xray,
-            settings: &settings,
             binary,
             validation_target,
         };
@@ -6640,30 +6646,278 @@ fn wait_for_readiness(
     }
 }
 
-fn verify_xray_readiness(
+fn xray_managed_listener_addresses(
+    config: &Value,
     settings: &RuntimeSettings,
-    binary: &Path,
-    timeout: Duration,
-) -> Result<(), String> {
-    if settings.xray_stats_enabled {
-        let server = xray_stats_server(settings)?;
-        run_xray_stats_query_with_timeout(binary, &server, timeout)
-            .map(|_| ())
-            .map_err(|error| format!("Xray stats API {server} is not ready: {error}"))
-    } else {
-        probe_local_listener(
-            "Xray HTTP inbound",
-            &settings.xray_http_listen,
-            settings.xray_http_port,
-            timeout,
-        )?;
-        probe_local_listener(
-            "Xray SOCKS inbound",
+) -> Result<Vec<String>, String> {
+    let inbounds = config
+        .get("inbounds")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Xray managed config requires an inbounds array".to_string())?;
+    Ok(vec![
+        exact_xray_listener(
+            inbounds,
+            "socks",
             &settings.xray_socks_listen,
             settings.xray_socks_port,
-            timeout,
-        )
+        )?,
+        exact_xray_listener(
+            inbounds,
+            "http",
+            &settings.xray_http_listen,
+            settings.xray_http_port,
+        )?,
+    ])
+}
+
+fn exact_xray_listener(
+    inbounds: &[Value],
+    protocol: &str,
+    expected_host: &str,
+    expected_port: u16,
+) -> Result<String, String> {
+    let expected_ip = parse_managed_listener_ip(expected_host)?;
+    let matching = inbounds
+        .iter()
+        .filter(|inbound| inbound.get("protocol").and_then(Value::as_str) == Some(protocol))
+        .filter(|inbound| {
+            let actual_ip = inbound
+                .get("listen")
+                .and_then(Value::as_str)
+                .and_then(|host| parse_managed_listener_ip(host).ok());
+            let actual_port = inbound
+                .get("port")
+                .and_then(Value::as_u64)
+                .and_then(|port| u16::try_from(port).ok());
+            actual_ip == Some(expected_ip) && actual_port == Some(expected_port)
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "Xray {protocol} inbound does not uniquely match the managed listener settings"
+        ));
     }
+    Ok(SocketAddr::new(expected_ip, expected_port).to_string())
+}
+
+fn parse_managed_listener_ip(value: &str) -> Result<IpAddr, String> {
+    value
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+        .map_err(|_| "managed Xray listeners must use numeric IP addresses".to_string())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OwnedTcpListener {
+    address: SocketAddr,
+    pid: u32,
+}
+
+fn verify_owned_managed_listeners(
+    pid: u32,
+    listeners: &[String],
+    timeout: Duration,
+) -> Result<(), String> {
+    if listeners.is_empty() {
+        return Err("generation has no managed listeners".to_string());
+    }
+    let expected = listeners
+        .iter()
+        .map(|listener| {
+            listener
+                .parse::<SocketAddr>()
+                .map_err(|_| "generation contains an invalid managed listener".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let started = Instant::now();
+    loop {
+        let table = owned_tcp_listener_table(pid)?;
+        if listeners_owned_by_pid(&table, &expected, pid) {
+            return Ok(());
+        }
+        if started.elapsed() >= timeout {
+            return Err(
+                "managed listener ownership was not confirmed for candidate PID".to_string(),
+            );
+        }
+        thread::sleep(STARTUP_READINESS_INTERVAL.min(timeout.saturating_sub(started.elapsed())));
+    }
+}
+
+fn listeners_owned_by_pid(table: &[OwnedTcpListener], expected: &[SocketAddr], pid: u32) -> bool {
+    !expected.is_empty()
+        && expected.iter().all(|address| {
+            table
+                .iter()
+                .any(|listener| listener.address == *address && listener.pid == pid)
+        })
+}
+
+#[cfg(target_os = "windows")]
+fn owned_tcp_listener_table(_pid: u32) -> Result<Vec<OwnedTcpListener>, String> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID,
+        TCP_TABLE_OWNER_PID_LISTENER,
+    };
+    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+
+    unsafe fn read_table(family: u32) -> Result<Vec<u8>, String> {
+        let mut size = 0_u32;
+        let first = unsafe {
+            GetExtendedTcpTable(
+                std::ptr::null_mut(),
+                &mut size,
+                0,
+                family,
+                TCP_TABLE_OWNER_PID_LISTENER,
+                0,
+            )
+        };
+        if first != 122 || size == 0 {
+            return Err("query TCP listener table size failed".to_string());
+        }
+        let mut bytes = vec![0_u8; size as usize];
+        let result = unsafe {
+            GetExtendedTcpTable(
+                bytes.as_mut_ptr().cast(),
+                &mut size,
+                0,
+                family,
+                TCP_TABLE_OWNER_PID_LISTENER,
+                0,
+            )
+        };
+        if result == 0 {
+            Ok(bytes)
+        } else {
+            Err("read TCP listener table failed".to_string())
+        }
+    }
+
+    let mut listeners = Vec::new();
+    let ipv4 = unsafe { read_table(AF_INET as u32)? };
+    let count = unsafe { ipv4.as_ptr().cast::<u32>().read_unaligned() as usize };
+    let rows = unsafe {
+        ipv4.as_ptr()
+            .add(std::mem::size_of::<u32>())
+            .cast::<MIB_TCPROW_OWNER_PID>()
+    };
+    for index in 0..count {
+        let row = unsafe { rows.add(index).read_unaligned() };
+        let address = IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes()));
+        let port = u16::from_be((row.dwLocalPort & 0xffff) as u16);
+        listeners.push(OwnedTcpListener {
+            address: SocketAddr::new(address, port),
+            pid: row.dwOwningPid,
+        });
+    }
+
+    let ipv6 = unsafe { read_table(AF_INET6 as u32)? };
+    let count = unsafe { ipv6.as_ptr().cast::<u32>().read_unaligned() as usize };
+    let rows = unsafe {
+        ipv6.as_ptr()
+            .add(std::mem::size_of::<u32>())
+            .cast::<MIB_TCP6ROW_OWNER_PID>()
+    };
+    for index in 0..count {
+        let row = unsafe { rows.add(index).read_unaligned() };
+        let address = IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr));
+        let port = u16::from_be((row.dwLocalPort & 0xffff) as u16);
+        listeners.push(OwnedTcpListener {
+            address: SocketAddr::new(address, port),
+            pid: row.dwOwningPid,
+        });
+    }
+    Ok(listeners)
+}
+
+#[cfg(target_os = "linux")]
+fn owned_tcp_listener_table(pid: u32) -> Result<Vec<OwnedTcpListener>, String> {
+    use std::collections::HashSet;
+
+    let fd_dir = PathBuf::from(format!("/proc/{pid}/fd"));
+    let mut owned_inodes = HashSet::new();
+    for entry in fs::read_dir(fd_dir).map_err(|_| "read candidate socket descriptors failed")? {
+        let entry = entry.map_err(|_| "read candidate socket descriptor failed")?;
+        let target = fs::read_link(entry.path())
+            .map_err(|_| "read candidate socket descriptor target failed")?;
+        let target = target.to_string_lossy();
+        if let Some(inode) = target
+            .strip_prefix("socket:[")
+            .and_then(|value| value.strip_suffix(']'))
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            owned_inodes.insert(inode);
+        }
+    }
+    let mut listeners = parse_linux_tcp_listeners("/proc/net/tcp", false, pid, &owned_inodes)?;
+    listeners.extend(parse_linux_tcp_listeners(
+        "/proc/net/tcp6",
+        true,
+        pid,
+        &owned_inodes,
+    )?);
+    Ok(listeners)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_tcp_listeners(
+    path: &str,
+    ipv6: bool,
+    pid: u32,
+    owned_inodes: &std::collections::HashSet<u64>,
+) -> Result<Vec<OwnedTcpListener>, String> {
+    let raw = fs::read_to_string(path).map_err(|_| "read Linux TCP listener table failed")?;
+    let mut listeners = Vec::new();
+    for line in raw.lines().skip(1) {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 10 || fields[3] != "0A" {
+            continue;
+        }
+        let inode = fields[9]
+            .parse::<u64>()
+            .map_err(|_| "parse Linux TCP listener inode failed")?;
+        if !owned_inodes.contains(&inode) {
+            continue;
+        }
+        let (encoded_ip, encoded_port) = fields[1]
+            .split_once(':')
+            .ok_or_else(|| "parse Linux TCP listener endpoint failed".to_string())?;
+        let port = u16::from_str_radix(encoded_port, 16)
+            .map_err(|_| "parse Linux TCP listener port failed")?;
+        let address = if ipv6 {
+            let mut bytes = [0_u8; 16];
+            if encoded_ip.len() != 32 {
+                return Err("parse Linux IPv6 listener failed".to_string());
+            }
+            for (index, chunk) in encoded_ip.as_bytes().chunks_exact(8).enumerate() {
+                let chunk =
+                    std::str::from_utf8(chunk).map_err(|_| "parse Linux IPv6 listener failed")?;
+                bytes[index * 4..index * 4 + 4].copy_from_slice(
+                    &u32::from_str_radix(chunk, 16)
+                        .map_err(|_| "parse Linux IPv6 listener failed")?
+                        .to_le_bytes(),
+                );
+            }
+            IpAddr::V6(Ipv6Addr::from(bytes))
+        } else {
+            let encoded = u32::from_str_radix(encoded_ip, 16)
+                .map_err(|_| "parse Linux IPv4 listener failed")?;
+            IpAddr::V4(Ipv4Addr::from(encoded.to_le_bytes()))
+        };
+        listeners.push(OwnedTcpListener {
+            address: SocketAddr::new(address, port),
+            pid,
+        });
+    }
+    Ok(listeners)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn owned_tcp_listener_table(_pid: u32) -> Result<Vec<OwnedTcpListener>, String> {
+    Err("auditable TCP listener ownership is unsupported on this platform".to_string())
 }
 
 fn xray_stats_server(settings: &RuntimeSettings) -> Result<String, String> {
@@ -6672,32 +6926,6 @@ fn xray_stats_server(settings: &RuntimeSettings) -> Result<String, String> {
         "{}:{}",
         socket_host(&host),
         settings.xray_stats_port
-    ))
-}
-
-fn probe_local_listener(
-    label: &str,
-    host: &str,
-    port: u16,
-    timeout: Duration,
-) -> Result<(), String> {
-    let host = local_probe_host(host)?;
-    let endpoint = format!("{}:{port}", socket_host(&host));
-    let addresses = endpoint
-        .to_socket_addrs()
-        .map_err(|error| format!("resolve {label} {endpoint}: {error}"))?;
-    let mut last_error = "no addresses resolved".to_string();
-    for address in addresses {
-        match TcpStream::connect_timeout(&address, timeout) {
-            Ok(stream) => {
-                let _ = stream.shutdown(Shutdown::Both);
-                return Ok(());
-            }
-            Err(error) => last_error = error.to_string(),
-        }
-    }
-    Err(format!(
-        "{label} {endpoint} is not accepting connections: {last_error}"
     ))
 }
 
@@ -8327,6 +8555,92 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         assert_eq!(local_probe_host("[::]").unwrap(), "::1");
         assert!(local_probe_host("198.51.100.10").is_err());
         assert!(local_probe_host("example.com").is_err());
+    }
+
+    #[test]
+    fn managed_listener_addresses_come_from_exact_generation_endpoints() {
+        let settings = RuntimeSettings {
+            xray_socks_listen: "127.0.0.1".to_string(),
+            xray_socks_port: 10808,
+            xray_http_listen: "127.0.0.1".to_string(),
+            xray_http_port: 10809,
+            ..RuntimeSettings::default()
+        };
+        let config = serde_json::json!({
+            "inbounds": [
+                {"tag": "imported-socks", "protocol": "socks", "listen": "127.0.0.2", "port": 20808},
+                {"tag": "tachyon-socks", "protocol": "socks", "listen": "127.0.0.1", "port": 10808},
+                {"tag": "tachyon-http", "protocol": "http", "listen": "127.0.0.1", "port": 10809}
+            ]
+        });
+
+        assert_eq!(
+            xray_managed_listener_addresses(&config, &settings).unwrap(),
+            ["127.0.0.1:10808", "127.0.0.1:10809"]
+        );
+    }
+
+    #[test]
+    fn managed_listener_config_mismatch_and_duplicate_endpoint_fail_closed() {
+        let settings = RuntimeSettings {
+            xray_socks_listen: "127.0.0.1".to_string(),
+            xray_socks_port: 10808,
+            xray_http_listen: "127.0.0.1".to_string(),
+            xray_http_port: 10809,
+            ..RuntimeSettings::default()
+        };
+        let wrong_port = serde_json::json!({
+            "inbounds": [
+                {"protocol": "socks", "listen": "127.0.0.1", "port": 10999},
+                {"protocol": "http", "listen": "127.0.0.1", "port": 10809}
+            ]
+        });
+        assert!(xray_managed_listener_addresses(&wrong_port, &settings).is_err());
+
+        let duplicate = serde_json::json!({
+            "inbounds": [
+                {"protocol": "socks", "listen": "127.0.0.1", "port": 10808},
+                {"protocol": "socks", "listen": "127.0.0.1", "port": 10808},
+                {"protocol": "http", "listen": "127.0.0.1", "port": 10809}
+            ]
+        });
+        assert!(xray_managed_listener_addresses(&duplicate, &settings).is_err());
+    }
+
+    #[test]
+    fn listener_readiness_requires_every_endpoint_to_belong_to_candidate_pid() {
+        let expected = [
+            "127.0.0.1:10808".parse::<SocketAddr>().unwrap(),
+            "127.0.0.1:10809".parse::<SocketAddr>().unwrap(),
+        ];
+        let occupied_by_other_process = [
+            OwnedTcpListener {
+                address: expected[0],
+                pid: 9001,
+            },
+            OwnedTcpListener {
+                address: expected[1],
+                pid: 4200,
+            },
+        ];
+        assert!(!listeners_owned_by_pid(
+            &occupied_by_other_process,
+            &expected,
+            4200
+        ));
+
+        let candidate_owned = [
+            OwnedTcpListener {
+                address: expected[0],
+                pid: 4200,
+            },
+            OwnedTcpListener {
+                address: expected[1],
+                pid: 4200,
+            },
+        ];
+        assert!(listeners_owned_by_pid(&candidate_owned, &expected, 4200));
+        assert!(!listeners_owned_by_pid(&candidate_owned, &expected, 4201));
     }
 
     #[test]
