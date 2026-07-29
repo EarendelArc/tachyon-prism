@@ -923,6 +923,16 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
         handle: &xray_generation::CandidateHandle,
         active: &xray_generation::GenerationView,
     ) -> Result<xray_generation::ProxyReadback, xray_generation::BackendFailure> {
+        if active.generation_id != *generation_id
+            || active.readiness != xray_generation::ReadinessLevel::EgressReady
+            || !active.egress_verified
+        {
+            return Err(xray_generation::BackendFailure::Failed);
+        }
+        self.confirm_process_identity(generation_id, handle)?;
+        self.confirm_listener_readiness(generation_id, handle, &active.managed_listener_addresses)?;
+        probe_xray_egress(&active.egress_probe, PROXY_BIND_EGRESS_TIMEOUT)
+            .map_err(|_| xray_generation::BackendFailure::Failed)?;
         let settings = active_proxy_settings(self.app, active)
             .map_err(|_| xray_generation::BackendFailure::Failed)?;
         system_proxy::apply_with_settings(self.app, self.proxy, &settings, true)
@@ -990,7 +1000,7 @@ impl XrayCoordinator {
                 node_id,
                 digest,
                 managed_listeners,
-                egress_probe_settings(&settings),
+                egress_probe_settings(&settings)?,
             )
             .map_err(generation_apply_error)?;
         let (processes, generations) = (&mut self.processes, &mut self.generations);
@@ -1221,6 +1231,24 @@ impl XrayCoordinator {
         generations
             .revalidate_active(&mut backend)
             .map_err(generation_apply_error)
+    }
+
+    fn revalidate_xray_generation_with_proxy_recovery(
+        &mut self,
+        app: &tauri::AppHandle,
+        proxy: &system_proxy::SystemProxyRuntime,
+    ) -> Result<(), String> {
+        let generation_check_failed = self.revalidate_xray_generation(app, proxy).is_err();
+        let process_status = self.processes.status();
+        if generation_check_failed || should_restore_proxy_for_runtime(&process_status) {
+            self.set_proxy_binding(app, proxy, false).map_err(|error| {
+                format!(
+                    "restore system proxy for stopped Xray: {}",
+                    sanitize_xray_ui_error(error)
+                )
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -1553,20 +1581,8 @@ fn runtime_status(
         .xray
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
-    let generation_check_failed = coordinator
-        .revalidate_xray_generation(&app, &proxy_state)
-        .is_err();
+    coordinator.revalidate_xray_generation_with_proxy_recovery(&app, &proxy_state)?;
     let status = coordinator.processes.status();
-    if generation_check_failed || should_restore_proxy_for_runtime(&status) {
-        coordinator
-            .set_proxy_binding(&app, &proxy_state, false)
-            .map_err(|error| {
-                format!(
-                    "restore system proxy for stopped Xray: {}",
-                    sanitize_xray_ui_error(error)
-                )
-            })?;
-    }
     Ok(status)
 }
 
@@ -1580,7 +1596,7 @@ fn xray_generation_status(
         .xray
         .lock()
         .map_err(|err| format!("lock Xray generation state: {err}"))?;
-    let _ = runtime.revalidate_xray_generation(&app, &proxy_state);
+    runtime.revalidate_xray_generation_with_proxy_recovery(&app, &proxy_state)?;
     Ok(runtime.generations.status())
 }
 
@@ -2940,70 +2956,46 @@ fn probe_http_via_proxy(
     timeout: Duration,
 ) -> Result<ProxyProbeResult, String> {
     let target = parse_http_probe_url(target_url)?;
-    let proxy = format!("{}:{}", proxy_host.trim(), proxy_port);
-    let addrs: Vec<_> = proxy
-        .to_socket_addrs()
-        .map_err(|err| format!("resolve local proxy {proxy}: {err}"))?
-        .collect();
-    if addrs.is_empty() {
-        return Err(format!("resolve local proxy {proxy}: no addresses"));
-    }
-
+    let proxy_address = local_managed_listener_address(proxy_host, proxy_port, "HTTP")?;
+    let proxy = proxy_address.to_string();
     let started = Instant::now();
-    let mut last_error = String::new();
-    for addr in addrs {
-        match TcpStream::connect_timeout(&addr, timeout) {
-            Ok(mut stream) => {
-                stream
-                    .set_read_timeout(Some(timeout))
-                    .map_err(|err| format!("set proxy read timeout: {err}"))?;
-                stream
-                    .set_write_timeout(Some(timeout))
-                    .map_err(|err| format!("set proxy write timeout: {err}"))?;
-                let request = format!(
-                    "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Tachyon-Prism/0.1\r\nAccept: */*\r\nProxy-Connection: close\r\nConnection: close\r\n\r\n",
-                    target.absolute_url, target.host_header
-                );
-                stream
-                    .write_all(request.as_bytes())
-                    .map_err(|err| format!("write proxy probe request: {err}"))?;
-                let mut response = Vec::new();
-                stream
-                    .read_to_end(&mut response)
-                    .map_err(|err| format!("read proxy probe response: {err}"))?;
-                let text = String::from_utf8_lossy(&response);
-                let status_code = parse_http_status_code(&text);
-                let ok = status_code.is_some_and(|code| (200..400).contains(&code));
-                return Ok(ProxyProbeResult {
-                    ok,
-                    status_code,
-                    latency_ms: Some(started.elapsed().as_millis().min(u32::MAX as u128) as u32),
-                    via: proxy,
-                    target_url: target.absolute_url,
-                    error: if ok {
-                        None
-                    } else {
-                        Some(
-                            first_response_line(&text)
-                                .unwrap_or("empty proxy response")
-                                .to_string(),
-                        )
-                    },
-                });
-            }
-            Err(err) => {
-                last_error = err.to_string();
-            }
-        }
-    }
-
+    let mut stream = TcpStream::connect_timeout(&proxy_address, timeout)
+        .map_err(|err| format!("connect local HTTP proxy {proxy}: {err}"))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|err| format!("set proxy read timeout: {err}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|err| format!("set proxy write timeout: {err}"))?;
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Tachyon-Prism/0.1\r\nAccept: */*\r\nProxy-Connection: close\r\nConnection: close\r\n\r\n",
+        target.absolute_url, target.host_header
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|err| format!("write proxy probe request: {err}"))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|err| format!("read proxy probe response: {err}"))?;
+    let text = String::from_utf8_lossy(&response);
+    let status_code = parse_http_status_code(&text);
+    let ok = status_code.is_some_and(|code| (200..400).contains(&code));
     Ok(ProxyProbeResult {
-        ok: false,
-        status_code: None,
-        latency_ms: None,
+        ok,
+        status_code,
+        latency_ms: Some(started.elapsed().as_millis().min(u32::MAX as u128) as u32),
         via: proxy,
         target_url: target.absolute_url,
-        error: Some(last_error),
+        error: if ok {
+            None
+        } else {
+            Some(
+                first_response_line(&text)
+                    .unwrap_or("empty proxy response")
+                    .to_string(),
+            )
+        },
     })
 }
 
@@ -3060,81 +3052,56 @@ fn probe_http_via_socks5(
     timeout: Duration,
 ) -> Result<ProxyProbeResult, String> {
     let target = parse_http_probe_url(target_url)?;
-    let proxy = format!("socks5://{}:{}", proxy_host.trim(), proxy_port);
-    let addrs: Vec<_> = format!("{}:{}", proxy_host.trim(), proxy_port)
-        .to_socket_addrs()
-        .map_err(|err| format!("resolve local SOCKS proxy {proxy}: {err}"))?
-        .collect();
-    if addrs.is_empty() {
-        return Err(format!("resolve local SOCKS proxy {proxy}: no addresses"));
-    }
-
+    let proxy_address = local_managed_listener_address(proxy_host, proxy_port, "SOCKS5")?;
+    let proxy = format!("socks5://{proxy_address}");
     let started = Instant::now();
-    let mut last_error = String::new();
-    for addr in addrs {
-        match TcpStream::connect_timeout(&addr, timeout) {
-            Ok(mut stream) => {
-                stream
-                    .set_read_timeout(Some(timeout))
-                    .map_err(|err| format!("set SOCKS read timeout: {err}"))?;
-                stream
-                    .set_write_timeout(Some(timeout))
-                    .map_err(|err| format!("set SOCKS write timeout: {err}"))?;
-                if let Err(error) = socks5_connect(&mut stream, &target) {
-                    return Ok(ProxyProbeResult {
-                        ok: false,
-                        status_code: None,
-                        latency_ms: Some(started.elapsed().as_millis().min(u32::MAX as u128) as u32),
-                        via: proxy,
-                        target_url: target.absolute_url,
-                        error: Some(error),
-                    });
-                }
-
-                let request = format!(
-                    "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Tachyon-Prism/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
-                    target.path_and_query, target.host_header
-                );
-                stream
-                    .write_all(request.as_bytes())
-                    .map_err(|err| format!("write SOCKS probe request: {err}"))?;
-                let mut response = Vec::new();
-                stream
-                    .read_to_end(&mut response)
-                    .map_err(|err| format!("read SOCKS probe response: {err}"))?;
-                let text = String::from_utf8_lossy(&response);
-                let status_code = parse_http_status_code(&text);
-                let ok = status_code.is_some_and(|code| (200..400).contains(&code));
-                return Ok(ProxyProbeResult {
-                    ok,
-                    status_code,
-                    latency_ms: Some(started.elapsed().as_millis().min(u32::MAX as u128) as u32),
-                    via: proxy,
-                    target_url: target.absolute_url,
-                    error: if ok {
-                        None
-                    } else {
-                        Some(
-                            first_response_line(&text)
-                                .unwrap_or("empty SOCKS proxy response")
-                                .to_string(),
-                        )
-                    },
-                });
-            }
-            Err(err) => {
-                last_error = err.to_string();
-            }
-        }
+    let mut stream = TcpStream::connect_timeout(&proxy_address, timeout)
+        .map_err(|err| format!("connect local SOCKS5 proxy {proxy}: {err}"))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|err| format!("set SOCKS read timeout: {err}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|err| format!("set SOCKS write timeout: {err}"))?;
+    if let Err(error) = socks5_connect(&mut stream, &target) {
+        return Ok(ProxyProbeResult {
+            ok: false,
+            status_code: None,
+            latency_ms: Some(started.elapsed().as_millis().min(u32::MAX as u128) as u32),
+            via: proxy,
+            target_url: target.absolute_url,
+            error: Some(error),
+        });
     }
-
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Tachyon-Prism/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        target.path_and_query, target.host_header
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|err| format!("write SOCKS probe request: {err}"))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|err| format!("read SOCKS probe response: {err}"))?;
+    let text = String::from_utf8_lossy(&response);
+    let status_code = parse_http_status_code(&text);
+    let ok = status_code.is_some_and(|code| (200..400).contains(&code));
     Ok(ProxyProbeResult {
-        ok: false,
-        status_code: None,
-        latency_ms: None,
+        ok,
+        status_code,
+        latency_ms: Some(started.elapsed().as_millis().min(u32::MAX as u128) as u32),
         via: proxy,
         target_url: target.absolute_url,
-        error: Some(last_error),
+        error: if ok {
+            None
+        } else {
+            Some(
+                first_response_line(&text)
+                    .unwrap_or("empty SOCKS proxy response")
+                    .to_string(),
+            )
+        },
     })
 }
 
@@ -3353,21 +3320,27 @@ fn connect_local_proxy(
     deadline: Instant,
     kind: &str,
 ) -> Result<TcpStream, String> {
-    let host = local_probe_host(host)?;
-    let addrs = format!("{}:{port}", socket_host(&host))
-        .to_socket_addrs()
-        .map_err(|error| format!("resolve local {kind} proxy: {error}"))?
-        .collect::<Vec<_>>();
-    for address in addrs {
-        let timeout = remaining_probe_time(deadline)?;
-        if let Ok(stream) = TcpStream::connect_timeout(&address, timeout) {
-            let remaining = remaining_probe_time(deadline)?;
-            set_probe_timeouts(&stream, remaining)
-                .map_err(|error| format!("set {kind} probe timeout: {error}"))?;
-            return Ok(stream);
-        }
+    let address = local_managed_listener_address(host, port, kind)?;
+    let timeout = remaining_probe_time(deadline)?;
+    let stream = TcpStream::connect_timeout(&address, timeout)
+        .map_err(|error| format!("connect local {kind} proxy {address}: {error}"))?;
+    let remaining = remaining_probe_time(deadline)?;
+    set_probe_timeouts(&stream, remaining)
+        .map_err(|error| format!("set {kind} probe timeout: {error}"))?;
+    Ok(stream)
+}
+
+fn local_managed_listener_address(host: &str, port: u16, kind: &str) -> Result<SocketAddr, String> {
+    let ip = host
+        .trim()
+        .parse::<IpAddr>()
+        .map_err(|_| format!("local {kind} proxy must use a numeric loopback address"))?;
+    if !ip.is_loopback() {
+        return Err(format!(
+            "local {kind} proxy must use a numeric loopback address"
+        ));
     }
-    Err(format!("connect local {kind} proxy failed"))
+    Ok(SocketAddr::new(ip, port))
 }
 
 fn probe_https_stream(
@@ -4784,16 +4757,20 @@ fn normalize_egress_probe_nonce(value: String) -> Result<String, String> {
     Ok(value)
 }
 
-fn egress_probe_settings(settings: &RuntimeSettings) -> xray_generation::EgressProbeSettings {
-    xray_generation::EgressProbeSettings {
+fn egress_probe_settings(
+    settings: &RuntimeSettings,
+) -> Result<xray_generation::EgressProbeSettings, String> {
+    let http_listen = parse_managed_listener_ip(&settings.xray_http_listen)?.to_string();
+    let socks_listen = parse_managed_listener_ip(&settings.xray_socks_listen)?.to_string();
+    Ok(xray_generation::EgressProbeSettings {
         url: settings.xray_egress_probe_url.clone(),
         expected_status: settings.xray_egress_probe_status,
         expected_nonce: settings.xray_egress_probe_nonce.clone(),
-        http_listen: settings.xray_http_listen.clone(),
+        http_listen,
         http_port: settings.xray_http_port,
-        socks_listen: settings.xray_socks_listen.clone(),
+        socks_listen,
         socks_port: settings.xray_socks_port,
-    }
+    })
 }
 
 fn active_proxy_settings(
@@ -7275,12 +7252,16 @@ fn exact_xray_listener(
 }
 
 fn parse_managed_listener_ip(value: &str) -> Result<IpAddr, String> {
-    value
+    let ip = value
         .trim()
         .trim_start_matches('[')
         .trim_end_matches(']')
         .parse::<IpAddr>()
-        .map_err(|_| "managed Xray listeners must use numeric IP addresses".to_string())
+        .map_err(|_| "managed Xray listeners must use numeric IP addresses".to_string())?;
+    if !ip.is_loopback() {
+        return Err("managed Xray listeners must use numeric loopback IP addresses".to_string());
+    }
+    Ok(ip)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9440,6 +9421,30 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
     }
 
     #[test]
+    fn managed_listener_generation_requires_numeric_loopback_addresses() {
+        let hostname = RuntimeSettings {
+            xray_socks_listen: "localhost".to_string(),
+            ..RuntimeSettings::default()
+        };
+        assert!(egress_probe_settings(&hostname).is_err());
+
+        let non_loopback = RuntimeSettings {
+            xray_http_listen: "0.0.0.0".to_string(),
+            ..RuntimeSettings::default()
+        };
+        assert!(egress_probe_settings(&non_loopback).is_err());
+
+        let numeric = egress_probe_settings(&RuntimeSettings {
+            xray_http_listen: "127.0.0.1".to_string(),
+            xray_socks_listen: "127.0.0.1".to_string(),
+            ..RuntimeSettings::default()
+        })
+        .unwrap();
+        assert_eq!(numeric.http_listen, "127.0.0.1");
+        assert_eq!(numeric.socks_listen, "127.0.0.1");
+    }
+
+    #[test]
     fn listener_readiness_requires_every_endpoint_to_belong_to_candidate_pid() {
         let expected = [
             "127.0.0.1:10808".parse::<SocketAddr>().unwrap(),
@@ -10447,7 +10452,7 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         };
 
         probe_xray_egress_with_roots(
-            &egress_probe_settings(&settings),
+            &egress_probe_settings(&settings).unwrap(),
             Duration::from_secs(3),
             roots,
         )

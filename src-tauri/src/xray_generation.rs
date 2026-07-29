@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -726,6 +727,7 @@ impl GenerationRuntime {
         if egress_verified {
             self.set_desired_readiness(&plan, ReadinessLevel::EgressReady)?;
         }
+        self.require_current(&plan)?;
         let proxy_binding = if egress_verified && plan.proxy_snapshot.is_some() {
             match backend.bind_proxy(plan.generation_id(), &candidate, &plan.desired) {
                 Ok(ProxyReadback::Bound(binding))
@@ -1104,21 +1106,27 @@ struct InstanceLeaseMetadata {
 
 #[derive(Debug)]
 struct InstanceLease {
-    path: PathBuf,
+    _file: File,
     creation_token: String,
 }
 
-impl Drop for InstanceLease {
-    fn drop(&mut self) {
-        let Ok(raw) = fs::read_to_string(&self.path) else {
-            return;
-        };
-        let Ok(metadata) = serde_json::from_str::<InstanceLeaseMetadata>(&raw) else {
-            return;
-        };
-        if metadata.creation_token == self.creation_token {
-            let _ = fs::remove_file(&self.path);
+impl InstanceLease {
+    fn verify(&self) -> Result<(), String> {
+        let mut file = self
+            ._file
+            .try_clone()
+            .map_err(|_| "generation-instance-lease-read-failed".to_string())?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| "generation-instance-lease-read-failed".to_string())?;
+        let mut raw = String::new();
+        file.read_to_string(&mut raw)
+            .map_err(|_| "generation-instance-lease-read-failed".to_string())?;
+        let metadata: InstanceLeaseMetadata = serde_json::from_str(&raw)
+            .map_err(|_| "generation-instance-lease-invalid".to_string())?;
+        if metadata.creation_token != self.creation_token {
+            return Err("generation-instance-lease-token-mismatch".to_string());
         }
+        Ok(())
     }
 }
 
@@ -1127,84 +1135,112 @@ fn acquire_instance_lease(root: &Path) -> Option<InstanceLease> {
         return None;
     }
     let path = root.join(INSTANCE_LEASE_FILE);
-    for attempt in 0..2 {
-        let creation_token = random_epoch();
-        let metadata = InstanceLeaseMetadata {
-            version: 1,
-            boot_epoch: random_epoch(),
-            pid: std::process::id(),
-            creation_token: creation_token.clone(),
-        };
-        let data = serde_json::to_vec(&metadata).ok()?;
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                if file.write_all(&data).is_err() {
-                    let _ = fs::remove_file(&path);
-                    return None;
-                }
-                return Some(InstanceLease {
-                    path,
-                    creation_token,
-                });
-            }
-            Err(_) if attempt == 0 => {
-                let Ok(raw) = fs::read_to_string(&path) else {
-                    return None;
-                };
-                let Ok(existing) = serde_json::from_str::<InstanceLeaseMetadata>(&raw) else {
-                    return None;
-                };
-                if owner_pid_alive(existing.pid) {
-                    return None;
-                }
-                if fs::remove_file(&path).is_err() {
-                    return None;
-                }
-            }
-            Err(_) => return None,
-        }
+    let mut file = open_locked_instance_file(&path).ok()?;
+    let creation_token = random_epoch();
+    let metadata = InstanceLeaseMetadata {
+        version: 1,
+        boot_epoch: random_epoch(),
+        pid: std::process::id(),
+        creation_token: creation_token.clone(),
+    };
+    let data = serde_json::to_vec(&metadata).ok()?;
+    write_instance_lease_metadata(&mut file, &data).ok()?;
+    Some(InstanceLease {
+        _file: file,
+        creation_token,
+    })
+}
+
+fn write_instance_lease_metadata(file: &mut File, data: &[u8]) -> std::io::Result<()> {
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(data)?;
+    file.sync_data()
+}
+
+#[cfg(unix)]
+fn open_locked_instance_file(path: &Path) -> std::io::Result<File> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .open(path)?;
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    unsafe extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
     }
-    None
+    if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(file)
 }
 
 #[cfg(target_os = "windows")]
-fn owner_pid_alive(pid: u32) -> bool {
-    use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+fn open_locked_instance_file(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, LockFileEx, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        FILE_SHARE_NONE, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OPEN_ALWAYS,
     };
-    if pid == std::process::id() {
-        return true;
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            FILE_SHARE_NONE,
+            std::ptr::null(),
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
     }
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle.is_null() {
-            return false;
+    let mut overlapped = OVERLAPPED {
+        Internal: 0,
+        InternalHigh: 0,
+        Anonymous: unsafe { std::mem::zeroed() },
+        hEvent: std::ptr::null_mut(),
+    };
+    let locked = unsafe {
+        LockFileEx(
+            handle,
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            1,
+            0,
+            &mut overlapped,
+        ) != 0
+    };
+    if !locked {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(handle);
         }
-        let mut exit_code = 0;
-        let alive = GetExitCodeProcess(handle, &mut exit_code) != 0 && exit_code == 259;
-        let _ = windows_sys::Win32::Foundation::CloseHandle(handle);
-        alive
+        return Err(std::io::Error::last_os_error());
     }
+    Ok(unsafe { File::from_raw_handle(handle) })
 }
 
-#[cfg(target_os = "linux")]
-fn owner_pid_alive(pid: u32) -> bool {
-    Path::new("/proc").join(pid.to_string()).is_dir()
-}
-
-#[cfg(target_os = "macos")]
-fn owner_pid_alive(pid: u32) -> bool {
-    use libproc::libproc::bsd_info::BSDInfo;
-    libproc::libproc::proc_pid::pidinfo::<BSDInfo>(pid as i32, 0).is_ok()
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-fn owner_pid_alive(pid: u32) -> bool {
-    pid == std::process::id()
+#[cfg(not(any(unix, target_os = "windows")))]
+fn open_locked_instance_file(_path: &Path) -> std::io::Result<File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "OS instance locking is unsupported on this platform",
+    ))
 }
 
 impl GenerationStore {
@@ -1220,9 +1256,7 @@ impl GenerationStore {
     }
 
     pub fn stage(&self, plan: &ApplyPlan) -> Result<ConfigLease, String> {
-        if self.instance_lease.is_none() {
-            return Err("generation-instance-lease-unavailable".to_string());
-        }
+        self.verify_instance_lease()?;
         fs::create_dir_all(&self.root).map_err(|_| "generation-dir-create-failed".to_string())?;
         let path = self
             .root
@@ -1246,9 +1280,7 @@ impl GenerationStore {
     }
 
     pub fn sweep_orphans(&self) -> Result<(), String> {
-        if self.instance_lease.is_none() {
-            return Err("generation-instance-lease-unavailable".to_string());
-        }
+        self.verify_instance_lease()?;
         if !self.root.exists() {
             return Ok(());
         }
@@ -1287,6 +1319,13 @@ impl GenerationStore {
         self.recovery_failure
             .store(false, std::sync::atomic::Ordering::Release);
         Ok(())
+    }
+
+    fn verify_instance_lease(&self) -> Result<(), String> {
+        self.instance_lease
+            .as_ref()
+            .ok_or_else(|| "generation-instance-lease-unavailable".to_string())?
+            .verify()
     }
 
     fn cleanup_stale(&self, current: &Path) -> Result<(), String> {
@@ -1356,6 +1395,7 @@ fn failure_code(failure: ApplyFailure) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     struct FakeBackend {
         events: Vec<String>,
@@ -1590,6 +1630,83 @@ mod tests {
                     .is_some_and(|name| name.starts_with("generation-") && name.ends_with(".json"))
             })
             .collect()
+    }
+
+    #[test]
+    fn instance_lease_child_helper() {
+        let Ok(root) = std::env::var("TACHYON_INSTANCE_LEASE_CHILD_ROOT") else {
+            return;
+        };
+        let result = std::env::var("TACHYON_INSTANCE_LEASE_CHILD_RESULT").unwrap();
+        let store = GenerationStore::new(PathBuf::from(root));
+        fs::write(
+            result,
+            if store.instance_lease.is_some() {
+                "owner"
+            } else {
+                "blocked"
+            },
+        )
+        .unwrap();
+    }
+
+    fn run_instance_lease_child(root: &Path, result: &Path) -> std::process::Output {
+        Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("xray_generation::tests::instance_lease_child_helper")
+            .arg("--nocapture")
+            .env("TACHYON_INSTANCE_LEASE_CHILD_ROOT", root)
+            .env("TACHYON_INSTANCE_LEASE_CHILD_RESULT", result)
+            .output()
+            .unwrap()
+    }
+
+    #[test]
+    fn instance_lease_is_exclusive_across_processes_and_released_by_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let first = GenerationStore::new(root.path().to_path_buf());
+        assert!(first.instance_lease.is_some());
+
+        let blocked_result = root.path().join("blocked.txt");
+        let blocked = run_instance_lease_child(root.path(), &blocked_result);
+        assert!(blocked.status.success(), "child failed: {blocked:?}");
+        assert_eq!(fs::read_to_string(blocked_result).unwrap(), "blocked");
+
+        drop(first);
+        let owner_result = root.path().join("owner.txt");
+        let owner = run_instance_lease_child(root.path(), &owner_result);
+        assert!(owner.status.success(), "child failed: {owner:?}");
+        assert_eq!(fs::read_to_string(owner_result).unwrap(), "owner");
+    }
+
+    #[test]
+    fn instance_lease_token_is_verified_before_stage_and_sweep() {
+        let root = tempfile::tempdir().unwrap();
+        let store = GenerationStore::new(root.path().to_path_buf());
+        assert!(store.instance_lease.is_some());
+        let mut tampered = store
+            .instance_lease
+            .as_ref()
+            .unwrap()
+            ._file
+            .try_clone()
+            .unwrap();
+        write_instance_lease_metadata(
+            &mut tampered,
+            br#"{"version":1,"bootEpoch":"tampered","pid":1,"creationToken":"tampered"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            store.sweep_orphans().unwrap_err(),
+            "generation-instance-lease-token-mismatch"
+        );
+        let mut runtime = GenerationRuntime::default();
+        select(&mut runtime, "A", 1);
+        let plan = runtime.begin_apply().unwrap();
+        assert_eq!(
+            store.stage(&plan).unwrap_err(),
+            "generation-instance-lease-token-mismatch"
+        );
     }
 
     fn select(runtime: &mut GenerationRuntime, node: &str, revision: u64) -> GenerationId {
