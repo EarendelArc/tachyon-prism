@@ -444,9 +444,11 @@ impl ProxyBackend for PlatformProxyBackend {
     }
 
     fn query(&self, settings: &RuntimeSettings) -> Result<SystemProxyState, String> {
+        #[cfg(not(test))]
+        let PlatformProxySnapshot::Windows(snapshot) = self.snapshot()?;
+        #[cfg(test)]
         let snapshot = match self.snapshot()? {
             PlatformProxySnapshot::Windows(snapshot) => snapshot,
-            #[cfg(test)]
             PlatformProxySnapshot::Test(_) => {
                 return Err("unexpected system proxy snapshot platform".to_string())
             }
@@ -472,9 +474,11 @@ impl ProxyBackend for PlatformProxyBackend {
     }
 
     fn restore(&self, snapshot: &PlatformProxySnapshot) -> Result<(), String> {
+        #[cfg(not(test))]
+        let PlatformProxySnapshot::Windows(snapshot) = snapshot;
+        #[cfg(test)]
         let snapshot = match snapshot {
             PlatformProxySnapshot::Windows(snapshot) => snapshot,
-            #[cfg(test)]
             PlatformProxySnapshot::Test(_) => {
                 return Err("cannot restore a non-Windows proxy snapshot on Windows".to_string())
             }
@@ -614,9 +618,11 @@ fn restore_windows_registry_dword(name: &str, value: Option<u32>) -> Result<(), 
 
 #[cfg(target_os = "windows")]
 fn delete_windows_registry_value_if_present(name: &str) -> Result<(), String> {
+    #[cfg(not(test))]
+    let PlatformProxySnapshot::Windows(snapshot) = PlatformProxyBackend.snapshot()?;
+    #[cfg(test)]
     let snapshot = match PlatformProxyBackend.snapshot()? {
         PlatformProxySnapshot::Windows(snapshot) => snapshot,
-        #[cfg(test)]
         PlatformProxySnapshot::Test(_) => {
             return Err("unexpected system proxy snapshot platform".to_string())
         }

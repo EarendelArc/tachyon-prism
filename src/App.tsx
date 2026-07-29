@@ -294,6 +294,9 @@ const emptyRuntimeInputs = {
   xrayStatsListen: "127.0.0.1",
   xrayStatsPort: 10085,
   xrayReleaseChannel: "stable" as ReleaseChannel,
+  xrayEgressProbeUrl: "",
+  xrayEgressProbeStatus: 204,
+  xrayEgressProbeNonce: "",
 };
 
 const emptyBinarySourceInputs = {
@@ -5622,6 +5625,47 @@ function SettingsView({
                       setRuntimeInputs((current) => ({ ...current, systemProxyBypass: event.target.value }))
                     }
                   />
+                </label>
+                <label className="wide-field">
+                  <span>Egress Ready HTTPS URL</span>
+                  <input
+                    type="url"
+                    value={runtimeInputs.xrayEgressProbeUrl}
+                    onChange={(event) =>
+                      setRuntimeInputs((current) => ({
+                        ...current,
+                        xrayEgressProbeUrl: event.target.value,
+                      }))
+                    }
+                  />
+                  <small className="field-hint">HTTPS only; query, fragment and URL credentials are rejected.</small>
+                </label>
+                <label>
+                  <span>Egress Status / Nonce</span>
+                  <div className="input-pair">
+                    <input
+                      min={100}
+                      max={599}
+                      type="number"
+                      value={runtimeInputs.xrayEgressProbeStatus}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({
+                          ...current,
+                          xrayEgressProbeStatus: Number(event.target.value),
+                        }))
+                      }
+                    />
+                    <input
+                      placeholder="optional response nonce"
+                      value={runtimeInputs.xrayEgressProbeNonce}
+                      onChange={(event) =>
+                        setRuntimeInputs((current) => ({
+                          ...current,
+                          xrayEgressProbeNonce: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
                 </label>
                 <label>
                   <span>Tachyon IPC</span>

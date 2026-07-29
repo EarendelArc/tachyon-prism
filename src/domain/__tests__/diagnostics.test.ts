@@ -41,6 +41,9 @@ const runtimeSettings: RuntimeSettings = {
   xrayStatsEnabled: true,
   xrayStatsListen: "127.0.0.1",
   xrayStatsPort: 10085,
+  xrayEgressProbeUrl: "https://example.test/health",
+  xrayEgressProbeStatus: 204,
+  xrayEgressProbeNonce: "",
 };
 
 const secretUuid = "123e4567-e89b-12d3-a456-426614174000";

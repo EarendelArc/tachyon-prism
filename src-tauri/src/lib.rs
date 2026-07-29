@@ -1,4 +1,6 @@
 use regex::Regex;
+use rustls::pki_types::ServerName;
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
+use ureq::http::{Method, Request, Uri};
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -111,6 +114,12 @@ struct RuntimeSettings {
     xray_stats_port: u16,
     #[serde(default)]
     xray_release_channel: String,
+    #[serde(default)]
+    xray_egress_probe_url: String,
+    #[serde(default = "default_egress_probe_status")]
+    xray_egress_probe_status: u16,
+    #[serde(default)]
+    xray_egress_probe_nonce: String,
 }
 
 #[derive(Serialize)]
@@ -354,6 +363,7 @@ const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(3);
 const STARTUP_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_READINESS_INTERVAL: Duration = Duration::from_millis(100);
 const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+const EGRESS_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const PROXY_RESTORE_ATTEMPTS: usize = 3;
 const PROXY_RESTORE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const TELEMETRY_EVENT_LIMIT: usize = 64;
@@ -427,6 +437,7 @@ struct WindowBounds {
 }
 
 #[cfg(windows)]
+#[allow(clippy::items_after_test_module)]
 mod native_titlebar {
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
@@ -545,7 +556,7 @@ mod native_titlebar {
                     SendMessageW(
                         parent,
                         WM_SYSCOMMAND,
-                        (SC_MOVE | HTCAPTION as u32) as WPARAM,
+                        (SC_MOVE | HTCAPTION) as WPARAM,
                         screen_point_lparam(point),
                     );
                 }
@@ -687,6 +698,16 @@ struct ManagedProcess {
     stderr_reader: Option<thread::JoinHandle<()>>,
     stop_method: Option<String>,
     sanitize_diagnostics: bool,
+    #[cfg(test)]
+    stop_fault: Option<StopFault>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StopFault {
+    TryWait,
+    Kill,
+    Wait,
 }
 
 struct ProductionXrayBackend<'a> {
@@ -836,6 +857,23 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
             .map_err(|_| xray_generation::BackendFailure::Failed)
     }
 
+    fn confirm_egress_ready(
+        &mut self,
+        generation_id: &xray_generation::GenerationId,
+        handle: &xray_generation::CandidateHandle,
+        listeners: &[String],
+        probe: &xray_generation::EgressProbeSettings,
+    ) -> Result<bool, xray_generation::BackendFailure> {
+        self.confirm_process_identity(generation_id, handle)?;
+        self.confirm_listener_readiness(generation_id, handle, listeners)?;
+        if !probe.is_configured() {
+            return Ok(false);
+        }
+        probe_xray_egress(probe, EGRESS_PROBE_TIMEOUT)
+            .map(|()| true)
+            .map_err(|_| xray_generation::BackendFailure::Failed)
+    }
+
     fn rollback(
         &mut self,
         active: &xray_generation::GenerationView,
@@ -930,7 +968,13 @@ impl XrayCoordinator {
             .collect::<String>();
         let node_id = format!("managed-config-{}", &digest[..16]);
         self.generations
-            .select_desired(&config, node_id, digest, managed_listeners)
+            .select_desired_with_probe(
+                &config,
+                node_id,
+                digest,
+                managed_listeners,
+                egress_probe_settings(&settings),
+            )
             .map_err(generation_apply_error)?;
         let (processes, generations) = (&mut self.processes, &mut self.generations);
         let mut backend = ProductionXrayBackend {
@@ -1128,6 +1172,38 @@ impl XrayCoordinator {
                 .map_err(generation_apply_error)?;
         }
         Ok(system_proxy::query(app, proxy)?.current)
+    }
+
+    fn revalidate_xray_generation(
+        &mut self,
+        app: &tauri::AppHandle,
+        proxy: &system_proxy::SystemProxyRuntime,
+    ) -> Result<(), String> {
+        let settings = load_runtime_settings(app)?;
+        let process_status = self.processes.xray.status();
+        let binary = PathBuf::from(
+            process_status
+                .binary_path
+                .clone()
+                .unwrap_or_else(|| settings.xray_binary_path.clone()),
+        );
+        let validation_target =
+            PathBuf::from(process_status.config_path.clone().unwrap_or_else(|| {
+                draft_paths(app)
+                    .map(|paths| paths.xray_config_path)
+                    .unwrap_or_default()
+            }));
+        let (processes, generations) = (&mut self.processes, &mut self.generations);
+        let mut backend = ProductionXrayBackend {
+            app,
+            proxy,
+            process: &mut processes.xray,
+            binary,
+            validation_target,
+        };
+        generations
+            .revalidate_active(&mut backend)
+            .map_err(generation_apply_error)
     }
 }
 
@@ -1460,8 +1536,11 @@ fn runtime_status(
         .xray
         .lock()
         .map_err(|err| format!("lock runtime state: {err}"))?;
+    let generation_check_failed = coordinator
+        .revalidate_xray_generation(&app, &proxy_state)
+        .is_err();
     let status = coordinator.processes.status();
-    if should_restore_proxy_for_runtime(&status) {
+    if generation_check_failed || should_restore_proxy_for_runtime(&status) {
         coordinator
             .set_proxy_binding(&app, &proxy_state, false)
             .map_err(|error| {
@@ -1476,12 +1555,15 @@ fn runtime_status(
 
 #[tauri::command]
 fn xray_generation_status(
+    app: tauri::AppHandle,
     state: tauri::State<RuntimeState>,
+    proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
 ) -> Result<xray_generation::GenerationStatus, String> {
-    let runtime = state
+    let mut runtime = state
         .xray
         .lock()
         .map_err(|err| format!("lock Xray generation state: {err}"))?;
+    let _ = runtime.revalidate_xray_generation(&app, &proxy_state);
     Ok(runtime.generations.status())
 }
 
@@ -2567,7 +2649,7 @@ fn redact_after_marker(input: &str, marker: &str) -> String {
         let match_start = index + offset;
         let user_start = match_start + marker.len();
         let user_end = input[user_start..]
-            .find(|character| matches!(character, '\\' | '/' | '"' | '\'' | ' ' | '\r' | '\n'))
+            .find(|character: char| ['\\', '/', '"', '\'', ' ', '\r', '\n'].contains(&character))
             .map(|offset| user_start + offset)
             .unwrap_or(input.len());
         output.push_str(&input[index..match_start]);
@@ -3129,6 +3211,246 @@ fn socks5_connect(stream: &mut TcpStream, target: &HttpProbeTarget) -> Result<()
     Ok(())
 }
 
+fn probe_xray_egress(
+    settings: &xray_generation::EgressProbeSettings,
+    timeout: Duration,
+) -> Result<(), String> {
+    let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    probe_xray_egress_with_roots(settings, timeout, roots)
+}
+
+fn probe_xray_egress_with_roots(
+    settings: &xray_generation::EgressProbeSettings,
+    timeout: Duration,
+    roots: RootCertStore,
+) -> Result<(), String> {
+    let target = parse_https_egress_probe_url(&settings.url)?;
+    let deadline = Instant::now() + timeout;
+    probe_https_via_http_proxy(
+        &settings.http_listen,
+        settings.http_port,
+        &target,
+        settings.expected_status,
+        &settings.expected_nonce,
+        &roots,
+        deadline,
+    )
+    .map_err(|error| format!("HTTP egress probe failed: {error}"))?;
+    probe_https_via_socks5(
+        &settings.socks_listen,
+        settings.socks_port,
+        &target,
+        settings.expected_status,
+        &settings.expected_nonce,
+        &roots,
+        deadline,
+    )
+    .map_err(|error| format!("SOCKS5 egress probe failed: {error}"))
+}
+
+fn probe_https_via_http_proxy(
+    host: &str,
+    port: u16,
+    target: &HttpsProbeTarget,
+    expected_status: u16,
+    expected_nonce: &str,
+    roots: &RootCertStore,
+    deadline: Instant,
+) -> Result<(), String> {
+    let mut stream = connect_local_proxy(host, port, deadline, "HTTP")?;
+    let request = build_http_request(
+        Method::CONNECT,
+        &target.host_header,
+        &target.host_header,
+        &[("Proxy-Connection", "keep-alive")],
+    )?;
+    write_with_deadline(&mut stream, &request, deadline)?;
+    let (status, _) = read_http_headers(&mut stream, deadline)?;
+    if status != Some(200) {
+        return Err(format!("HTTP proxy CONNECT returned {:?}", status));
+    }
+    probe_https_stream(
+        stream,
+        target,
+        expected_status,
+        expected_nonce,
+        roots,
+        deadline,
+    )
+}
+
+fn probe_https_via_socks5(
+    host: &str,
+    port: u16,
+    target: &HttpsProbeTarget,
+    expected_status: u16,
+    expected_nonce: &str,
+    roots: &RootCertStore,
+    deadline: Instant,
+) -> Result<(), String> {
+    let mut stream = connect_local_proxy(host, port, deadline, "SOCKS5")?;
+    let http_target = HttpProbeTarget {
+        absolute_url: format!("https://{}{}", target.host_header, target.path),
+        host: target.host.clone(),
+        host_header: target.host_header.clone(),
+        path_and_query: target.path.clone(),
+        port: target.port,
+    };
+    socks5_connect(&mut stream, &http_target)?;
+    probe_https_stream(
+        stream,
+        target,
+        expected_status,
+        expected_nonce,
+        roots,
+        deadline,
+    )
+}
+
+fn connect_local_proxy(
+    host: &str,
+    port: u16,
+    deadline: Instant,
+    kind: &str,
+) -> Result<TcpStream, String> {
+    let host = local_probe_host(host)?;
+    let addrs = format!("{}:{port}", socket_host(&host))
+        .to_socket_addrs()
+        .map_err(|error| format!("resolve local {kind} proxy: {error}"))?
+        .collect::<Vec<_>>();
+    let timeout = remaining_probe_time(deadline)?;
+    for address in addrs {
+        if let Ok(stream) = TcpStream::connect_timeout(&address, timeout) {
+            let remaining = remaining_probe_time(deadline)?;
+            stream
+                .set_read_timeout(Some(remaining))
+                .map_err(|error| format!("set {kind} probe read timeout: {error}"))?;
+            stream
+                .set_write_timeout(Some(remaining))
+                .map_err(|error| format!("set {kind} probe write timeout: {error}"))?;
+            return Ok(stream);
+        }
+    }
+    Err(format!("connect local {kind} proxy failed"))
+}
+
+fn probe_https_stream(
+    stream: TcpStream,
+    target: &HttpsProbeTarget,
+    expected_status: u16,
+    expected_nonce: &str,
+    roots: &RootCertStore,
+    deadline: Instant,
+) -> Result<(), String> {
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots.clone())
+        .with_no_client_auth();
+    let server_name = ServerName::try_from(target.host.clone())
+        .map_err(|_| "HTTPS egress probe host is not a valid TLS server name".to_string())?;
+    let connection = ClientConnection::new(std::sync::Arc::new(config), server_name)
+        .map_err(|error| format!("create HTTPS egress probe TLS session: {error}"))?;
+    let mut tls = StreamOwned::new(connection, stream);
+    let mut headers = vec![
+        ("User-Agent", "Tachyon-Prism/0.1"),
+        ("Accept", "*/*"),
+        ("Connection", "close"),
+    ];
+    if !expected_nonce.is_empty() {
+        headers.push(("X-Tachyon-Probe-Nonce", expected_nonce));
+    }
+    let request = build_http_request(Method::GET, &target.path, &target.host_header, &headers)?;
+    write_with_deadline(&mut tls, &request, deadline)?;
+    let (status, nonce) = read_http_headers(&mut tls, deadline)?;
+    if status != Some(expected_status) {
+        return Err(format!("HTTPS egress probe returned {:?}", status));
+    }
+    if !expected_nonce.is_empty() && nonce.as_deref() != Some(expected_nonce) {
+        return Err("HTTPS egress probe nonce was not verified".to_string());
+    }
+    Ok(())
+}
+
+fn remaining_probe_time(deadline: Instant) -> Result<Duration, String> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        Err("HTTPS egress probe timed out".to_string())
+    } else {
+        Ok(remaining)
+    }
+}
+
+fn build_http_request(
+    method: Method,
+    target: &str,
+    host: &str,
+    headers: &[(&str, &str)],
+) -> Result<Vec<u8>, String> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(Uri::try_from(target).map_err(|_| "invalid HTTP request target".to_string())?)
+        .header("Host", host);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder
+        .body(())
+        .map_err(|_| "invalid HTTP request header".to_string())?;
+    let mut bytes = format!("{} {} HTTP/1.1\r\n", request.method(), request.uri()).into_bytes();
+    for (name, value) in request.headers() {
+        bytes.extend_from_slice(name.as_str().as_bytes());
+        bytes.extend_from_slice(b": ");
+        bytes.extend_from_slice(value.as_bytes());
+        bytes.extend_from_slice(b"\r\n");
+    }
+    bytes.extend_from_slice(b"\r\n");
+    Ok(bytes)
+}
+
+fn write_with_deadline<W: Write>(
+    writer: &mut W,
+    bytes: &[u8],
+    deadline: Instant,
+) -> Result<(), String> {
+    let _ = remaining_probe_time(deadline)?;
+    writer
+        .write_all(bytes)
+        .map_err(|error| format!("write HTTPS egress probe: {error}"))
+}
+
+fn read_http_headers<R: Read>(
+    reader: &mut R,
+    deadline: Instant,
+) -> Result<(Option<u16>, Option<String>), String> {
+    const MAX_HEADERS: usize = 64 * 1024;
+    let mut bytes = Vec::new();
+    let mut one = [0_u8; 1];
+    while bytes.len() < MAX_HEADERS {
+        let _ = remaining_probe_time(deadline)?;
+        let count = reader
+            .read(&mut one)
+            .map_err(|error| format!("read HTTPS egress probe: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        bytes.push(one[0]);
+        if bytes.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    if !bytes.ends_with(b"\r\n\r\n") {
+        return Err("HTTPS egress probe returned incomplete headers".to_string());
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let status = parse_http_status_code(&text);
+    let nonce = text.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case("x-tachyon-probe-nonce")
+            .then(|| value.trim().to_string())
+    });
+    Ok((status, nonce))
+}
+
 fn socks5_reply_label(code: u8) -> &'static str {
     match code {
         0x01 => "general failure",
@@ -3620,6 +3942,142 @@ fn parse_http_probe_url(input: &str) -> Result<HttpProbeTarget, String> {
         path_and_query: path,
         port,
     })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HttpsProbeTarget {
+    host: String,
+    host_header: String,
+    path: String,
+    port: u16,
+}
+
+fn parse_https_egress_probe_url(input: &str) -> Result<HttpsProbeTarget, String> {
+    let url = clean_url_input(input);
+    reject_url_controls(&url)?;
+    let uri = Uri::try_from(url.as_str())
+        .map_err(|_| "Xray egress probe URL is not a valid absolute URL".to_string())?;
+    if uri.scheme_str() != Some("https") {
+        return Err("Xray egress probe URL must use https://".to_string());
+    }
+    if uri.query().is_some() || url.contains('#') {
+        return Err("Xray egress probe URL must not contain a query or fragment".to_string());
+    }
+    let authority = uri
+        .authority()
+        .ok_or_else(|| "Xray egress probe host is required".to_string())?
+        .as_str();
+    if authority.is_empty() || authority.contains('@') {
+        return Err("Xray egress probe URL must not contain credentials".to_string());
+    }
+    let (host, port) = parse_https_authority(authority)?;
+    let host_header = format_probe_host_header(&host, port)?;
+    let path = uri
+        .path_and_query()
+        .map_or("/", |path| path.as_str())
+        .to_string();
+    if !path.starts_with('/') {
+        return Err("Xray egress probe path is invalid".to_string());
+    }
+    Ok(HttpsProbeTarget {
+        host,
+        host_header,
+        path,
+        port,
+    })
+}
+
+fn parse_https_authority(authority: &str) -> Result<(String, u16), String> {
+    if authority.is_empty()
+        || authority
+            .chars()
+            .any(|ch| ch.is_ascii_control() || ch.is_whitespace())
+    {
+        return Err("Xray egress probe host is invalid".to_string());
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, suffix) = rest
+            .split_once(']')
+            .ok_or_else(|| "Xray egress probe IPv6 host is invalid".to_string())?;
+        if host.parse::<Ipv6Addr>().is_err() {
+            return Err("Xray egress probe IPv6 host is invalid".to_string());
+        }
+        let port = if suffix.is_empty() {
+            443
+        } else {
+            parse_probe_port(
+                suffix
+                    .strip_prefix(':')
+                    .ok_or_else(|| "Xray egress probe port is invalid".to_string())?,
+            )?
+        };
+        return Ok((host.to_string(), port));
+    }
+    if authority.matches(':').count() > 1 {
+        return Err("Xray egress probe IPv6 host must use brackets".to_string());
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host, parse_probe_port(port)?),
+        None => (authority, 443),
+    };
+    if host.is_empty() || host.starts_with('.') || host.ends_with('.') {
+        return Err("Xray egress probe host is required".to_string());
+    }
+    if host.parse::<IpAddr>().is_err()
+        && (host.bytes().any(|byte| {
+            !byte.is_ascii() || !(byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.')
+        }) || host
+            .split('.')
+            .any(|label| label.is_empty() || label.starts_with('-') || label.ends_with('-')))
+    {
+        return Err("Xray egress probe host is invalid".to_string());
+    }
+    Ok((host.to_ascii_lowercase(), port))
+}
+
+fn format_probe_host_header(host: &str, port: u16) -> Result<String, String> {
+    if host.parse::<Ipv6Addr>().is_ok() {
+        Ok(format!("[{host}]:{port}"))
+    } else if host.parse::<Ipv4Addr>().is_ok() || !host.is_empty() {
+        Ok(format!("{host}:{port}"))
+    } else {
+        Err("Xray egress probe host is required".to_string())
+    }
+}
+
+fn reject_url_controls(value: &str) -> Result<(), String> {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_control() {
+            return Err("Xray egress probe URL contains a control character".to_string());
+        }
+        if byte == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err("Xray egress probe URL contains an invalid percent escape".to_string());
+            }
+            let decoded = (hex_value(bytes[index + 1])? << 4) | hex_value(bytes[index + 2])?;
+            if decoded.is_ascii_control() {
+                return Err(
+                    "Xray egress probe URL contains an encoded control character".to_string(),
+                );
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    Ok(())
+}
+
+fn hex_value(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err("Xray egress probe URL contains an invalid percent escape".to_string()),
+    }
 }
 
 fn parse_http_authority(authority: &str) -> Result<(String, u16), String> {
@@ -4188,6 +4646,15 @@ fn normalize_runtime_settings(
             settings.xray_release_channel,
             defaults.xray_release_channel,
         ),
+        xray_egress_probe_url: normalize_egress_probe_url(
+            settings.xray_egress_probe_url,
+            defaults.xray_egress_probe_url,
+        )?,
+        xray_egress_probe_status: normalize_egress_probe_status(
+            settings.xray_egress_probe_status,
+            defaults.xray_egress_probe_status,
+        ),
+        xray_egress_probe_nonce: normalize_egress_probe_nonce(settings.xray_egress_probe_nonce)?,
     })
 }
 
@@ -4226,11 +4693,60 @@ fn default_runtime_settings(app: &tauri::AppHandle) -> Result<RuntimeSettings, S
         xray_stats_listen: "127.0.0.1".to_string(),
         xray_stats_port: 10085,
         xray_release_channel: "stable".to_string(),
+        xray_egress_probe_url: String::new(),
+        xray_egress_probe_status: default_egress_probe_status(),
+        xray_egress_probe_nonce: String::new(),
     })
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_egress_probe_status() -> u16 {
+    204
+}
+
+fn normalize_egress_probe_url(value: String, fallback: String) -> Result<String, String> {
+    let candidate = if value.trim().is_empty() {
+        fallback
+    } else {
+        value.trim().to_string()
+    };
+    if candidate.trim().is_empty() {
+        return Ok(String::new());
+    }
+    parse_https_egress_probe_url(&candidate).map(|_| candidate)
+}
+
+fn normalize_egress_probe_status(value: u16, fallback: u16) -> u16 {
+    if (100..=599).contains(&value) {
+        value
+    } else {
+        fallback
+    }
+}
+
+fn normalize_egress_probe_nonce(value: String) -> Result<String, String> {
+    let value = value.trim().to_string();
+    if value.len() > 128 || value.bytes().any(|byte| !(0x21..=0x7e).contains(&byte)) {
+        return Err(
+            "Xray egress probe nonce must be printable ASCII and at most 128 bytes".to_string(),
+        );
+    }
+    Ok(value)
+}
+
+fn egress_probe_settings(settings: &RuntimeSettings) -> xray_generation::EgressProbeSettings {
+    xray_generation::EgressProbeSettings {
+        url: settings.xray_egress_probe_url.clone(),
+        expected_status: settings.xray_egress_probe_status,
+        expected_nonce: settings.xray_egress_probe_nonce.clone(),
+        http_listen: settings.xray_http_listen.clone(),
+        http_port: settings.xray_http_port,
+        socks_listen: settings.xray_socks_listen.clone(),
+        socks_port: settings.xray_socks_port,
+    }
 }
 
 fn normalize_release_channel(value: String, fallback: String) -> String {
@@ -4261,7 +4777,7 @@ fn non_empty_or(value: String, fallback: String) -> String {
 
 fn normalize_address_list(value: String) -> String {
     value
-        .split(|ch| ch == '\n' || ch == ',')
+        .split(['\n', ','])
         .map(clean_path_input)
         .filter(|item| !item.is_empty())
         .collect::<Vec<_>>()
@@ -4604,7 +5120,7 @@ where
     diagnostics
 }
 
-fn release_channel_for_kind<'a>(kind: ManagedBinaryKind, settings: &'a RuntimeSettings) -> &'a str {
+fn release_channel_for_kind(kind: ManagedBinaryKind, settings: &RuntimeSettings) -> &str {
     match kind {
         ManagedBinaryKind::TachyonCore => &settings.tachyon_core_release_channel,
         ManagedBinaryKind::Xray => &settings.xray_release_channel,
@@ -4702,7 +5218,7 @@ fn install_wintun_sidecar_file(app: &tauri::AppHandle) -> Result<ManagedBinaryIn
     }
 
     extract_zip_entry_to_file(&archive_path, entry_path, &target)?;
-    Ok(managed_binary_inventory(app)?)
+    managed_binary_inventory(app)
 }
 
 fn xray_release_info(release: GithubRelease) -> Result<RuntimeReleaseInfo, String> {
@@ -5542,10 +6058,10 @@ fn read_raw_subscription_response(mut stream: TcpStream) -> Result<SubscriptionR
                 return Err("subscription transfer encoding is unsupported".to_string());
             }
             chunked = true;
-        } else if name.eq_ignore_ascii_case("location") {
-            if location.replace(value.to_string()).is_some() {
-                return Err("subscription response has duplicate Location".to_string());
-            }
+        } else if name.eq_ignore_ascii_case("location")
+            && location.replace(value.to_string()).is_some()
+        {
+            return Err("subscription response has duplicate Location".to_string());
         }
     }
     if chunked && content_length.is_some() {
@@ -5591,8 +6107,7 @@ fn parse_lenient_subscription_status(line: &str) -> Result<u16, String> {
         .ok_or_else(|| "subscription response status is empty".to_string())?;
     let code = if matches!(first, "HTTP/1.0" | "HTTP/1.1" | "HTTP/0.0" | "HTTP/") {
         parts.next()
-    } else if first.starts_with("HTTP/") {
-        let version = &first[5..];
+    } else if let Some(version) = first.strip_prefix("HTTP/") {
         if !version.is_empty()
             && version
                 .bytes()
@@ -6382,7 +6897,7 @@ where
     V: FnOnce(&Path) -> Result<ConfigValidationResult, String>,
     R: AtomicFileReplacer,
 {
-    let size_bytes = contents.as_bytes().len();
+    let size_bytes = contents.len();
     if size_bytes > CANONICAL_XRAY_CONFIG_LIMIT_BYTES {
         return Err(format!(
             "canonical Xray config is {size_bytes} UTF-8 bytes and exceeds the {}-byte UTF-8 limit; no candidate was written or validated",
@@ -6755,6 +7270,28 @@ fn listeners_owned_by_pid(table: &[OwnedTcpListener], expected: &[SocketAddr], p
         })
 }
 
+fn validate_tcp_table_layout(
+    capacity: usize,
+    reported: usize,
+    count: usize,
+    row_size: usize,
+) -> Result<usize, String> {
+    let header = std::mem::size_of::<u32>();
+    if row_size == 0 || reported < header || reported > capacity {
+        return Err("TCP listener table reported an invalid buffer length".to_string());
+    }
+    let rows = count
+        .checked_mul(row_size)
+        .ok_or_else(|| "TCP listener table row count overflowed".to_string())?;
+    let required = header
+        .checked_add(rows)
+        .ok_or_else(|| "TCP listener table size overflowed".to_string())?;
+    if required > reported {
+        return Err("TCP listener table row count exceeds returned buffer".to_string());
+    }
+    Ok(required)
+}
+
 #[cfg(target_os = "windows")]
 fn owned_tcp_listener_table(_pid: u32) -> Result<Vec<OwnedTcpListener>, String> {
     use windows_sys::Win32::NetworkManagement::IpHelper::{
@@ -6775,10 +7312,12 @@ fn owned_tcp_listener_table(_pid: u32) -> Result<Vec<OwnedTcpListener>, String> 
                 0,
             )
         };
-        if first != 122 || size == 0 {
+        const MAX_TABLE_BYTES: u32 = 64 * 1024 * 1024;
+        if first != 122 || size < std::mem::size_of::<u32>() as u32 || size > MAX_TABLE_BYTES {
             return Err("query TCP listener table size failed".to_string());
         }
         let mut bytes = vec![0_u8; size as usize];
+        let capacity = bytes.len();
         let result = unsafe {
             GetExtendedTcpTable(
                 bytes.as_mut_ptr().cast(),
@@ -6790,6 +7329,22 @@ fn owned_tcp_listener_table(_pid: u32) -> Result<Vec<OwnedTcpListener>, String> 
             )
         };
         if result == 0 {
+            let returned = usize::try_from(size)
+                .map_err(|_| "TCP listener table returned length overflowed".to_string())?;
+            if returned > capacity {
+                return Err("TCP listener table returned beyond allocated buffer".to_string());
+            }
+            let count = unsafe { bytes.as_ptr().cast::<u32>().read_unaligned() as usize };
+            let row_size = if family == AF_INET as u32 {
+                std::mem::size_of::<MIB_TCPROW_OWNER_PID>()
+            } else {
+                std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>()
+            };
+            let required = validate_tcp_table_layout(capacity, returned, count, row_size)?;
+            bytes.truncate(returned);
+            if required > bytes.len() {
+                return Err("TCP listener table validation failed".to_string());
+            }
             Ok(bytes)
         } else {
             Err("read TCP listener table failed".to_string())
@@ -6915,7 +7470,65 @@ fn parse_linux_tcp_listeners(
     Ok(listeners)
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn owned_tcp_listener_table(pid: u32) -> Result<Vec<OwnedTcpListener>, String> {
+    use libproc::libproc::bsd_info::BSDInfo;
+    use libproc::libproc::file_info::{listpidinfo, pidfdinfo, ListFDs, ProcFDType};
+    use libproc::libproc::net_info::{SocketFDInfo, SocketInfoKind, TcpSIState};
+    use libproc::libproc::proc_pid::pidinfo;
+
+    const MAX_PROCESS_FDS: usize = 65_536;
+    let process = pidinfo::<BSDInfo>(pid as i32, 0)
+        .map_err(|_| "macOS libproc process ownership query failed".to_string())?;
+    let fd_count = usize::try_from(process.pbi_nfiles)
+        .map_err(|_| "macOS libproc file descriptor count overflowed".to_string())?;
+    if fd_count > MAX_PROCESS_FDS {
+        return Err("macOS libproc file descriptor count is unreasonable".to_string());
+    }
+    let fds = listpidinfo::<ListFDs>(pid as i32, fd_count)
+        .map_err(|_| "macOS libproc file descriptor query failed".to_string())?;
+    let mut listeners = Vec::new();
+    for fd in fds {
+        if !matches!(ProcFDType::from(fd.proc_fdtype), ProcFDType::Socket) {
+            continue;
+        }
+        let socket = match pidfdinfo::<SocketFDInfo>(pid as i32, fd.proc_fd) {
+            Ok(socket) => socket,
+            Err(_) => continue,
+        };
+        if !matches!(
+            SocketInfoKind::from(socket.psi.soi_kind),
+            SocketInfoKind::Tcp
+        ) {
+            continue;
+        }
+        let tcp = unsafe { socket.psi.soi_proto.pri_tcp };
+        if !matches!(TcpSIState::from(tcp.tcpsi_state), TcpSIState::Listen) {
+            continue;
+        }
+        if let Some(address) = macos_tcp_listener_address(&tcp) {
+            listeners.push(OwnedTcpListener { address, pid });
+        }
+    }
+    Ok(listeners)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_tcp_listener_address(tcp: &libproc::libproc::net_info::TcpSockInfo) -> Option<SocketAddr> {
+    let port = (tcp.tcpsi_ini.insi_lport as u32).swap_bytes() as u16;
+    if port == 0 {
+        return None;
+    }
+    if tcp.tcpsi_ini.insi_vflag == 0 {
+        let raw = unsafe { tcp.tcpsi_ini.insi_laddr.ina_46.i46a_addr4.s_addr };
+        let address = IpAddr::V4(Ipv4Addr::from(raw.swap_bytes()));
+        return Some(SocketAddr::new(address, port));
+    }
+    let bytes = unsafe { tcp.tcpsi_ini.insi_laddr.ina_6.s6_addr };
+    Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::from(bytes)), port))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn owned_tcp_listener_table(_pid: u32) -> Result<Vec<OwnedTcpListener>, String> {
     Err("auditable TCP listener ownership is unsupported on this platform".to_string())
 }
@@ -7055,20 +7668,60 @@ impl ManagedProcess {
         let deadline = Instant::now() + GRACEFUL_STOP_TIMEOUT;
         let mut forced = false;
         loop {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|err| format!("poll {label} while stopping: {err}"))?
-            {
+            #[cfg(test)]
+            let try_wait = if self.stop_fault == Some(StopFault::TryWait) {
+                Err(io::Error::other("injected try_wait failure"))
+            } else {
+                child.try_wait()
+            };
+            #[cfg(not(test))]
+            let try_wait = child.try_wait();
+            let try_wait = match try_wait {
+                Ok(status) => status,
+                Err(error) => {
+                    self.child = Some(child);
+                    self.last_error = Some(format!("poll {label} while stopping: {error}"));
+                    self.stop_method = Some("retryPending".to_string());
+                    return Err(self.last_error.clone().unwrap_or_default());
+                }
+            };
+            if let Some(status) = try_wait {
                 self.exit_code = status.code();
                 break;
             }
             if Instant::now() >= deadline {
-                child
-                    .kill()
-                    .map_err(|err| format!("force stop {label}: {err}"))?;
-                let status = child
-                    .wait()
-                    .map_err(|err| format!("wait for {label} after force stop: {err}"))?;
+                #[cfg(test)]
+                let kill = if self.stop_fault == Some(StopFault::Kill) {
+                    Err(io::Error::other("injected kill failure"))
+                } else {
+                    child.kill()
+                };
+                #[cfg(not(test))]
+                let kill = child.kill();
+                if let Err(error) = kill {
+                    self.child = Some(child);
+                    self.last_error = Some(format!("force stop {label}: {error}"));
+                    self.stop_method = Some("retryPending".to_string());
+                    return Err(self.last_error.clone().unwrap_or_default());
+                }
+                #[cfg(test)]
+                let wait = if self.stop_fault == Some(StopFault::Wait) {
+                    Err(io::Error::other("injected wait failure"))
+                } else {
+                    child.wait()
+                };
+                #[cfg(not(test))]
+                let wait = child.wait();
+                let status = match wait {
+                    Ok(status) => status,
+                    Err(error) => {
+                        self.child = Some(child);
+                        self.last_error =
+                            Some(format!("wait for {label} after force stop: {error}"));
+                        self.stop_method = Some("retryPending".to_string());
+                        return Err(self.last_error.clone().unwrap_or_default());
+                    }
+                };
                 self.exit_code = status.code();
                 forced = true;
                 break;
@@ -7088,9 +7741,8 @@ impl ManagedProcess {
 
     fn status(&mut self) -> ProcessStatus {
         if let Err(err) = self.refresh("process") {
-            self.child = None;
-            self.started_at = None;
             self.last_error = Some(err);
+            self.stop_method = Some("pollFailedRetryPending".to_string());
         }
         self.snapshot()
     }
@@ -7368,8 +8020,124 @@ fn window_start_dragging(window: tauri::Window) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::{ServerConfig, ServerConnection};
+    use std::io::copy;
+
+    fn test_tls_material() -> (Arc<ServerConfig>, RootCertStore) {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate local TLS certificate");
+        let certificate = certified.cert.der().clone();
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certified.signing_key.serialize_der(),
+        ));
+        let server = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate.clone()], private_key)
+            .expect("build local TLS server config");
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate).expect("trust local TLS certificate");
+        (Arc::new(server), roots)
+    }
+
+    fn read_fake_headers(stream: &mut impl Read) -> Vec<u8> {
+        let mut response = Vec::new();
+        let mut byte = [0_u8; 1];
+        while response.len() < 64 * 1024 {
+            if stream.read_exact(&mut byte).is_err() {
+                break;
+            }
+            response.push(byte[0]);
+            if response.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        response
+    }
+
+    fn relay_fake_connection(mut left: TcpStream, mut right: TcpStream) {
+        let mut left_reader = left.try_clone().expect("clone fake proxy client");
+        let mut right_writer = right.try_clone().expect("clone fake target writer");
+        let uplink = std::thread::spawn(move || {
+            let _ = copy(&mut left_reader, &mut right_writer);
+        });
+        let _ = copy(&mut right, &mut left);
+        let _ = uplink.join();
+    }
+
+    fn spawn_fake_tls_target(
+        listener: std::net::TcpListener,
+        server: Arc<ServerConfig>,
+        expected_connections: usize,
+        nonce: String,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            for _ in 0..expected_connections {
+                let (stream, _) = listener.accept().expect("accept fake TLS target");
+                let connection = ServerConnection::new(server.clone()).expect("TLS server");
+                let mut tls = StreamOwned::new(connection, stream);
+                let request = read_fake_headers(&mut tls);
+                assert!(request.starts_with(b"GET /health HTTP/1.1"));
+                let response = format!(
+                    "HTTP/1.1 204 No Content\r\nX-Tachyon-Probe-Nonce: {nonce}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                tls.write_all(response.as_bytes())
+                    .expect("fake TLS response");
+            }
+        })
+    }
+
+    fn spawn_fake_http_connect_proxy(
+        listener: std::net::TcpListener,
+        target: SocketAddr,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let (mut client, _) = listener.accept().expect("accept fake HTTP proxy");
+            let request = String::from_utf8_lossy(&read_fake_headers(&mut client)).to_string();
+            assert!(request.starts_with("CONNECT localhost:"));
+            let target_stream = TcpStream::connect(target).expect("connect fake TLS target");
+            client
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .expect("fake CONNECT response");
+            relay_fake_connection(client, target_stream);
+        })
+    }
+
+    fn spawn_fake_socks5_proxy(
+        listener: std::net::TcpListener,
+        target: SocketAddr,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let (mut client, _) = listener.accept().expect("accept fake SOCKS5 proxy");
+            let mut greeting = [0_u8; 3];
+            client.read_exact(&mut greeting).expect("SOCKS greeting");
+            assert_eq!(greeting, [0x05, 0x01, 0x00]);
+            client
+                .write_all(&[0x05, 0x00])
+                .expect("SOCKS method response");
+            let mut header = [0_u8; 4];
+            client.read_exact(&mut header).expect("SOCKS request");
+            assert_eq!(header, [0x05, 0x01, 0x00, 0x03]);
+            let mut domain_length = [0_u8; 1];
+            client
+                .read_exact(&mut domain_length)
+                .expect("SOCKS domain length");
+            let domain_len = domain_length[0] as usize;
+            let mut domain = vec![0_u8; domain_len + 2];
+            client
+                .read_exact(&mut domain)
+                .expect("SOCKS domain request");
+            assert_eq!(&domain[..domain_len], b"localhost");
+            let target_stream = TcpStream::connect(target).expect("connect fake TLS target");
+            client
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
+                .expect("SOCKS connect response");
+            relay_fake_connection(client, target_stream);
+        })
+    }
 
     struct FailingAtomicFileReplacer;
 
@@ -8027,7 +8795,7 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         .expect_err("oversized first config must be rejected before validation");
 
         assert!(oversized.chars().count() < CANONICAL_XRAY_CONFIG_LIMIT_BYTES);
-        assert!(oversized.as_bytes().len() > CANONICAL_XRAY_CONFIG_LIMIT_BYTES);
+        assert!(oversized.len() > CANONICAL_XRAY_CONFIG_LIMIT_BYTES);
         assert!(error.contains("2097152-byte UTF-8 limit"));
         assert!(error.contains("no candidate was written or validated"));
         assert!(!validator_called);
@@ -9574,6 +10342,193 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         validate_process_start_inputs("xray", ManagedBinaryKind::Xray, &binary, &config)
             .expect("Xray does not require Tachyon sidecars");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn egress_probe_url_rejects_credentials_query_and_non_https() {
+        assert!(parse_https_egress_probe_url("http://example.test/").is_err());
+        assert!(parse_https_egress_probe_url("https://user:secret@example.test/").is_err());
+        assert!(parse_https_egress_probe_url("https://example.test/?token=secret").is_err());
+        assert!(parse_https_egress_probe_url("https://example.test/%0d%0aHost:%20evil").is_err());
+        assert!(parse_https_egress_probe_url("https://example.test/health\r\nHost: evil").is_err());
+        let target = parse_https_egress_probe_url("https://example.test/health").unwrap();
+        assert_eq!(target.host, "example.test");
+        assert_eq!(target.port, 443);
+        assert_eq!(target.path, "/health");
+    }
+
+    #[test]
+    fn egress_probe_uses_real_http_connect_and_socks_remote_dns_with_tls_nonce() {
+        let (server, roots) = test_tls_material();
+        let target_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = target_listener.local_addr().unwrap();
+        let http_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socks_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let http_addr = http_listener.local_addr().unwrap();
+        let socks_addr = socks_listener.local_addr().unwrap();
+        let target_thread =
+            spawn_fake_tls_target(target_listener, server, 2, "fixture-nonce".to_string());
+        let http_thread = spawn_fake_http_connect_proxy(http_listener, target);
+        let socks_thread = spawn_fake_socks5_proxy(socks_listener, target);
+
+        let settings = RuntimeSettings {
+            xray_http_listen: "127.0.0.1".to_string(),
+            xray_http_port: http_addr.port(),
+            xray_socks_listen: "127.0.0.1".to_string(),
+            xray_socks_port: socks_addr.port(),
+            xray_egress_probe_url: format!("https://localhost:{}/health", target.port()),
+            xray_egress_probe_status: 204,
+            xray_egress_probe_nonce: "fixture-nonce".to_string(),
+            ..RuntimeSettings::default()
+        };
+
+        probe_xray_egress_with_roots(
+            &egress_probe_settings(&settings),
+            Duration::from_secs(3),
+            roots,
+        )
+        .expect("both managed proxies must pass the real local HTTPS probe");
+        http_thread.join().unwrap();
+        socks_thread.join().unwrap();
+        target_thread.join().unwrap();
+    }
+
+    #[test]
+    fn egress_probe_fails_closed_for_auth_blackhole_bad_certificate_and_missing_listener() {
+        let target = HttpsProbeTarget {
+            host: "localhost".to_string(),
+            host_header: "localhost:443".to_string(),
+            path: "/health".to_string(),
+            port: 443,
+        };
+        let roots = RootCertStore::empty();
+
+        let http_auth = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let http_auth_addr = http_auth.local_addr().unwrap();
+        let http_auth_thread = std::thread::spawn(move || {
+            let (mut stream, _) = http_auth.accept().unwrap();
+            let _ = read_fake_headers(&mut stream);
+            stream
+                .write_all(
+                    b"HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        assert!(probe_https_via_http_proxy(
+            "127.0.0.1",
+            http_auth_addr.port(),
+            &target,
+            204,
+            "",
+            &roots,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .is_err());
+        http_auth_thread.join().unwrap();
+
+        let socks_auth = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socks_auth_addr = socks_auth.local_addr().unwrap();
+        let socks_auth_thread = std::thread::spawn(move || {
+            let (mut stream, _) = socks_auth.accept().unwrap();
+            let mut greeting = [0_u8; 3];
+            stream.read_exact(&mut greeting).unwrap();
+            stream.write_all(&[0x05, 0x02]).unwrap();
+        });
+        assert!(probe_https_via_socks5(
+            "127.0.0.1",
+            socks_auth_addr.port(),
+            &target,
+            204,
+            "",
+            &roots,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .is_err());
+        socks_auth_thread.join().unwrap();
+
+        let blackhole = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let blackhole_addr = blackhole.local_addr().unwrap();
+        let blackhole_thread = std::thread::spawn(move || {
+            let (_stream, _) = blackhole.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(250));
+        });
+        assert!(probe_https_via_http_proxy(
+            "127.0.0.1",
+            blackhole_addr.port(),
+            &target,
+            204,
+            "",
+            &roots,
+            Instant::now() + Duration::from_millis(50),
+        )
+        .is_err());
+        blackhole_thread.join().unwrap();
+
+        assert!(probe_https_via_http_proxy(
+            "127.0.0.1",
+            1,
+            &target,
+            204,
+            "",
+            &roots,
+            Instant::now() + Duration::from_millis(100),
+        )
+        .is_err());
+
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+        assert!(probe_https_via_http_proxy(
+            "127.0.0.1",
+            occupied_port,
+            &target,
+            204,
+            "",
+            &roots,
+            Instant::now() + Duration::from_millis(100),
+        )
+        .is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_libproc_ownership_fixture_matches_current_ipv4_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let expected = listener.local_addr().unwrap();
+        let listeners = owned_tcp_listener_table(std::process::id()).unwrap();
+        assert!(listeners
+            .iter()
+            .any(|listener| listener.address == expected && listener.pid == std::process::id()));
+    }
+
+    #[test]
+    fn windows_tcp_table_layout_validation_rejects_truncation_and_overflow() {
+        assert!(validate_tcp_table_layout(4 + 2 * 8, 4 + 2 * 8, 2, 8).is_ok());
+        assert!(validate_tcp_table_layout(4 + 8, 4 + 8, 2, 8).is_err());
+        assert!(validate_tcp_table_layout(4, 4, usize::MAX, usize::MAX).is_err());
+        assert!(validate_tcp_table_layout(4 + 8, 4 + 16, 1, 8).is_err());
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn managed_process_keeps_child_after_try_wait_failure_for_retry() {
+        let child = if cfg!(target_os = "windows") {
+            Command::new(std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into()))
+                .args(["/C", "ping -n 20 127.0.0.1 > nul"])
+                .spawn()
+                .unwrap()
+        } else {
+            Command::new("sh").args(["-c", "sleep 20"]).spawn().unwrap()
+        };
+        let mut process = ManagedProcess {
+            child: Some(child),
+            stop_fault: Some(StopFault::TryWait),
+            ..ManagedProcess::default()
+        };
+        assert!(process.stop("injected").is_err());
+        assert!(process.child.is_some());
+        process.stop_fault = None;
+        process.stop("injected").unwrap();
+        assert!(process.child.is_none());
     }
 
     #[test]

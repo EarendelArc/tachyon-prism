@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 const CLOCK_VERSION: u32 = 1;
 const RETAINED_GENERATIONS: usize = 3;
 const ORPHAN_JOURNAL_FILE: &str = "orphan-journal.json";
+const ORPHAN_RECOVERY_FAILURE_FILE: &str = "orphan-recovery-failed.json";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
@@ -29,7 +30,26 @@ pub enum ReadinessLevel {
     ConfigValidated,
     ProcessReady,
     ListenerReady,
+    EgressReady,
     Degraded,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EgressProbeSettings {
+    pub url: String,
+    pub expected_status: u16,
+    pub expected_nonce: String,
+    pub http_listen: String,
+    pub http_port: u16,
+    pub socks_listen: String,
+    pub socks_port: u16,
+}
+
+impl EgressProbeSettings {
+    pub fn is_configured(&self) -> bool {
+        !self.url.trim().is_empty()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -51,6 +71,8 @@ pub struct GenerationView {
     pub routing_revision: String,
     pub pid: Option<u32>,
     pub managed_listener_addresses: Vec<String>,
+    pub egress_probe: EgressProbeSettings,
+    pub egress_verified: bool,
     pub readiness: ReadinessLevel,
 }
 
@@ -82,6 +104,8 @@ pub struct RunnerHandle {
 pub struct ConfigLease {
     path: PathBuf,
     orphan_journal: PathBuf,
+    orphan_recovery_failure: PathBuf,
+    recovery_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ConfigLease {
@@ -92,7 +116,13 @@ impl ConfigLease {
 
 impl Drop for ConfigLease {
     fn drop(&mut self) {
-        release_config_lease(&self.path, &self.orphan_journal, remove_config_file);
+        release_config_lease(
+            &self.path,
+            &self.orphan_journal,
+            &self.orphan_recovery_failure,
+            &self.recovery_failure,
+            remove_config_file,
+        );
     }
 }
 
@@ -103,13 +133,21 @@ fn remove_config_file(path: &Path) -> std::io::Result<()> {
 fn release_config_lease(
     path: &Path,
     orphan_journal: &Path,
+    orphan_recovery_failure: &Path,
+    recovery_failure: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     remove: impl FnOnce(&Path) -> std::io::Result<()>,
 ) {
     match remove(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => {
-            let _ = write_atomic(orphan_journal, "{\"version\":1,\"pending\":true}\n");
+            if write_atomic(orphan_journal, "{\"version\":1,\"pending\":true}\n").is_err() {
+                recovery_failure.store(true, std::sync::atomic::Ordering::Release);
+                let _ = write_atomic(
+                    orphan_recovery_failure,
+                    "{\"version\":1,\"pending\":true,\"reason\":\"orphanJournalWriteFailed\"}\n",
+                );
+            }
         }
     }
 }
@@ -125,6 +163,7 @@ impl CandidateHandle {
         self.runner.pid
     }
 
+    #[cfg(test)]
     pub fn runner_token(&self) -> &str {
         &self.runner.runner_token
     }
@@ -154,6 +193,7 @@ pub struct RollbackFailure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendFailure {
     Failed,
+    #[allow(dead_code)]
     Cancelled,
 }
 
@@ -171,6 +211,8 @@ pub enum ApplyFailure {
     CandidateStartFailed,
     ProcessReadinessFailed,
     ListenerReadinessFailed,
+    EgressReadinessFailed,
+    EgressProbeRequired,
     CandidateCleanupFailed,
     RollbackFailed,
     ProxyConfirmationFailed,
@@ -203,6 +245,13 @@ pub trait ApplyBackend {
         handle: &CandidateHandle,
         listeners: &[String],
     ) -> Result<(), BackendFailure>;
+    fn confirm_egress_ready(
+        &mut self,
+        generation_id: &GenerationId,
+        handle: &CandidateHandle,
+        listeners: &[String],
+        probe: &EgressProbeSettings,
+    ) -> Result<bool, BackendFailure>;
     fn rollback(
         &mut self,
         active: &GenerationView,
@@ -379,12 +428,30 @@ impl GenerationRuntime {
         })
     }
 
+    #[cfg(test)]
     pub fn select_desired(
         &mut self,
         config: &[u8],
         node_id: String,
         routing_revision: String,
         managed_listener_addresses: Vec<String>,
+    ) -> Result<GenerationId, ApplyFailure> {
+        self.select_desired_with_probe(
+            config,
+            node_id,
+            routing_revision,
+            managed_listener_addresses,
+            EgressProbeSettings::default(),
+        )
+    }
+
+    pub fn select_desired_with_probe(
+        &mut self,
+        config: &[u8],
+        node_id: String,
+        routing_revision: String,
+        managed_listener_addresses: Vec<String>,
+        egress_probe: EgressProbeSettings,
     ) -> Result<GenerationId, ApplyFailure> {
         let generation_id = self.clock.next()?;
         self.desired = Some(DesiredRecord {
@@ -395,6 +462,8 @@ impl GenerationRuntime {
                 routing_revision,
                 pid: None,
                 managed_listener_addresses,
+                egress_probe,
+                egress_verified: false,
                 readiness: ReadinessLevel::Desired,
             },
             config: config.to_vec(),
@@ -405,6 +474,7 @@ impl GenerationRuntime {
         Ok(generation_id)
     }
 
+    #[cfg(test)]
     pub fn restore_desired_after_restart(
         &mut self,
         config: &[u8],
@@ -424,11 +494,21 @@ impl GenerationRuntime {
     }
 
     pub fn status(&self) -> GenerationStatus {
-        let active = self.active.clone();
+        let recovery_failed = self
+            .store
+            .recovery_failure
+            .load(std::sync::atomic::Ordering::Acquire);
+        let active = self.active.clone().map(|mut active| {
+            if recovery_failed {
+                active.readiness = ReadinessLevel::Degraded;
+            }
+            active
+        });
         let proxy_ready = matches!(
             (&active, &self.active_handle, &self.proxy_generation),
             (Some(active), Some(handle), Some(proxy))
-                if active.readiness == ReadinessLevel::ListenerReady
+                if !recovery_failed
+                    && active.egress_verified
                     && active.generation_id == proxy.generation_id
                     && active.pid == Some(proxy.pid)
                     && handle.pid() == proxy.pid
@@ -437,10 +517,91 @@ impl GenerationRuntime {
             desired: self.desired.as_ref().map(|desired| desired.view.clone()),
             active,
             proxy_generation: self.proxy_generation.clone(),
-            phase: self.phase.clone(),
+            phase: if recovery_failed {
+                GenerationPhase::Degraded
+            } else {
+                self.phase.clone()
+            },
             proxy_ready,
-            last_error_code: self.last_error_code.clone(),
+            last_error_code: if recovery_failed {
+                Some("orphanJournalWriteFailed".to_string())
+            } else {
+                self.last_error_code.clone()
+            },
         }
+    }
+
+    pub fn revalidate_active<B: ApplyBackend>(
+        &mut self,
+        backend: &mut B,
+    ) -> Result<(), ApplyFailure> {
+        let (Some(active), Some(handle)) = (self.active.clone(), self.active_handle.as_ref())
+        else {
+            if self.proxy_generation.is_some() {
+                self.proxy_generation = None;
+                self.phase = GenerationPhase::Degraded;
+                self.last_error_code = Some("processReadinessFailed".to_string());
+                return Err(ApplyFailure::ProcessReadinessFailed);
+            }
+            return Ok(());
+        };
+        let checks = backend
+            .confirm_process_identity(&active.generation_id, handle)
+            .map_err(|_| ApplyFailure::ProcessReadinessFailed)
+            .and_then(|()| {
+                backend
+                    .confirm_listener_readiness(
+                        &active.generation_id,
+                        handle,
+                        &active.managed_listener_addresses,
+                    )
+                    .map_err(|_| ApplyFailure::ListenerReadinessFailed)
+            })
+            .and_then(|()| {
+                backend
+                    .confirm_egress_ready(
+                        &active.generation_id,
+                        handle,
+                        &active.managed_listener_addresses,
+                        &active.egress_probe,
+                    )
+                    .map_err(|_| ApplyFailure::EgressReadinessFailed)
+            });
+        let egress_verified = match checks {
+            Ok(verified) => verified,
+            Err(failure) => {
+                self.proxy_generation = None;
+                if let Some(active) = self.active.as_mut() {
+                    active.egress_verified = false;
+                    active.readiness = ReadinessLevel::Degraded;
+                }
+                self.phase = GenerationPhase::Degraded;
+                self.last_error_code = Some(failure_code(failure).to_string());
+                return Err(failure);
+            }
+        };
+        if !egress_verified {
+            if self.proxy_generation.is_some() {
+                self.proxy_generation = None;
+                if let Some(active) = self.active.as_mut() {
+                    active.egress_verified = false;
+                    active.readiness = ReadinessLevel::Degraded;
+                }
+                self.phase = GenerationPhase::Degraded;
+                self.last_error_code = Some("egressReadinessFailed".to_string());
+                return Err(ApplyFailure::EgressReadinessFailed);
+            }
+            if let Some(active) = self.active.as_mut() {
+                active.egress_verified = false;
+                active.readiness = ReadinessLevel::ListenerReady;
+            }
+            return Ok(());
+        }
+        if let Some(active) = self.active.as_mut() {
+            active.egress_verified = true;
+            active.readiness = ReadinessLevel::EgressReady;
+        }
+        Ok(())
     }
 
     fn begin_apply(&mut self) -> Result<ApplyPlan, ApplyFailure> {
@@ -541,7 +702,22 @@ impl GenerationRuntime {
         if let Some(failure) = readiness_failure {
             return self.cleanup_candidate_and_rollback(plan, backend, candidate, failure, false);
         }
-        let proxy_binding = if plan.proxy_snapshot.is_some() {
+        self.set_desired_readiness(&plan, ReadinessLevel::ListenerReady)?;
+        let egress_verified = backend
+            .confirm_egress_ready(
+                plan.generation_id(),
+                &candidate,
+                plan.managed_listener_addresses(),
+                &plan.desired.egress_probe,
+            )
+            .map_err(|failure| match failure {
+                BackendFailure::Cancelled => ApplyFailure::Cancelled,
+                BackendFailure::Failed => ApplyFailure::EgressReadinessFailed,
+            })?;
+        if egress_verified {
+            self.set_desired_readiness(&plan, ReadinessLevel::EgressReady)?;
+        }
+        let proxy_binding = if egress_verified && plan.proxy_snapshot.is_some() {
             match backend.bind_proxy(plan.generation_id(), &candidate) {
                 Ok(ProxyReadback::Bound(binding))
                     if binding.generation_id == *plan.generation_id()
@@ -562,7 +738,7 @@ impl GenerationRuntime {
         } else {
             None
         };
-        self.finish_success(plan, candidate, proxy_binding)
+        self.finish_success(plan, candidate, egress_verified, proxy_binding)
     }
 
     pub fn stop_active<B: ApplyBackend>(
@@ -628,6 +804,27 @@ impl GenerationRuntime {
         let (Some(active), Some(handle)) = (&self.active, &self.active_handle) else {
             return Err(ApplyFailure::NoDesired);
         };
+        if active.readiness != ReadinessLevel::EgressReady {
+            return Err(if active.egress_probe.is_configured() {
+                ApplyFailure::EgressReadinessFailed
+            } else {
+                ApplyFailure::EgressProbeRequired
+            });
+        }
+        let generation_id = active.generation_id.clone();
+        let listeners = active.managed_listener_addresses.clone();
+        backend
+            .confirm_process_identity(&generation_id, handle)
+            .map_err(|_| ApplyFailure::ProcessReadinessFailed)?;
+        backend
+            .confirm_listener_readiness(&generation_id, handle, &listeners)
+            .map_err(|_| ApplyFailure::ListenerReadinessFailed)?;
+        let egress_verified = backend
+            .confirm_egress_ready(&generation_id, handle, &listeners, &active.egress_probe)
+            .map_err(|_| ApplyFailure::EgressReadinessFailed)?;
+        if !egress_verified {
+            return Err(ApplyFailure::EgressReadinessFailed);
+        }
         match backend.bind_proxy(&active.generation_id, handle) {
             Ok(ProxyReadback::Bound(binding))
                 if binding.generation_id == active.generation_id && binding.pid == handle.pid() =>
@@ -711,15 +908,26 @@ impl GenerationRuntime {
             (Some(previous), Some(previous_handle)) => {
                 match backend.rollback(previous, previous_handle) {
                     Ok(runner) => {
+                        previous_handle.runner = runner.clone();
+                        let egress_ready = backend
+                            .confirm_egress_ready(
+                                &previous.generation_id,
+                                previous_handle,
+                                &previous.managed_listener_addresses,
+                                &previous.egress_probe,
+                            )
+                            .map_err(|_| ApplyFailure::RollbackFailed)?;
                         let mut active = previous.clone();
                         active.pid = Some(runner.pid);
+                        active.egress_verified = egress_ready;
                         active.readiness = if proxy_uncertain {
                             ReadinessLevel::Degraded
+                        } else if egress_ready {
+                            ReadinessLevel::EgressReady
                         } else {
                             ReadinessLevel::ListenerReady
                         };
                         self.active = Some(active);
-                        previous_handle.runner = runner;
                         self.active_handle = plan.previous_handle.take();
                         self.in_flight_transaction = None;
                         self.phase = if proxy_uncertain {
@@ -757,20 +965,28 @@ impl GenerationRuntime {
         &mut self,
         plan: ApplyPlan,
         candidate: CandidateHandle,
+        egress_verified: bool,
         proxy_binding: Option<ProxyGenerationView>,
     ) -> Result<GenerationStatus, ApplyFailure> {
         self.require_current(&plan)?;
         let mut active = plan.desired.clone();
         active.pid = Some(candidate.pid());
-        active.readiness = ReadinessLevel::ListenerReady;
+        active.egress_verified = egress_verified;
+        active.readiness = if egress_verified {
+            ReadinessLevel::EgressReady
+        } else {
+            ReadinessLevel::ListenerReady
+        };
         let active_pid = active.pid;
+        let active_readiness = active.readiness.clone();
         self.active = Some(active);
         self.active_handle = Some(candidate);
         self.proxy_generation = proxy_binding;
         if let Some(desired) = self.desired.as_mut() {
             if desired.view.generation_id == *plan.generation_id() {
                 desired.view.pid = active_pid;
-                desired.view.readiness = ReadinessLevel::ListenerReady;
+                desired.view.egress_verified = egress_verified;
+                desired.view.readiness = active_readiness;
             }
         }
         self.in_flight_transaction = None;
@@ -863,6 +1079,7 @@ impl GenerationRuntime {
 pub struct GenerationStore {
     root: PathBuf,
     retained: usize,
+    recovery_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl GenerationStore {
@@ -870,6 +1087,7 @@ impl GenerationStore {
         Self {
             root,
             retained: RETAINED_GENERATIONS,
+            recovery_failure: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -884,6 +1102,8 @@ impl GenerationStore {
         let lease = ConfigLease {
             path,
             orphan_journal: self.root.join(ORPHAN_JOURNAL_FILE),
+            orphan_recovery_failure: self.root.join(ORPHAN_RECOVERY_FAILURE_FILE),
+            recovery_failure: std::sync::Arc::clone(&self.recovery_failure),
         };
         self.cleanup_stale(lease.path())?;
         Ok(lease)
@@ -914,6 +1134,14 @@ impl GenerationStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err("generation-orphan-journal-cleanup-failed".to_string()),
         }
+        let marker = self.root.join(ORPHAN_RECOVERY_FAILURE_FILE);
+        match fs::remove_file(marker) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("generation-orphan-recovery-marker-cleanup-failed".to_string()),
+        }
+        self.recovery_failure
+            .store(false, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 
@@ -967,6 +1195,8 @@ fn failure_code(failure: ApplyFailure) -> &'static str {
         ApplyFailure::CandidateStartFailed => "candidateStartFailed",
         ApplyFailure::ProcessReadinessFailed => "processReadinessFailed",
         ApplyFailure::ListenerReadinessFailed => "listenerReadinessFailed",
+        ApplyFailure::EgressReadinessFailed => "egressReadinessFailed",
+        ApplyFailure::EgressProbeRequired => "egressProbeRequired",
         ApplyFailure::CandidateCleanupFailed => "candidateCleanupFailed",
         ApplyFailure::RollbackFailed => "rollbackFailed",
         ApplyFailure::ProxyConfirmationFailed => "proxyConfirmationFailed",
@@ -988,6 +1218,9 @@ mod tests {
         start_failure: Option<BackendFailure>,
         process_failure: Option<BackendFailure>,
         listener_failure: Option<BackendFailure>,
+        egress_failure: Option<BackendFailure>,
+        egress_verified: bool,
+        last_probe: Option<EgressProbeSettings>,
         stop_active_fails: bool,
         stop_candidate_fails: bool,
         confirm_exit_fails: bool,
@@ -1009,6 +1242,9 @@ mod tests {
                 start_failure: None,
                 process_failure: None,
                 listener_failure: None,
+                egress_failure: None,
+                egress_verified: true,
+                last_probe: None,
                 stop_active_fails: false,
                 stop_candidate_fails: false,
                 confirm_exit_fails: false,
@@ -1126,6 +1362,23 @@ mod tests {
             self.listener_failure.take().map_or(Ok(()), Err)
         }
 
+        fn confirm_egress_ready(
+            &mut self,
+            _generation_id: &GenerationId,
+            _handle: &CandidateHandle,
+            _listeners: &[String],
+            probe: &EgressProbeSettings,
+        ) -> Result<bool, BackendFailure> {
+            self.events.push("egressReady".to_string());
+            self.last_probe = Some(probe.clone());
+            if !probe.is_configured() {
+                return Ok(false);
+            }
+            self.egress_failure
+                .take()
+                .map_or(Ok(self.egress_verified), Err)
+        }
+
         fn rollback(
             &mut self,
             active: &GenerationView,
@@ -1177,12 +1430,31 @@ mod tests {
     }
 
     fn select(runtime: &mut GenerationRuntime, node: &str, revision: u64) -> GenerationId {
+        select_with_probe(
+            runtime,
+            node,
+            revision,
+            EgressProbeSettings {
+                url: "https://fixture.invalid/health".to_string(),
+                expected_status: 204,
+                ..EgressProbeSettings::default()
+            },
+        )
+    }
+
+    fn select_with_probe(
+        runtime: &mut GenerationRuntime,
+        node: &str,
+        revision: u64,
+        probe: EgressProbeSettings,
+    ) -> GenerationId {
         runtime
-            .select_desired(
+            .select_desired_with_probe(
                 format!(r#"{{"node":"{node}","secret":"hidden-{node}"}}"#).as_bytes(),
                 node.to_string(),
                 revision.to_string(),
                 vec!["127.0.0.1:10808".to_string()],
+                probe,
             )
             .unwrap()
     }
@@ -1194,6 +1466,81 @@ mod tests {
     ) -> GenerationStatus {
         select(runtime, node, 1);
         runtime.execute_latest(backend).unwrap()
+    }
+
+    #[test]
+    fn empty_egress_url_keeps_listener_ready_but_never_binds_proxy() {
+        let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let mut backend = FakeBackend {
+            proxy_enabled: true,
+            ..FakeBackend::default()
+        };
+        runtime
+            .select_desired(b"{}", "A".to_string(), "1".to_string(), vec![])
+            .unwrap();
+        let status = runtime.execute_latest(&mut backend).unwrap();
+        let active = status.active.unwrap();
+        assert_eq!(active.readiness, ReadinessLevel::ListenerReady);
+        assert!(!active.egress_verified);
+        assert!(status.proxy_generation.is_none());
+        assert!(!status.proxy_ready);
+        assert_eq!(status.phase, GenerationPhase::Idle);
+    }
+
+    #[test]
+    fn configured_egress_url_promotes_listener_to_egress_verified() {
+        let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let mut backend = FakeBackend {
+            proxy_enabled: true,
+            ..FakeBackend::default()
+        };
+        let probe = EgressProbeSettings {
+            url: "https://fixture.invalid/health".to_string(),
+            http_port: 18080,
+            socks_port: 18081,
+            ..EgressProbeSettings::default()
+        };
+        select_with_probe(&mut runtime, "A", 1, probe.clone());
+        let status = runtime.execute_latest(&mut backend).unwrap();
+        assert_eq!(
+            status.active.unwrap().readiness,
+            ReadinessLevel::EgressReady
+        );
+        assert!(status.proxy_ready);
+        assert_eq!(backend.last_probe, Some(probe));
+    }
+
+    #[test]
+    fn active_generation_keeps_probe_snapshot_when_new_port_settings_are_pending() {
+        let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let mut backend = FakeBackend::default();
+        let probe_a = EgressProbeSettings {
+            url: "https://a.fixture.invalid/health".to_string(),
+            http_port: 18080,
+            socks_port: 18081,
+            ..EgressProbeSettings::default()
+        };
+        let probe_b = EgressProbeSettings {
+            url: "https://b.fixture.invalid/health".to_string(),
+            http_port: 28080,
+            socks_port: 28081,
+            ..EgressProbeSettings::default()
+        };
+        select_with_probe(&mut runtime, "A", 1, probe_a.clone());
+        let active = runtime
+            .execute_latest(&mut backend)
+            .unwrap()
+            .active
+            .unwrap();
+        select_with_probe(&mut runtime, "B", 2, probe_b);
+        runtime.revalidate_active(&mut backend).unwrap();
+        assert_eq!(backend.last_probe, Some(probe_a));
+        assert_eq!(
+            runtime.status().active.unwrap().generation_id,
+            active.generation_id
+        );
+        assert_eq!(runtime.status().desired.unwrap().node_id, "B");
+        assert_eq!(runtime.status().phase, GenerationPhase::PendingApply);
     }
 
     #[test]
@@ -1483,8 +1830,10 @@ mod tests {
     #[test]
     fn proxy_binding_is_empty_or_exactly_matches_active_generation_and_pid() {
         let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        let mut backend = FakeBackend::default();
-        backend.proxy_enabled = true;
+        let mut backend = FakeBackend {
+            proxy_enabled: true,
+            ..FakeBackend::default()
+        };
         select(&mut runtime, "B", 2);
         let status = runtime.execute_latest(&mut backend).unwrap();
         let active = status.active.unwrap();
@@ -1560,12 +1909,20 @@ mod tests {
         let journal = root.join(ORPHAN_JOURNAL_FILE);
         write_atomic(&generation, "{\"secret\":\"do-not-log\"}").unwrap();
 
-        release_config_lease(&generation, &journal, |_| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "injected delete failure",
-            ))
-        });
+        let recovery_marker = root.join(ORPHAN_RECOVERY_FAILURE_FILE);
+        let recovery_failure = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        release_config_lease(
+            &generation,
+            &journal,
+            &recovery_marker,
+            &recovery_failure,
+            |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected delete failure",
+                ))
+            },
+        );
 
         assert!(generation.exists());
         let marker = fs::read_to_string(&journal).unwrap();
@@ -1590,6 +1947,29 @@ mod tests {
         store.sweep_orphans().unwrap();
         assert!(!generation.exists());
         assert!(!journal.exists());
+    }
+
+    #[test]
+    fn orphan_journal_write_failure_sets_diagnostic_recovery_state_without_secret() {
+        let temp = tempfile::tempdir().unwrap();
+        let generation = temp.path().join("generation-secret.json");
+        let missing_parent = temp.path().join("missing");
+        let journal = missing_parent.join(ORPHAN_JOURNAL_FILE);
+        let marker = missing_parent.join(ORPHAN_RECOVERY_FAILURE_FILE);
+        let recovery_failure = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        write_atomic(&generation, "{\"secret\":\"hidden\"}").unwrap();
+        fs::create_dir_all(&missing_parent).unwrap();
+        fs::create_dir(&journal).unwrap();
+        fs::create_dir(&marker).unwrap();
+        release_config_lease(&generation, &journal, &marker, &recovery_failure, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected delete failure",
+            ))
+        });
+        assert!(recovery_failure.load(std::sync::atomic::Ordering::Acquire));
+        assert!(journal.is_dir());
+        assert!(marker.is_dir());
     }
 
     #[test]

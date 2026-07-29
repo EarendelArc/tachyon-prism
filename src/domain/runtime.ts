@@ -43,6 +43,9 @@ export interface RuntimeSettings {
   xrayStatsListen: string;
   xrayStatsPort: number;
   xrayReleaseChannel: ReleaseChannel;
+  xrayEgressProbeUrl: string;
+  xrayEgressProbeStatus: number;
+  xrayEgressProbeNonce: string;
 }
 
 export type ManagedBinaryKind = "tachyonCore" | "xray";
@@ -144,6 +147,7 @@ export type XrayGenerationReadiness =
   | "configValidated"
   | "processReady"
   | "listenerReady"
+  | "egressReady"
   | "degraded";
 
 export type XrayGenerationPhase =
@@ -849,6 +853,9 @@ function previewRuntimeSettings(): RuntimeSettings {
     xrayStatsListen: "127.0.0.1",
     xrayStatsPort: 10085,
     xrayReleaseChannel: "stable",
+    xrayEgressProbeUrl: "",
+    xrayEgressProbeStatus: 204,
+    xrayEgressProbeNonce: "",
   };
 }
 

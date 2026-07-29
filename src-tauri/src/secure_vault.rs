@@ -242,11 +242,9 @@ fn clear_at_with(
     let _guard = vault_lock()?;
     recover_interrupted_clear(path, keys, files)?;
     write_clear_state(path)?;
-    if let Err(error) = keys.clear() {
-        // The marker and ciphertext are intentionally retained. Recovery checks
-        // whether the key still exists before deciding which state survived.
-        return Err(error);
-    }
+    // The marker and ciphertext are intentionally retained. Recovery checks
+    // whether the key still exists before deciding which state survived.
+    keys.clear()?;
     remove_if_exists(files, path).map_err(|_| "secure-vault-clear-pending".to_string())?;
     remove_if_exists(files, &clear_state_path(path))
         .map_err(|_| "secure-vault-clear-state-pending".to_string())
