@@ -364,6 +364,7 @@ const STARTUP_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_READINESS_INTERVAL: Duration = Duration::from_millis(100);
 const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const EGRESS_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+const PROXY_BIND_EGRESS_TIMEOUT: Duration = Duration::from_secs(2);
 const PROXY_RESTORE_ATTEMPTS: usize = 3;
 const PROXY_RESTORE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const TELEMETRY_EVENT_LIMIT: usize = 64;
@@ -920,22 +921,38 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
         &mut self,
         generation_id: &xray_generation::GenerationId,
         handle: &xray_generation::CandidateHandle,
+        active: &xray_generation::GenerationView,
     ) -> Result<xray_generation::ProxyReadback, xray_generation::BackendFailure> {
-        system_proxy::apply(self.app, self.proxy, true)
+        let settings = active_proxy_settings(self.app, active)
             .map_err(|_| xray_generation::BackendFailure::Failed)?;
-        let current = system_proxy::query(self.app, self.proxy)
+        system_proxy::apply_with_settings(self.app, self.proxy, &settings, true)
+            .map_err(|_| xray_generation::BackendFailure::Failed)?;
+        let current = system_proxy::query_with_settings(self.app, self.proxy, &settings)
             .map_err(|_| xray_generation::BackendFailure::Failed)?
             .current;
-        if current.error.is_none() && current.enabled && current.matches_prism {
-            Ok(xray_generation::ProxyReadback::Bound(
-                xray_generation::ProxyGenerationView {
-                    generation_id: generation_id.clone(),
-                    pid: handle.pid(),
-                },
-            ))
-        } else {
-            Ok(xray_generation::ProxyReadback::Unknown)
+        let post_bind_ok = current.error.is_none()
+            && current.enabled
+            && current.matches_prism
+            && self.confirm_process_identity(generation_id, handle).is_ok()
+            && self
+                .confirm_listener_readiness(
+                    generation_id,
+                    handle,
+                    &active.managed_listener_addresses,
+                )
+                .is_ok()
+            && active.egress_verified
+            && probe_xray_egress(&active.egress_probe, PROXY_BIND_EGRESS_TIMEOUT).is_ok();
+        if !post_bind_ok {
+            let _ = system_proxy::restore_if_pending(self.app, self.proxy);
+            return Err(xray_generation::BackendFailure::Failed);
         }
+        Ok(xray_generation::ProxyReadback::Bound(
+            xray_generation::ProxyGenerationView {
+                generation_id: generation_id.clone(),
+                pid: handle.pid(),
+            },
+        ))
     }
 }
 
@@ -3139,10 +3156,28 @@ fn failed_proxy_probe_result(
 }
 
 fn socks5_connect(stream: &mut TcpStream, target: &HttpProbeTarget) -> Result<(), String> {
+    socks5_connect_with_deadline(stream, target, None)
+}
+
+fn socks5_connect_with_deadline(
+    stream: &mut TcpStream,
+    target: &HttpProbeTarget,
+    deadline: Option<Instant>,
+) -> Result<(), String> {
+    let refresh = |stream: &TcpStream| -> Result<(), String> {
+        if let Some(deadline) = deadline {
+            let remaining = remaining_probe_time(deadline)?;
+            set_probe_timeouts(stream, remaining)?;
+        }
+        Ok(())
+    };
+    refresh(stream)?;
     stream
         .write_all(&[0x05, 0x01, 0x00])
         .map_err(|err| format!("write SOCKS greeting: {err}"))?;
+    refresh(stream)?;
     let mut greeting = [0_u8; 2];
+    refresh(stream)?;
     stream
         .read_exact(&mut greeting)
         .map_err(|err| format!("read SOCKS greeting: {err}"))?;
@@ -3179,6 +3214,7 @@ fn socks5_connect(stream: &mut TcpStream, target: &HttpProbeTarget) -> Result<()
         .write_all(&request)
         .map_err(|err| format!("write SOCKS connect request: {err}"))?;
 
+    refresh(stream)?;
     let mut header = [0_u8; 4];
     stream
         .read_exact(&mut header)
@@ -3196,6 +3232,7 @@ fn socks5_connect(stream: &mut TcpStream, target: &HttpProbeTarget) -> Result<()
         0x01 => 4,
         0x03 => {
             let mut len = [0_u8; 1];
+            refresh(stream)?;
             stream
                 .read_exact(&mut len)
                 .map_err(|err| format!("read SOCKS bind domain length: {err}"))?;
@@ -3204,6 +3241,7 @@ fn socks5_connect(stream: &mut TcpStream, target: &HttpProbeTarget) -> Result<()
         0x04 => 16,
         other => return Err(format!("invalid SOCKS address type: {other}")),
     };
+    refresh(stream)?;
     let mut skip = vec![0_u8; address_len + 2];
     stream
         .read_exact(&mut skip)
@@ -3264,7 +3302,9 @@ fn probe_https_via_http_proxy(
         &target.host_header,
         &[("Proxy-Connection", "keep-alive")],
     )?;
+    set_probe_timeouts(&stream, remaining_probe_time(deadline)?)?;
     write_with_deadline(&mut stream, &request, deadline)?;
+    set_probe_timeouts(&stream, remaining_probe_time(deadline)?)?;
     let (status, _) = read_http_headers(&mut stream, deadline)?;
     if status != Some(200) {
         return Err(format!("HTTP proxy CONNECT returned {:?}", status));
@@ -3296,7 +3336,7 @@ fn probe_https_via_socks5(
         path_and_query: target.path.clone(),
         port: target.port,
     };
-    socks5_connect(&mut stream, &http_target)?;
+    socks5_connect_with_deadline(&mut stream, &http_target, Some(deadline))?;
     probe_https_stream(
         stream,
         target,
@@ -3318,16 +3358,12 @@ fn connect_local_proxy(
         .to_socket_addrs()
         .map_err(|error| format!("resolve local {kind} proxy: {error}"))?
         .collect::<Vec<_>>();
-    let timeout = remaining_probe_time(deadline)?;
     for address in addrs {
+        let timeout = remaining_probe_time(deadline)?;
         if let Ok(stream) = TcpStream::connect_timeout(&address, timeout) {
             let remaining = remaining_probe_time(deadline)?;
-            stream
-                .set_read_timeout(Some(remaining))
-                .map_err(|error| format!("set {kind} probe read timeout: {error}"))?;
-            stream
-                .set_write_timeout(Some(remaining))
-                .map_err(|error| format!("set {kind} probe write timeout: {error}"))?;
+            set_probe_timeouts(&stream, remaining)
+                .map_err(|error| format!("set {kind} probe timeout: {error}"))?;
             return Ok(stream);
         }
     }
@@ -3359,7 +3395,9 @@ fn probe_https_stream(
         headers.push(("X-Tachyon-Probe-Nonce", expected_nonce));
     }
     let request = build_http_request(Method::GET, &target.path, &target.host_header, &headers)?;
+    set_probe_timeouts(tls.get_mut(), remaining_probe_time(deadline)?)?;
     write_with_deadline(&mut tls, &request, deadline)?;
+    set_probe_timeouts(tls.get_mut(), remaining_probe_time(deadline)?)?;
     let (status, nonce) = read_http_headers(&mut tls, deadline)?;
     if status != Some(expected_status) {
         return Err(format!("HTTPS egress probe returned {:?}", status));
@@ -3377,6 +3415,15 @@ fn remaining_probe_time(deadline: Instant) -> Result<Duration, String> {
     } else {
         Ok(remaining)
     }
+}
+
+fn set_probe_timeouts(stream: &TcpStream, timeout: Duration) -> Result<(), String> {
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| format!("set probe read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|error| format!("set probe write timeout: {error}"))
 }
 
 fn build_http_request(
@@ -4747,6 +4794,18 @@ fn egress_probe_settings(settings: &RuntimeSettings) -> xray_generation::EgressP
         socks_listen: settings.xray_socks_listen.clone(),
         socks_port: settings.xray_socks_port,
     }
+}
+
+fn active_proxy_settings(
+    app: &tauri::AppHandle,
+    active: &xray_generation::GenerationView,
+) -> Result<RuntimeSettings, String> {
+    let mut settings = load_runtime_settings(app)?;
+    settings.xray_http_listen = active.egress_probe.http_listen.clone();
+    settings.xray_http_port = active.egress_probe.http_port;
+    settings.xray_socks_listen = active.egress_probe.socks_listen.clone();
+    settings.xray_socks_port = active.egress_probe.socks_port;
+    Ok(settings)
 }
 
 fn normalize_release_channel(value: String, fallback: String) -> String {
@@ -7515,7 +7574,7 @@ fn owned_tcp_listener_table(pid: u32) -> Result<Vec<OwnedTcpListener>, String> {
 
 #[cfg(target_os = "macos")]
 fn macos_tcp_listener_address(tcp: &libproc::libproc::net_info::TcpSockInfo) -> Option<SocketAddr> {
-    let port = (tcp.tcpsi_ini.insi_lport as u32).swap_bytes() as u16;
+    let port = macos_tcp_listener_port(tcp.tcpsi_ini.insi_lport);
     if port == 0 {
         return None;
     }
@@ -7526,6 +7585,11 @@ fn macos_tcp_listener_address(tcp: &libproc::libproc::net_info::TcpSockInfo) -> 
     }
     let bytes = unsafe { tcp.tcpsi_ini.insi_laddr.ina_6.s6_addr };
     Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::from(bytes)), port))
+}
+
+#[allow(dead_code)]
+fn macos_tcp_listener_port(network_order: u16) -> u16 {
+    u16::from_be(network_order)
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
@@ -10489,6 +10553,40 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         .is_err());
     }
 
+    #[test]
+    fn egress_probe_deadline_bounds_slow_tls_and_byte_stream() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_fake_headers(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(250));
+            let _ = stream.write_all(&[0x16]);
+        });
+        let target = HttpsProbeTarget {
+            host: "localhost".to_string(),
+            host_header: "localhost:443".to_string(),
+            path: "/health".to_string(),
+            port: 443,
+        };
+        let started = Instant::now();
+        assert!(probe_https_via_http_proxy(
+            "127.0.0.1",
+            port,
+            &target,
+            204,
+            "",
+            &RootCertStore::empty(),
+            started + Duration::from_millis(80),
+        )
+        .is_err());
+        assert!(started.elapsed() < Duration::from_millis(220));
+        server.join().unwrap();
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_libproc_ownership_fixture_matches_current_ipv4_listener() {
@@ -10498,6 +10596,14 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         assert!(listeners
             .iter()
             .any(|listener| listener.address == expected && listener.pid == std::process::id()));
+    }
+
+    #[test]
+    fn macos_listener_port_decodes_network_order_as_u16() {
+        for port in [1_u16, 80, 443, 10808, 65535] {
+            assert_eq!(macos_tcp_listener_port(port.to_be()), port);
+        }
+        assert_eq!(macos_tcp_listener_port(0), 0);
     }
 
     #[test]

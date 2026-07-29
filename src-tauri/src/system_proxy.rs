@@ -140,23 +140,47 @@ pub(crate) fn query(
     })
 }
 
-pub(crate) fn apply(
+pub(crate) fn apply_with_settings(
     app: &tauri::AppHandle,
     runtime: &SystemProxyRuntime,
+    settings: &RuntimeSettings,
     enabled: bool,
 ) -> Result<SystemProxyTransactionResult, String> {
     let _guard = runtime
         .transaction
         .lock()
         .map_err(|error| format!("lock system proxy transaction: {error}"))?;
-    let settings = load_runtime_settings(app)?;
-    validate_desired_settings(&settings, enabled)?;
+    validate_desired_settings(settings, enabled)?;
     apply_transaction(
         &PlatformProxyBackend,
-        &settings,
+        settings,
         &journal_path(app)?,
         enabled,
     )
+}
+
+pub(crate) fn query_with_settings(
+    app: &tauri::AppHandle,
+    runtime: &SystemProxyRuntime,
+    settings: &RuntimeSettings,
+) -> Result<SystemProxyQuery, String> {
+    let _guard = runtime
+        .transaction
+        .lock()
+        .map_err(|error| format!("lock system proxy transaction: {error}"))?;
+    let backend = PlatformProxyBackend;
+    let current = query_or_error_state(&backend, settings);
+    let pending_transaction =
+        read_optional_journal(&journal_path(app)?)?.map(|journal| PendingSystemProxyTransaction {
+            transaction_id: journal.transaction_id,
+            created_at: journal.created_at,
+            desired_enabled: journal.desired_enabled,
+        });
+    Ok(SystemProxyQuery {
+        capability: backend.capability(),
+        current,
+        pending_transaction,
+    })
 }
 
 pub(crate) fn restore_if_pending(

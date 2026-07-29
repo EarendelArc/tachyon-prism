@@ -1,13 +1,17 @@
 use crate::write_atomic;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 const CLOCK_VERSION: u32 = 1;
 const RETAINED_GENERATIONS: usize = 3;
 const ORPHAN_JOURNAL_FILE: &str = "orphan-journal.json";
 const ORPHAN_RECOVERY_FAILURE_FILE: &str = "orphan-recovery-failed.json";
+const INSTANCE_LEASE_FILE: &str = "instance-lease.json";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
@@ -106,6 +110,7 @@ pub struct ConfigLease {
     orphan_journal: PathBuf,
     orphan_recovery_failure: PathBuf,
     recovery_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    leased_paths: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl ConfigLease {
@@ -116,6 +121,9 @@ impl ConfigLease {
 
 impl Drop for ConfigLease {
     fn drop(&mut self) {
+        if let Ok(mut paths) = self.leased_paths.lock() {
+            paths.remove(&self.path);
+        }
         release_config_lease(
             &self.path,
             &self.orphan_journal,
@@ -261,6 +269,7 @@ pub trait ApplyBackend {
         &mut self,
         generation_id: &GenerationId,
         handle: &CandidateHandle,
+        active: &GenerationView,
     ) -> Result<ProxyReadback, BackendFailure>;
 }
 
@@ -718,7 +727,7 @@ impl GenerationRuntime {
             self.set_desired_readiness(&plan, ReadinessLevel::EgressReady)?;
         }
         let proxy_binding = if egress_verified && plan.proxy_snapshot.is_some() {
-            match backend.bind_proxy(plan.generation_id(), &candidate) {
+            match backend.bind_proxy(plan.generation_id(), &candidate, &plan.desired) {
                 Ok(ProxyReadback::Bound(binding))
                     if binding.generation_id == *plan.generation_id()
                         && binding.pid == candidate.pid() =>
@@ -825,7 +834,7 @@ impl GenerationRuntime {
         if !egress_verified {
             return Err(ApplyFailure::EgressReadinessFailed);
         }
-        match backend.bind_proxy(&active.generation_id, handle) {
+        match backend.bind_proxy(&active.generation_id, handle, active) {
             Ok(ProxyReadback::Bound(binding))
                 if binding.generation_id == active.generation_id && binding.pid == handle.pid() =>
             {
@@ -1080,18 +1089,140 @@ pub struct GenerationStore {
     root: PathBuf,
     retained: usize,
     recovery_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    instance_lease: Option<InstanceLease>,
+    leased_paths: Arc<Mutex<HashSet<PathBuf>>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstanceLeaseMetadata {
+    version: u32,
+    boot_epoch: String,
+    pid: u32,
+    creation_token: String,
+}
+
+#[derive(Debug)]
+struct InstanceLease {
+    path: PathBuf,
+    creation_token: String,
+}
+
+impl Drop for InstanceLease {
+    fn drop(&mut self) {
+        let Ok(raw) = fs::read_to_string(&self.path) else {
+            return;
+        };
+        let Ok(metadata) = serde_json::from_str::<InstanceLeaseMetadata>(&raw) else {
+            return;
+        };
+        if metadata.creation_token == self.creation_token {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn acquire_instance_lease(root: &Path) -> Option<InstanceLease> {
+    if fs::create_dir_all(root).is_err() {
+        return None;
+    }
+    let path = root.join(INSTANCE_LEASE_FILE);
+    for attempt in 0..2 {
+        let creation_token = random_epoch();
+        let metadata = InstanceLeaseMetadata {
+            version: 1,
+            boot_epoch: random_epoch(),
+            pid: std::process::id(),
+            creation_token: creation_token.clone(),
+        };
+        let data = serde_json::to_vec(&metadata).ok()?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                if file.write_all(&data).is_err() {
+                    let _ = fs::remove_file(&path);
+                    return None;
+                }
+                return Some(InstanceLease {
+                    path,
+                    creation_token,
+                });
+            }
+            Err(_) if attempt == 0 => {
+                let Ok(raw) = fs::read_to_string(&path) else {
+                    return None;
+                };
+                let Ok(existing) = serde_json::from_str::<InstanceLeaseMetadata>(&raw) else {
+                    return None;
+                };
+                if owner_pid_alive(existing.pid) {
+                    return None;
+                }
+                if fs::remove_file(&path).is_err() {
+                    return None;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn owner_pid_alive(pid: u32) -> bool {
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    if pid == std::process::id() {
+        return true;
+    }
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code = 0;
+        let alive = GetExitCodeProcess(handle, &mut exit_code) != 0 && exit_code == 259;
+        let _ = windows_sys::Win32::Foundation::CloseHandle(handle);
+        alive
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn owner_pid_alive(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).is_dir()
+}
+
+#[cfg(target_os = "macos")]
+fn owner_pid_alive(pid: u32) -> bool {
+    use libproc::libproc::bsd_info::BSDInfo;
+    libproc::libproc::proc_pid::pidinfo::<BSDInfo>(pid as i32, 0).is_ok()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+fn owner_pid_alive(pid: u32) -> bool {
+    pid == std::process::id()
 }
 
 impl GenerationStore {
     pub fn new(root: PathBuf) -> Self {
+        let instance_lease = acquire_instance_lease(&root);
         Self {
             root,
             retained: RETAINED_GENERATIONS,
             recovery_failure: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            instance_lease,
+            leased_paths: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
     pub fn stage(&self, plan: &ApplyPlan) -> Result<ConfigLease, String> {
+        if self.instance_lease.is_none() {
+            return Err("generation-instance-lease-unavailable".to_string());
+        }
         fs::create_dir_all(&self.root).map_err(|_| "generation-dir-create-failed".to_string())?;
         let path = self
             .root
@@ -1104,12 +1235,20 @@ impl GenerationStore {
             orphan_journal: self.root.join(ORPHAN_JOURNAL_FILE),
             orphan_recovery_failure: self.root.join(ORPHAN_RECOVERY_FAILURE_FILE),
             recovery_failure: std::sync::Arc::clone(&self.recovery_failure),
+            leased_paths: Arc::clone(&self.leased_paths),
         };
+        self.leased_paths
+            .lock()
+            .map_err(|_| "generation-lease-state-failed".to_string())?
+            .insert(lease.path.clone());
         self.cleanup_stale(lease.path())?;
         Ok(lease)
     }
 
     pub fn sweep_orphans(&self) -> Result<(), String> {
+        if self.instance_lease.is_none() {
+            return Err("generation-instance-lease-unavailable".to_string());
+        }
         if !self.root.exists() {
             return Ok(());
         }
@@ -1123,7 +1262,12 @@ impl GenerationStore {
                 .file_name()
                 .and_then(|value| value.to_str())
                 .is_some_and(|name| name.starts_with("generation-") && name.ends_with(".json"));
-            if is_generation {
+            let leased = self
+                .leased_paths
+                .lock()
+                .map_err(|_| "generation-lease-state-failed".to_string())?
+                .contains(&path);
+            if is_generation && !leased {
                 fs::remove_file(path)
                     .map_err(|_| "generation-orphan-cleanup-failed".to_string())?;
             }
@@ -1158,7 +1302,12 @@ impl GenerationStore {
                         .is_some_and(|name| name.starts_with("generation-"))
             })
             .collect::<Vec<_>>();
-        files.retain(|path| path != current);
+        let leased_paths = self
+            .leased_paths
+            .lock()
+            .map_err(|_| "generation-lease-state-failed".to_string())?
+            .clone();
+        files.retain(|path| path != current && !leased_paths.contains(path));
         files.sort_by_key(|path| {
             (
                 fs::metadata(path)
@@ -1411,6 +1560,7 @@ mod tests {
             &mut self,
             generation_id: &GenerationId,
             handle: &CandidateHandle,
+            _active: &GenerationView,
         ) -> Result<ProxyReadback, BackendFailure> {
             self.events.push("bindProxy".to_string());
             Ok(self.bind_readback.clone().unwrap_or_else(|| {
@@ -1427,6 +1577,19 @@ mod tests {
             clock: GenerationClock::deterministic(epoch, 0, None),
             ..GenerationRuntime::default()
         }
+    }
+
+    fn generation_files(root: &Path) -> Vec<PathBuf> {
+        fs::read_dir(root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("generation-") && name.ends_with(".json"))
+            })
+            .collect()
     }
 
     fn select(runtime: &mut GenerationRuntime, node: &str, revision: u64) -> GenerationId {
@@ -1772,7 +1935,7 @@ mod tests {
         assert!(runtime.status().active.is_none());
         assert!(runtime.active_handle.is_none());
         assert!(backend.live.is_empty());
-        assert_eq!(fs::read_dir(&runtime.store.root).unwrap().count(), 0);
+        assert!(generation_files(&runtime.store.root).is_empty());
     }
 
     #[test]
@@ -1851,17 +2014,12 @@ mod tests {
             select(&mut runtime, &format!("N{index}"), index);
             runtime.execute_latest(&mut backend).unwrap();
         }
-        let count = fs::read_dir(&runtime.store.root).unwrap().count();
-        assert_eq!(count, 1);
-        let generation_path = fs::read_dir(&runtime.store.root)
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+        let files = generation_files(&runtime.store.root);
+        assert_eq!(files.len(), 1);
+        let generation_path = &files[0];
         #[cfg(windows)]
         {
-            let audit = crate::windows_file_dacl_audit(&generation_path).unwrap();
+            let audit = crate::windows_file_dacl_audit(generation_path).unwrap();
             assert!(audit.protected);
         }
         #[cfg(unix)]
@@ -1897,6 +2055,26 @@ mod tests {
         write_atomic(&orphan, "{\"secret\":true}").unwrap();
         assert!(orphan.exists());
         runtime.store.sweep_orphans().unwrap();
+        assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn orphan_sweep_refuses_a_second_live_instance_and_preserves_files() {
+        let root = tempfile::tempdir().unwrap();
+        let first = GenerationStore::new(root.path().to_path_buf());
+        let orphan = root.path().join("generation-live-owner.json");
+        fs::write(&orphan, "{}").unwrap();
+
+        let second = GenerationStore::new(root.path().to_path_buf());
+        assert_eq!(
+            second.sweep_orphans().unwrap_err(),
+            "generation-instance-lease-unavailable"
+        );
+        assert!(orphan.exists());
+
+        drop(first);
+        let third = GenerationStore::new(root.path().to_path_buf());
+        third.sweep_orphans().unwrap();
         assert!(!orphan.exists());
     }
 
@@ -1987,10 +2165,11 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(runtime.execute_latest(&mut backend).is_err());
-            let files = fs::read_dir(&runtime.store.root)
-                .map(|entries| entries.count())
-                .unwrap_or_default();
-            assert_eq!(files, 0, "{scenario} left an orphan generation config");
+            let files = generation_files(&runtime.store.root);
+            assert!(
+                files.is_empty(),
+                "{scenario} left an orphan generation config"
+            );
             assert!(runtime.status().active.is_none());
             assert!(runtime.status().proxy_generation.is_none());
         }
