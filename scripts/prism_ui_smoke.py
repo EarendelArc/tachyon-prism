@@ -996,6 +996,7 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
                 domainStrategy: config.routing?.domainStrategy ?? '',
                 firstTrafficOutboundTag: trafficRules[0]?.outboundTag ?? '',
                 firstConfiguredTrafficOutboundTag: trafficOutboundTags[0] ?? '',
+                selectedTrafficOutboundTag: trafficOutboundTags[0] ?? '',
                 catchAllOutboundTag: catchAllRule.outboundTag ?? '',
                 catchAllProtocol: catchAllOutbound.protocol ?? '',
                 catchAllIsExplicit: Boolean(catchAllRule.outboundTag),
@@ -1840,18 +1841,19 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
         assert_contains_any(text, "mode selected", "模式已选择")
         if active_routing_mode(cdp) != "global":
             raise AssertionError("global routing mode did not become active")
-        summary = xray_routing_summary(cdp)
+        global_summary = xray_routing_summary(cdp)
         if (
-            not summary["hasApiRule"]
-            or not summary["catchAllIsExplicit"]
-            or not summary["catchAllTargetIsConfigured"]
-            or not summary["catchAllTargetIsTrafficOutbound"]
-            or summary["trafficRulesBeforeCatchAll"] != 0
-            or summary["catchAllRejectedProtocol"]
-            or summary["firstTrafficOutboundTag"] != summary["catchAllOutboundTag"]
-            or summary["catchAllProtocol"] in ("", "freedom", "blackhole")
+            not global_summary["hasApiRule"]
+            or not global_summary["catchAllIsExplicit"]
+            or not global_summary["catchAllTargetIsConfigured"]
+            or not global_summary["catchAllTargetIsTrafficOutbound"]
+            or global_summary["trafficRulesBeforeCatchAll"] != 0
+            or global_summary["catchAllRejectedProtocol"]
+            or global_summary["firstTrafficOutboundTag"] != global_summary["catchAllOutboundTag"]
+            or global_summary["selectedTrafficOutboundTag"] != global_summary["catchAllOutboundTag"]
+            or global_summary["catchAllProtocol"] in ("", "freedom", "blackhole")
         ):
-            raise AssertionError(f"global routing config mismatch: {summary}")
+            raise AssertionError(f"global routing config mismatch: {global_summary}")
 
         text = switch_routing_mode(cdp, "direct")
         assert_contains_any(text, "mode selected", "模式已选择")
@@ -2072,6 +2074,14 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
             "edgeExecutable": str(edge_path.resolve()),
             "port": port,
             "viewport": {"width": 800, "height": 540},
+            "globalRouting": {
+                "selectedTrafficOutboundTag": global_summary["selectedTrafficOutboundTag"],
+                "catchAllOutboundTag": global_summary["catchAllOutboundTag"],
+                "strictSelectedTrafficOutboundMatch": (
+                    global_summary["selectedTrafficOutboundTag"]
+                    == global_summary["catchAllOutboundTag"]
+                ),
+            },
         }
     finally:
         if cdp is not None:
