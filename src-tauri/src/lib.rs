@@ -871,8 +871,10 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
             return Ok(false);
         }
         probe_xray_egress(probe, EGRESS_PROBE_TIMEOUT)
-            .map(|()| true)
-            .map_err(|_| xray_generation::BackendFailure::Failed)
+            .map_err(|_| xray_generation::BackendFailure::Failed)?;
+        self.confirm_process_identity(generation_id, handle)?;
+        self.confirm_listener_readiness(generation_id, handle, listeners)?;
+        Ok(true)
     }
 
     fn rollback(
@@ -1302,12 +1304,12 @@ fn core_health_check_with_timeout(
 }
 
 fn core_health_url(settings: &RuntimeSettings) -> Result<String, String> {
-    let host = local_probe_host(&settings.tachyon_ipc_listen)?;
-    Ok(format!(
-        "http://{}:{}/v1/health",
-        http_url_host(&host),
+    let address = local_loopback_socket_addr(
+        &settings.tachyon_ipc_listen,
         settings.tachyon_ipc_port,
-    ))
+        "Tachyon Core IPC",
+    )?;
+    Ok(format!("http://{address}/v1/health"))
 }
 
 #[tauri::command]
@@ -1639,12 +1641,12 @@ fn xray_traffic_stats(app: tauri::AppHandle) -> Result<XrayTrafficStats, String>
 #[tauri::command]
 fn tachyon_telemetry_events(app: tauri::AppHandle) -> Result<TachyonTelemetryPoll, String> {
     let settings = load_runtime_settings(&app)?;
-    let host = local_probe_host(&settings.tachyon_ipc_listen)?;
-    let url = format!(
-        "http://{}:{}/v1/telemetry/sse",
-        http_url_host(&host),
+    let address = local_loopback_socket_addr(
+        &settings.tachyon_ipc_listen,
         settings.tachyon_ipc_port,
-    );
+        "Tachyon telemetry",
+    )?;
+    let url = format!("http://{address}/v1/telemetry/sse");
     let interval = Duration::from_millis(u64::from(
         settings.tachyon_telemetry_interval_ms.clamp(100, 2_000),
     ));
@@ -3131,22 +3133,10 @@ fn socks5_connect_with_deadline(
     target: &HttpProbeTarget,
     deadline: Option<Instant>,
 ) -> Result<(), String> {
-    let refresh = |stream: &TcpStream| -> Result<(), String> {
-        if let Some(deadline) = deadline {
-            let remaining = remaining_probe_time(deadline)?;
-            set_probe_timeouts(stream, remaining)?;
-        }
-        Ok(())
-    };
-    refresh(stream)?;
-    stream
-        .write_all(&[0x05, 0x01, 0x00])
+    write_socket_with_deadline(stream, &[0x05, 0x01, 0x00], deadline)
         .map_err(|err| format!("write SOCKS greeting: {err}"))?;
-    refresh(stream)?;
     let mut greeting = [0_u8; 2];
-    refresh(stream)?;
-    stream
-        .read_exact(&mut greeting)
+    read_socket_exact_with_deadline(stream, &mut greeting, deadline)
         .map_err(|err| format!("read SOCKS greeting: {err}"))?;
     if greeting != [0x05, 0x00] {
         return Err(format!(
@@ -3177,14 +3167,11 @@ fn socks5_connect_with_deadline(
         request.extend_from_slice(host);
     }
     request.extend_from_slice(&target.port.to_be_bytes());
-    stream
-        .write_all(&request)
+    write_socket_with_deadline(stream, &request, deadline)
         .map_err(|err| format!("write SOCKS connect request: {err}"))?;
 
-    refresh(stream)?;
     let mut header = [0_u8; 4];
-    stream
-        .read_exact(&mut header)
+    read_socket_exact_with_deadline(stream, &mut header, deadline)
         .map_err(|err| format!("read SOCKS connect response: {err}"))?;
     if header[0] != 0x05 {
         return Err(format!("invalid SOCKS response version: {}", header[0]));
@@ -3199,21 +3186,51 @@ fn socks5_connect_with_deadline(
         0x01 => 4,
         0x03 => {
             let mut len = [0_u8; 1];
-            refresh(stream)?;
-            stream
-                .read_exact(&mut len)
+            read_socket_exact_with_deadline(stream, &mut len, deadline)
                 .map_err(|err| format!("read SOCKS bind domain length: {err}"))?;
             len[0] as usize
         }
         0x04 => 16,
         other => return Err(format!("invalid SOCKS address type: {other}")),
     };
-    refresh(stream)?;
     let mut skip = vec![0_u8; address_len + 2];
-    stream
-        .read_exact(&mut skip)
+    read_socket_exact_with_deadline(stream, &mut skip, deadline)
         .map_err(|err| format!("read SOCKS bind address: {err}"))?;
     Ok(())
+}
+
+fn write_socket_with_deadline(
+    stream: &mut TcpStream,
+    bytes: &[u8],
+    deadline: Option<Instant>,
+) -> Result<(), String> {
+    match deadline {
+        Some(deadline) => write_with_deadline(stream, bytes, deadline),
+        None => stream.write_all(bytes).map_err(|error| error.to_string()),
+    }
+}
+
+fn read_socket_exact_with_deadline(
+    stream: &mut TcpStream,
+    buffer: &mut [u8],
+    deadline: Option<Instant>,
+) -> Result<(), String> {
+    if let Some(deadline) = deadline {
+        let mut offset = 0;
+        while offset < buffer.len() {
+            stream.refresh_deadline(deadline)?;
+            let read = stream
+                .read(&mut buffer[offset..])
+                .map_err(|error| error.to_string())?;
+            if read == 0 {
+                return Err("unexpected EOF".to_string());
+            }
+            offset += read;
+        }
+        Ok(())
+    } else {
+        stream.read_exact(buffer).map_err(|error| error.to_string())
+    }
 }
 
 fn probe_xray_egress(
@@ -3358,7 +3375,7 @@ fn probe_https_stream(
         .map_err(|_| "HTTPS egress probe host is not a valid TLS server name".to_string())?;
     let connection = ClientConnection::new(std::sync::Arc::new(config), server_name)
         .map_err(|error| format!("create HTTPS egress probe TLS session: {error}"))?;
-    let mut tls = StreamOwned::new(connection, stream);
+    let mut tls = StreamOwned::new(connection, DeadlineStream::new(stream, deadline));
     let mut headers = vec![
         ("User-Agent", "Tachyon-Prism/0.1"),
         ("Accept", "*/*"),
@@ -3368,9 +3385,9 @@ fn probe_https_stream(
         headers.push(("X-Tachyon-Probe-Nonce", expected_nonce));
     }
     let request = build_http_request(Method::GET, &target.path, &target.host_header, &headers)?;
-    set_probe_timeouts(tls.get_mut(), remaining_probe_time(deadline)?)?;
+    tls.refresh_deadline(deadline)?;
     write_with_deadline(&mut tls, &request, deadline)?;
-    set_probe_timeouts(tls.get_mut(), remaining_probe_time(deadline)?)?;
+    tls.refresh_deadline(deadline)?;
     let (status, nonce) = read_http_headers(&mut tls, deadline)?;
     if status != Some(expected_status) {
         return Err(format!("HTTPS egress probe returned {:?}", status));
@@ -3397,6 +3414,62 @@ fn set_probe_timeouts(stream: &TcpStream, timeout: Duration) -> Result<(), Strin
     stream
         .set_write_timeout(Some(timeout))
         .map_err(|error| format!("set probe write timeout: {error}"))
+}
+
+trait DeadlineIo {
+    fn refresh_deadline(&mut self, deadline: Instant) -> Result<(), String>;
+}
+
+impl DeadlineIo for TcpStream {
+    fn refresh_deadline(&mut self, deadline: Instant) -> Result<(), String> {
+        set_probe_timeouts(self, remaining_probe_time(deadline)?)
+    }
+}
+
+struct DeadlineStream {
+    stream: TcpStream,
+    deadline: Instant,
+}
+
+impl DeadlineStream {
+    fn new(stream: TcpStream, deadline: Instant) -> Self {
+        Self { stream, deadline }
+    }
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.refresh_deadline(self.deadline)
+            .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?;
+        self.stream.read(buffer)
+    }
+}
+
+impl Write for DeadlineStream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.refresh_deadline(self.deadline)
+            .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?;
+        self.stream.write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.refresh_deadline(self.deadline)
+            .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?;
+        self.stream.flush()
+    }
+}
+
+impl DeadlineIo for DeadlineStream {
+    fn refresh_deadline(&mut self, deadline: Instant) -> Result<(), String> {
+        self.deadline = deadline;
+        set_probe_timeouts(&self.stream, remaining_probe_time(deadline)?)
+    }
+}
+
+impl DeadlineIo for StreamOwned<ClientConnection, DeadlineStream> {
+    fn refresh_deadline(&mut self, deadline: Instant) -> Result<(), String> {
+        self.get_mut().refresh_deadline(deadline)
+    }
 }
 
 fn build_http_request(
@@ -3426,18 +3499,26 @@ fn build_http_request(
     Ok(bytes)
 }
 
-fn write_with_deadline<W: Write>(
+fn write_with_deadline<W: Write + DeadlineIo>(
     writer: &mut W,
     bytes: &[u8],
     deadline: Instant,
 ) -> Result<(), String> {
-    let _ = remaining_probe_time(deadline)?;
-    writer
-        .write_all(bytes)
-        .map_err(|error| format!("write HTTPS egress probe: {error}"))
+    let mut offset = 0;
+    while offset < bytes.len() {
+        writer.refresh_deadline(deadline)?;
+        let written = writer
+            .write(&bytes[offset..])
+            .map_err(|error| format!("write HTTPS egress probe: {error}"))?;
+        if written == 0 {
+            return Err("write HTTPS egress probe returned zero bytes".to_string());
+        }
+        offset += written;
+    }
+    Ok(())
 }
 
-fn read_http_headers<R: Read>(
+fn read_http_headers<R: Read + DeadlineIo>(
     reader: &mut R,
     deadline: Instant,
 ) -> Result<(Option<u16>, Option<String>), String> {
@@ -3445,7 +3526,7 @@ fn read_http_headers<R: Read>(
     let mut bytes = Vec::new();
     let mut one = [0_u8; 1];
     while bytes.len() < MAX_HEADERS {
-        let _ = remaining_probe_time(deadline)?;
+        reader.refresh_deadline(deadline)?;
         let count = reader
             .read(&mut one)
             .map_err(|error| format!("read HTTPS egress probe: {error}"))?;
@@ -4142,17 +4223,6 @@ fn parse_probe_port(value: &str) -> Result<u16, String> {
         return Err("proxy probe target port is invalid".to_string());
     }
     Ok(port)
-}
-
-fn http_url_host(host: &str) -> String {
-    let trimmed = host.trim();
-    if trimmed.starts_with('[') && trimmed.ends_with(']') {
-        return trimmed.to_string();
-    }
-    if trimmed.contains(':') {
-        return format!("[{trimmed}]");
-    }
-    trimmed.to_string()
 }
 
 fn parse_http_status_code(response: &str) -> Option<u16> {
@@ -7579,36 +7649,23 @@ fn owned_tcp_listener_table(_pid: u32) -> Result<Vec<OwnedTcpListener>, String> 
 }
 
 fn xray_stats_server(settings: &RuntimeSettings) -> Result<String, String> {
-    let host = local_probe_host(&settings.xray_stats_listen)?;
-    Ok(format!(
-        "{}:{}",
-        socket_host(&host),
-        settings.xray_stats_port
-    ))
+    Ok(local_loopback_socket_addr(
+        &settings.xray_stats_listen,
+        settings.xray_stats_port,
+        "Xray stats",
+    )?
+    .to_string())
 }
 
-fn local_probe_host(host: &str) -> Result<String, String> {
+fn local_loopback_socket_addr(host: &str, port: u16, kind: &str) -> Result<SocketAddr, String> {
     let host = host.trim().trim_start_matches('[').trim_end_matches(']');
-    match host {
-        "0.0.0.0" => return Ok("127.0.0.1".to_string()),
-        "::" => return Ok("::1".to_string()),
-        value if value.eq_ignore_ascii_case("localhost") => return Ok("localhost".to_string()),
-        _ => {}
+    let address = host
+        .parse::<IpAddr>()
+        .map_err(|_| format!("{kind} must use a numeric loopback address"))?;
+    if !address.is_loopback() {
+        return Err(format!("{kind} must use a numeric loopback address"));
     }
-    match host.parse::<std::net::IpAddr>() {
-        Ok(address) if address.is_loopback() => Ok(address.to_string()),
-        _ => Err(format!(
-            "readiness probe refuses non-local listen address {host:?}"
-        )),
-    }
-}
-
-fn socket_host(host: &str) -> String {
-    if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    }
+    Ok(SocketAddr::new(address, port))
 }
 
 fn start_all_rollback_error(start_error: String, rollback_errors: Vec<String>) -> String {
@@ -9364,10 +9421,15 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
 
     #[test]
     fn readiness_probes_reject_non_local_addresses() {
-        assert_eq!(local_probe_host("0.0.0.0").unwrap(), "127.0.0.1");
-        assert_eq!(local_probe_host("[::]").unwrap(), "::1");
-        assert!(local_probe_host("198.51.100.10").is_err());
-        assert!(local_probe_host("example.com").is_err());
+        assert_eq!(
+            local_loopback_socket_addr("127.0.0.1", 1080, "test").unwrap(),
+            "127.0.0.1:1080".parse().unwrap()
+        );
+        assert!(local_loopback_socket_addr("0.0.0.0", 1080, "test").is_err());
+        assert!(local_loopback_socket_addr("[::]", 1080, "test").is_err());
+        assert!(local_loopback_socket_addr("localhost", 1080, "test").is_err());
+        assert!(local_loopback_socket_addr("198.51.100.10", 1080, "test").is_err());
+        assert!(local_loopback_socket_addr("example.com", 1080, "test").is_err());
     }
 
     #[test]
@@ -9487,7 +9549,7 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
             xray_stats_port: 10085,
             ..RuntimeSettings::default()
         };
-        assert_eq!(xray_stats_server(&ipv4).unwrap(), "127.0.0.1:10085");
+        assert!(xray_stats_server(&ipv4).is_err());
 
         let ipv6 = RuntimeSettings {
             xray_stats_listen: "::1".to_string(),
@@ -9502,6 +9564,13 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
             ..RuntimeSettings::default()
         };
         assert!(xray_stats_server(&remote).is_err());
+
+        let hostname = RuntimeSettings {
+            xray_stats_listen: "localhost".to_string(),
+            xray_stats_port: 10085,
+            ..RuntimeSettings::default()
+        };
+        assert!(xray_stats_server(&hostname).is_err());
     }
 
     #[test]
@@ -10592,6 +10661,24 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         server.join().unwrap();
     }
 
+    #[test]
+    fn egress_header_deadline_bounds_slow_drip_multi_byte_response() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            for byte in b"HTTP/1.1 204 No Content\r\n\r\n" {
+                let _ = stream.write_all(&[*byte]);
+                std::thread::sleep(Duration::from_millis(8));
+            }
+        });
+        let mut stream = TcpStream::connect(address).unwrap();
+        let started = Instant::now();
+        assert!(read_http_headers(&mut stream, started + Duration::from_millis(45)).is_err());
+        assert!(started.elapsed() < Duration::from_millis(180));
+        server.join().unwrap();
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_libproc_ownership_fixture_matches_current_ipv4_listener() {
@@ -11144,16 +11231,20 @@ stat: <
     }
 
     #[test]
-    fn core_health_url_uses_local_connectable_addresses() {
+    fn core_health_url_rejects_wildcard_and_hostname_addresses() {
         let wildcard = RuntimeSettings {
             tachyon_ipc_listen: "::".to_string(),
             tachyon_ipc_port: 55123,
             ..RuntimeSettings::default()
         };
-        assert_eq!(
-            core_health_url(&wildcard).unwrap(),
-            "http://[::1]:55123/v1/health"
-        );
+        assert!(core_health_url(&wildcard).is_err());
+
+        let hostname = RuntimeSettings {
+            tachyon_ipc_listen: "localhost".to_string(),
+            tachyon_ipc_port: 55123,
+            ..RuntimeSettings::default()
+        };
+        assert!(core_health_url(&hostname).is_err());
 
         let remote = RuntimeSettings {
             tachyon_ipc_listen: "198.51.100.10".to_string(),

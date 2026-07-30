@@ -723,8 +723,37 @@ impl GenerationRuntime {
             .map_err(|failure| match failure {
                 BackendFailure::Cancelled => ApplyFailure::Cancelled,
                 BackendFailure::Failed => ApplyFailure::EgressReadinessFailed,
-            })?;
+        })?;
         if egress_verified {
+            let post_egress_failure = self
+                .require_current(&plan)
+                .err()
+                .or_else(|| {
+                    backend
+                        .confirm_process_identity(plan.generation_id(), &candidate)
+                        .err()
+                        .map(|failure| match failure {
+                            BackendFailure::Cancelled => ApplyFailure::Cancelled,
+                            BackendFailure::Failed => ApplyFailure::ProcessReadinessFailed,
+                        })
+                })
+                .or_else(|| {
+                    backend
+                        .confirm_listener_readiness(
+                            plan.generation_id(),
+                            &candidate,
+                            plan.managed_listener_addresses(),
+                        )
+                        .err()
+                        .map(|failure| match failure {
+                            BackendFailure::Cancelled => ApplyFailure::Cancelled,
+                            BackendFailure::Failed => ApplyFailure::ListenerReadinessFailed,
+                        })
+                });
+            if let Some(failure) = post_egress_failure {
+                return self
+                    .cleanup_candidate_and_rollback(plan, backend, candidate, failure, false);
+            }
             self.set_desired_readiness(&plan, ReadinessLevel::EgressReady)?;
         }
         self.require_current(&plan)?;
@@ -1107,11 +1136,103 @@ struct InstanceLeaseMetadata {
 #[derive(Debug)]
 struct InstanceLease {
     _file: File,
+    _parent_dir: File,
+    #[cfg(target_os = "windows")]
+    file_identity: WindowsFileIdentity,
+    #[cfg(target_os = "windows")]
+    parent_identity: WindowsFileIdentity,
     creation_token: String,
+}
+
+struct LockedInstanceFile {
+    file: File,
+    parent_dir: File,
+    #[cfg(target_os = "windows")]
+    file_identity: WindowsFileIdentity,
+    #[cfg(target_os = "windows")]
+    parent_identity: WindowsFileIdentity,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WindowsFileIdentity {
+    volume_serial: u32,
+    index_high: u32,
+    index_low: u32,
+}
+
+#[cfg(target_os = "windows")]
+fn verify_windows_file_identity(
+    file: &File,
+    expected: WindowsFileIdentity,
+    expect_directory: bool,
+) -> Result<(), String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+    let mut info = BY_HANDLE_FILE_INFORMATION {
+        dwFileAttributes: 0,
+        ftCreationTime: Default::default(),
+        ftLastAccessTime: Default::default(),
+        ftLastWriteTime: Default::default(),
+        dwVolumeSerialNumber: 0,
+        nFileSizeHigh: 0,
+        nFileSizeLow: 0,
+        nNumberOfLinks: 0,
+        nFileIndexHigh: 0,
+        nFileIndexLow: 0,
+    };
+    let result = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
+    let is_directory = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+    if result == 0
+        || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || is_directory != expect_directory
+    {
+        return Err("generation-instance-lease-identity-invalid".to_string());
+    }
+    let actual = WindowsFileIdentity {
+        volume_serial: info.dwVolumeSerialNumber,
+        index_high: info.nFileIndexHigh,
+        index_low: info.nFileIndexLow,
+    };
+    if actual != expected {
+        return Err("generation-instance-lease-identity-mismatch".to_string());
+    }
+    Ok(())
 }
 
 impl InstanceLease {
     fn verify(&self) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            unsafe extern "C" {
+                fn geteuid() -> u32;
+            }
+            let uid = unsafe { geteuid() };
+            let parent = self
+                ._parent_dir
+                .metadata()
+                .map_err(|_| "generation-instance-lease-parent-read-failed".to_string())?;
+            if !parent.is_dir() || parent.uid() != uid || parent.mode() & 0o077 != 0 {
+                return Err("generation-instance-lease-parent-invalid".to_string());
+            }
+            let file = self
+                ._file
+                .metadata()
+                .map_err(|_| "generation-instance-lease-read-failed".to_string())?;
+            if !file.is_file() || file.uid() != uid || file.mode() & 0o077 != 0 {
+                return Err("generation-instance-lease-file-invalid".to_string());
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            verify_windows_file_identity(&self._file, self.file_identity, false)?;
+            verify_windows_file_identity(&self._parent_dir, self.parent_identity, true)?;
+        }
         let mut file = self
             ._file
             .try_clone()
@@ -1135,7 +1256,14 @@ fn acquire_instance_lease(root: &Path) -> Option<InstanceLease> {
         return None;
     }
     let path = root.join(INSTANCE_LEASE_FILE);
-    let mut file = open_locked_instance_file(&path).ok()?;
+    let LockedInstanceFile {
+        mut file,
+        parent_dir,
+        #[cfg(target_os = "windows")]
+        file_identity,
+        #[cfg(target_os = "windows")]
+        parent_identity,
+    } = open_locked_instance_file(&path).ok()?;
     let creation_token = random_epoch();
     let metadata = InstanceLeaseMetadata {
         version: 1,
@@ -1147,6 +1275,11 @@ fn acquire_instance_lease(root: &Path) -> Option<InstanceLease> {
     write_instance_lease_metadata(&mut file, &data).ok()?;
     Some(InstanceLease {
         _file: file,
+        _parent_dir: parent_dir,
+        #[cfg(target_os = "windows")]
+        file_identity,
+        #[cfg(target_os = "windows")]
+        parent_identity,
         creation_token,
     })
 }
@@ -1159,38 +1292,150 @@ fn write_instance_lease_metadata(file: &mut File, data: &[u8]) -> std::io::Resul
 }
 
 #[cfg(unix)]
-fn open_locked_instance_file(path: &Path) -> std::io::Result<File> {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::fs::OpenOptionsExt;
+fn open_locked_instance_file(path: &Path) -> std::io::Result<LockedInstanceFile> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
-    let file = fs::OpenOptions::new()
+    const O_NOFOLLOW: i32 = if cfg!(target_os = "linux") {
+        0x20000
+    } else {
+        0x100
+    };
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "lease parent"))?;
+    let parent = fs::OpenOptions::new()
         .read(true)
-        .write(true)
-        .create(true)
-        .mode(0o600)
-        .open(path)?;
-    const LOCK_EX: i32 = 2;
-    const LOCK_NB: i32 = 4;
+        .custom_flags(O_NOFOLLOW)
+        .open(parent_path)?;
+    let parent_metadata = parent.metadata()?;
+    if !parent_metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "lease parent directory is not private",
+        ));
+    }
     unsafe extern "C" {
+        fn geteuid() -> u32;
+        fn fchmod(fd: i32, mode: u32) -> i32;
+        fn openat(dirfd: i32, pathname: *const i8, flags: i32, mode: u32) -> i32;
         fn flock(fd: i32, operation: i32) -> i32;
     }
+    if parent_metadata.uid() != unsafe { geteuid() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "lease parent directory owner mismatch",
+        ));
+    }
+    if unsafe { fchmod(parent.as_raw_fd(), 0o700) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if parent.metadata()?.mode() & 0o077 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "lease parent directory is not private",
+        ));
+    }
+    let name = b"instance-lease.json\0";
+    const O_RDWR: i32 = 2;
+    const O_CREAT: i32 = 0x40;
+    let fd = unsafe {
+        openat(
+            parent.as_raw_fd(),
+            name.as_ptr().cast(),
+            O_RDWR | O_CREAT | O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let file = unsafe { File::from_raw_fd(fd) };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != unsafe { geteuid() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "lease path is not an owned regular file",
+        ));
+    }
+    if unsafe { fchmod(file.as_raw_fd(), 0o600) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if file.metadata()?.mode() & 0o077 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "lease file is not private",
+        ));
+    }
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
     if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    Ok(file)
+    Ok(LockedInstanceFile {
+        file,
+        parent_dir: parent,
+    })
 }
 
 #[cfg(target_os = "windows")]
-fn open_locked_instance_file(path: &Path) -> std::io::Result<File> {
+fn open_locked_instance_file(path: &Path) -> std::io::Result<LockedInstanceFile> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, LockFileEx, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-        FILE_SHARE_NONE, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OPEN_ALWAYS,
+        CreateFileW, GetFileInformationByHandle, LockFileEx, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+        FILE_GENERIC_WRITE, FILE_SHARE_NONE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OPEN_ALWAYS, OPEN_EXISTING,
     };
     use windows_sys::Win32::System::IO::OVERLAPPED;
 
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "lease parent"))?;
+    let parent_wide = parent_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let parent_handle = unsafe {
+        CreateFileW(
+            parent_wide.as_ptr(),
+            FILE_GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if parent_handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let parent = unsafe { File::from_raw_handle(parent_handle) };
+    let mut parent_info = BY_HANDLE_FILE_INFORMATION {
+        dwFileAttributes: 0,
+        ftCreationTime: Default::default(),
+        ftLastAccessTime: Default::default(),
+        ftLastWriteTime: Default::default(),
+        dwVolumeSerialNumber: 0,
+        nFileSizeHigh: 0,
+        nFileSizeLow: 0,
+        nNumberOfLinks: 0,
+        nFileIndexHigh: 0,
+        nFileIndexLow: 0,
+    };
+    if unsafe { GetFileInformationByHandle(parent_handle, &mut parent_info) } == 0
+        || parent_info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || parent_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "lease parent is not a real directory",
+        ));
+    }
     let wide = path
         .as_os_str()
         .encode_wide()
@@ -1203,19 +1448,38 @@ fn open_locked_instance_file(path: &Path) -> std::io::Result<File> {
             FILE_SHARE_NONE,
             std::ptr::null(),
             OPEN_ALWAYS,
-            FILE_ATTRIBUTE_NORMAL,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
             std::ptr::null_mut(),
         )
     };
     if handle == INVALID_HANDLE_VALUE {
         return Err(std::io::Error::last_os_error());
     }
-    let mut overlapped = OVERLAPPED {
-        Internal: 0,
-        InternalHigh: 0,
-        Anonymous: unsafe { std::mem::zeroed() },
-        hEvent: std::ptr::null_mut(),
+    let mut info = BY_HANDLE_FILE_INFORMATION {
+        dwFileAttributes: 0,
+        ftCreationTime: Default::default(),
+        ftLastAccessTime: Default::default(),
+        ftLastWriteTime: Default::default(),
+        dwVolumeSerialNumber: 0,
+        nFileSizeHigh: 0,
+        nFileSizeLow: 0,
+        nNumberOfLinks: 0,
+        nFileIndexHigh: 0,
+        nFileIndexLow: 0,
     };
+    if unsafe { GetFileInformationByHandle(handle, &mut info) } == 0
+        || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0
+    {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(handle);
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "lease path is a reparse point or directory",
+        ));
+    }
+    let mut overlapped = unsafe { std::mem::zeroed::<OVERLAPPED>() };
     let locked = unsafe {
         LockFileEx(
             handle,
@@ -1232,11 +1496,24 @@ fn open_locked_instance_file(path: &Path) -> std::io::Result<File> {
         }
         return Err(std::io::Error::last_os_error());
     }
-    Ok(unsafe { File::from_raw_handle(handle) })
+    Ok(LockedInstanceFile {
+        file: unsafe { File::from_raw_handle(handle) },
+        parent_dir: parent,
+        file_identity: WindowsFileIdentity {
+            volume_serial: info.dwVolumeSerialNumber,
+            index_high: info.nFileIndexHigh,
+            index_low: info.nFileIndexLow,
+        },
+        parent_identity: WindowsFileIdentity {
+            volume_serial: parent_info.dwVolumeSerialNumber,
+            index_high: parent_info.nFileIndexHigh,
+            index_low: parent_info.nFileIndexLow,
+        },
+    })
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
-fn open_locked_instance_file(_path: &Path) -> std::io::Result<File> {
+fn open_locked_instance_file(_path: &Path) -> std::io::Result<LockedInstanceFile> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "OS instance locking is unsupported on this platform",
@@ -1416,6 +1693,7 @@ mod tests {
         rollback_fails: bool,
         rollback_readiness_fails: bool,
         rollback_cleanup_fails: bool,
+        kill_after_egress: bool,
         next_pid: u32,
     }
 
@@ -1440,6 +1718,7 @@ mod tests {
                 rollback_fails: false,
                 rollback_readiness_fails: false,
                 rollback_cleanup_fails: false,
+                kill_after_egress: false,
                 next_pid: 4000,
             }
         }
@@ -1535,9 +1814,12 @@ mod tests {
         fn confirm_process_identity(
             &mut self,
             _generation_id: &GenerationId,
-            _handle: &CandidateHandle,
+            handle: &CandidateHandle,
         ) -> Result<(), BackendFailure> {
             self.events.push("processReady".to_string());
+            if !self.live.iter().any(|token| token == handle.runner_token()) {
+                return Err(BackendFailure::Failed);
+            }
             self.process_failure.take().map_or(Ok(()), Err)
         }
 
@@ -1554,7 +1836,7 @@ mod tests {
         fn confirm_egress_ready(
             &mut self,
             _generation_id: &GenerationId,
-            _handle: &CandidateHandle,
+            handle: &CandidateHandle,
             _listeners: &[String],
             probe: &EgressProbeSettings,
         ) -> Result<bool, BackendFailure> {
@@ -1562,6 +1844,9 @@ mod tests {
             self.last_probe = Some(probe.clone());
             if !probe.is_configured() {
                 return Ok(false);
+            }
+            if self.kill_after_egress {
+                self.live.retain(|token| token != handle.runner_token());
             }
             self.egress_failure
                 .take()
@@ -1709,6 +1994,34 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn instance_lease_rejects_symlinked_parent_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        let link = root.path().join("link");
+        fs::create_dir(&real).unwrap();
+        symlink(&real, &link).unwrap();
+        assert!(GenerationStore::new(link).instance_lease.is_none());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn instance_lease_rejects_reparse_parent_when_supported() {
+        use std::os::windows::fs::symlink_dir;
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        let link = root.path().join("link");
+        fs::create_dir(&real).unwrap();
+        if symlink_dir(&real, &link).is_err() {
+            return;
+        }
+        assert!(GenerationStore::new(link).instance_lease.is_none());
+    }
+
     fn select(runtime: &mut GenerationRuntime, node: &str, revision: u64) -> GenerationId {
         select_with_probe(
             runtime,
@@ -1788,6 +2101,23 @@ mod tests {
         );
         assert!(status.proxy_ready);
         assert_eq!(backend.last_probe, Some(probe));
+    }
+
+    #[test]
+    fn egress_probe_without_proxy_rechecks_process_before_marking_ready() {
+        let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let mut backend = FakeBackend {
+            kill_after_egress: true,
+            ..FakeBackend::default()
+        };
+        select(&mut runtime, "A", 1);
+        assert_eq!(
+            runtime.execute_latest(&mut backend),
+            Err(ApplyFailure::ProcessReadinessFailed)
+        );
+        assert!(runtime.status().active.is_none());
+        assert!(runtime.status().proxy_generation.is_none());
+        assert_eq!(runtime.status().phase, GenerationPhase::Degraded);
     }
 
     #[test]
