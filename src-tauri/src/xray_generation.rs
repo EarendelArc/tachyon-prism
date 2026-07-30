@@ -916,6 +916,16 @@ impl GenerationRuntime {
         Ok(self.status())
     }
 
+    pub fn degrade_proxy_binding(&mut self, error_code: &str) {
+        self.proxy_generation = None;
+        if let Some(active) = self.active.as_mut() {
+            active.egress_verified = false;
+            active.readiness = ReadinessLevel::Degraded;
+        }
+        self.phase = GenerationPhase::Degraded;
+        self.last_error_code = Some(error_code.to_string());
+    }
+
     fn cleanup_candidate_and_rollback<B: ApplyBackend>(
         &mut self,
         plan: ApplyPlan,

@@ -884,6 +884,27 @@ def choose_subscription(cdp: CDP, subscription_name: str) -> str:
     )
 
 
+def assert_selected_subscription_persisted(
+    cdp: CDP,
+    subscription_name: str,
+    node_name: str,
+) -> None:
+    cdp.call("Page.reload", {"ignoreCache": True})
+    wait_for_shell(cdp)
+    navigate_hash(cdp, "subscriptions")
+    selection = cdp.evaluate(
+        """
+        (() => ({
+          subscription: document.querySelector('.subscription-card.active strong')?.textContent?.trim() ?? '',
+          node: document.querySelector('.node-tile.active strong')?.textContent?.trim() ?? ''
+        }))()
+        """,
+    )
+    expected = {"subscription": subscription_name, "node": node_name}
+    if selection != expected:
+        raise AssertionError(f"subscription selection was not persisted: {selection}")
+
+
 def switch_routing_mode(cdp: CDP, mode: str) -> str:
     return str(
         cdp.evaluate(
@@ -942,6 +963,21 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
               const catchAllOutbound = outbounds.find(
                 (outbound) => outbound?.tag === catchAllRule.outboundTag,
               ) ?? {};
+              const controlProtocols = new Set(['freedom', 'blackhole', 'dns', 'loopback']);
+              const controlTag = (tag) =>
+                typeof tag === 'string'
+                && (tag === apiTag
+                  || tag === 'tachyon-xray-api'
+                  || tag.startsWith('tachyon-direct')
+                  || tag.startsWith('tachyon-block')
+                  || tag.startsWith('tachyon-xray-api-in')
+                  || tag.startsWith('tachyon-socks')
+                  || tag.startsWith('tachyon-http'));
+              const trafficOutbounds = outbounds.filter(
+                (outbound) => typeof outbound?.tag === 'string'
+                  && !controlTag(outbound.tag)
+                  && !controlProtocols.has(outbound?.protocol),
+              );
               const directRule = trafficRules.find(
                 (rule) => rule?.outboundTag?.startsWith('tachyon-direct')
                   && (Array.isArray(rule.ip) && rule.ip.includes('geoip:private')
@@ -954,7 +990,8 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
               );
               const trafficOutboundTags = outbounds
                 .map((outbound) => outbound?.tag)
-                .filter((tag) => typeof tag === 'string' && tag !== apiTag);
+                .filter((tag) => trafficOutbounds.some((outbound) => outbound.tag === tag));
+              const catchAllIndex = trafficRules.findIndex(isExplicitCatchAll);
               resolve({
                 domainStrategy: config.routing?.domainStrategy ?? '',
                 firstTrafficOutboundTag: trafficRules[0]?.outboundTag ?? '',
@@ -963,6 +1000,10 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
                 catchAllProtocol: catchAllOutbound.protocol ?? '',
                 catchAllIsExplicit: Boolean(catchAllRule.outboundTag),
                 catchAllTargetIsConfigured: Boolean(catchAllOutbound.tag),
+                catchAllTargetIsTrafficOutbound: trafficOutboundTags.includes(catchAllRule.outboundTag),
+                trafficRulesBeforeCatchAll: catchAllIndex < 0 ? -1 : catchAllIndex,
+                catchAllRejectedProtocol: controlProtocols.has(catchAllOutbound.protocol ?? '')
+                  || controlTag(catchAllOutbound.tag),
                 hasApiRule: rules.some(isApiRule),
                 hasBlockRule: Boolean(blockRule),
                 hasPrivateDirectRule: Boolean(directRule),
@@ -1780,6 +1821,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
         text = choose_node(cdp, "Clash Smoke SS")
         assert_contains(text, "Clash Smoke SS")
         assert_contains_any(text, "Node selected", "节点已选择")
+        assert_selected_subscription_persisted(cdp, "Clash Smoke", "Clash Smoke SS")
         text = open_and_close_node_picker(cdp)
         assert_contains(text, "节点选择", "Clash Smoke SS")
         assert_desktop_viewport(cdp)
@@ -1803,6 +1845,9 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
             not summary["hasApiRule"]
             or not summary["catchAllIsExplicit"]
             or not summary["catchAllTargetIsConfigured"]
+            or not summary["catchAllTargetIsTrafficOutbound"]
+            or summary["trafficRulesBeforeCatchAll"] != 0
+            or summary["catchAllRejectedProtocol"]
             or summary["firstTrafficOutboundTag"] != summary["catchAllOutboundTag"]
             or summary["catchAllProtocol"] in ("", "freedom", "blackhole")
         ):
@@ -1834,6 +1879,8 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
             or not summary["hasPrivateDirectRule"]
             or not summary["catchAllIsExplicit"]
             or not summary["catchAllTargetIsConfigured"]
+            or not summary["catchAllTargetIsTrafficOutbound"]
+            or summary["catchAllRejectedProtocol"]
         ):
             raise AssertionError(f"rule routing config mismatch: {summary}")
         cdp.screenshot(output_dir / "routing-modes-desktop.png")

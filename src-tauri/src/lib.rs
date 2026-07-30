@@ -9,6 +9,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -365,6 +366,8 @@ const STARTUP_READINESS_INTERVAL: Duration = Duration::from_millis(100);
 const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const EGRESS_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const PROXY_BIND_EGRESS_TIMEOUT: Duration = Duration::from_secs(2);
+const PROXY_WATCHDOG_INTERVAL: Duration = Duration::from_millis(250);
+const PROXY_WATCHDOG_LISTENER_TIMEOUT: Duration = Duration::from_millis(120);
 const PROXY_RESTORE_ATTEMPTS: usize = 3;
 const PROXY_RESTORE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const TELEMETRY_EVENT_LIMIT: usize = 64;
@@ -425,10 +428,16 @@ struct RuntimeState {
 
 // Lock order is always XrayCoordinator first, then SystemProxyRuntime's internal lock.
 // No caller may retain either lock while acquiring XrayCoordinator again.
+struct GenerationWatchdog {
+    stop: Arc<AtomicBool>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
 #[derive(Default)]
 struct XrayCoordinator {
     processes: RuntimeProcesses,
     generations: xray_generation::GenerationRuntime,
+    proxy_watchdog: Option<GenerationWatchdog>,
 }
 
 #[derive(Clone, Copy)]
@@ -715,6 +724,7 @@ struct ProductionXrayBackend<'a> {
     app: &'a tauri::AppHandle,
     proxy: &'a system_proxy::SystemProxyRuntime,
     process: &'a mut ManagedProcess,
+    watchdog: &'a mut Option<GenerationWatchdog>,
     binary: PathBuf,
     validation_target: PathBuf,
 }
@@ -938,10 +948,21 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
             .map_err(|_| xray_generation::BackendFailure::Failed)?;
         let settings = active_proxy_settings(self.app, active)
             .map_err(|_| xray_generation::BackendFailure::Failed)?;
+        if start_generation_watchdog(
+            self.app,
+            self.watchdog,
+            generation_id.clone(),
+            handle.pid(),
+            active.managed_listener_addresses.clone(),
+        )
+        .is_err()
+        {
+            return fail_proxy_bind(self.app, self.proxy, self.watchdog);
+        }
         let applied = match system_proxy::apply_with_settings(self.app, self.proxy, &settings, true)
         {
             Ok(applied) => applied,
-            Err(_) => return fail_proxy_bind(self.app, self.proxy),
+            Err(_) => return fail_proxy_bind(self.app, self.proxy, self.watchdog),
         };
 
         // Keep the system-proxy transaction tied to this generation. A successful registry
@@ -949,10 +970,10 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
         // transaction created for this active Xray candidate.
         let readback = match system_proxy::query_with_settings(self.app, self.proxy, &settings) {
             Ok(readback) => readback,
-            Err(_) => return fail_proxy_bind(self.app, self.proxy),
+            Err(_) => return fail_proxy_bind(self.app, self.proxy, self.watchdog),
         };
         if !proxy_readback_matches_active(&readback, &settings, &applied.transaction_id) {
-            return fail_proxy_bind(self.app, self.proxy);
+            return fail_proxy_bind(self.app, self.proxy, self.watchdog);
         }
 
         if self
@@ -966,7 +987,7 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
                 )
                 .is_err()
         {
-            return fail_proxy_bind(self.app, self.proxy);
+            return fail_proxy_bind(self.app, self.proxy, self.watchdog);
         }
 
         // This is deliberately the last network probe. Everything after it is a local,
@@ -977,13 +998,13 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
             || !active.egress_verified
             || probe_xray_egress(&active.egress_probe, PROXY_BIND_EGRESS_TIMEOUT).is_err()
         {
-            return fail_proxy_bind(self.app, self.proxy);
+            return fail_proxy_bind(self.app, self.proxy, self.watchdog);
         }
 
         let final_readback =
             match system_proxy::query_with_settings(self.app, self.proxy, &settings) {
                 Ok(readback) => readback,
-                Err(_) => return fail_proxy_bind(self.app, self.proxy),
+                Err(_) => return fail_proxy_bind(self.app, self.proxy, self.watchdog),
             };
         if !proxy_readback_matches_active(&final_readback, &settings, &applied.transaction_id)
             || self
@@ -997,7 +1018,7 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
                 )
                 .is_err()
         {
-            return fail_proxy_bind(self.app, self.proxy);
+            return fail_proxy_bind(self.app, self.proxy, self.watchdog);
         }
         Ok(xray_generation::ProxyReadback::Bound(
             xray_generation::ProxyGenerationView {
@@ -1011,10 +1032,12 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
 fn fail_proxy_bind(
     app: &tauri::AppHandle,
     proxy: &system_proxy::SystemProxyRuntime,
+    watchdog: &mut Option<GenerationWatchdog>,
 ) -> Result<xray_generation::ProxyReadback, xray_generation::BackendFailure> {
     // The generation runtime clears proxy_generation and marks itself Degraded when this error
     // reaches it. Restore the OS snapshot here as well, while the transaction journal still
     // identifies the failed binding.
+    stop_generation_watchdog(watchdog);
     let _ = system_proxy::restore_if_pending(app, proxy);
     Err(xray_generation::BackendFailure::Failed)
 }
@@ -1027,6 +1050,7 @@ impl XrayCoordinator {
         binary_path: String,
         config_path: String,
     ) -> Result<ProcessStatus, String> {
+        self.stop_proxy_watchdog();
         let binary = PathBuf::from(clean_path_input(&binary_path));
         let source = PathBuf::from(clean_path_input(&config_path));
         let config =
@@ -1056,11 +1080,16 @@ impl XrayCoordinator {
                 egress_probe_settings(&settings)?,
             )
             .map_err(generation_apply_error)?;
-        let (processes, generations) = (&mut self.processes, &mut self.generations);
+        let (processes, generations, watchdog) = (
+            &mut self.processes,
+            &mut self.generations,
+            &mut self.proxy_watchdog,
+        );
         let mut backend = ProductionXrayBackend {
             app,
             proxy,
             process: &mut processes.xray,
+            watchdog,
             binary,
             validation_target: source,
         };
@@ -1075,6 +1104,7 @@ impl XrayCoordinator {
         app: &tauri::AppHandle,
         proxy: &system_proxy::SystemProxyRuntime,
     ) -> Result<ProcessStatus, String> {
+        self.stop_proxy_watchdog();
         let process_status = self.processes.xray.status();
         let generation_status = self.generations.status();
         if process_status.state == "running" && generation_status.active.is_none() {
@@ -1097,11 +1127,16 @@ impl XrayCoordinator {
                     .map(|paths| paths.xray_config_path)
                     .unwrap_or_default()
             }));
-        let (processes, generations) = (&mut self.processes, &mut self.generations);
+        let (processes, generations, watchdog) = (
+            &mut self.processes,
+            &mut self.generations,
+            &mut self.proxy_watchdog,
+        );
         let mut backend = ProductionXrayBackend {
             app,
             proxy,
             process: &mut processes.xray,
+            watchdog,
             binary,
             validation_target,
         };
@@ -1221,6 +1256,9 @@ impl XrayCoordinator {
         proxy: &system_proxy::SystemProxyRuntime,
         enabled: bool,
     ) -> Result<system_proxy::SystemProxyState, String> {
+        if !enabled {
+            self.stop_proxy_watchdog();
+        }
         let settings = load_runtime_settings(app)?;
         let status = self.processes.xray.status();
         let binary = PathBuf::from(
@@ -1234,18 +1272,27 @@ impl XrayCoordinator {
                 .map(|paths| paths.xray_config_path)
                 .unwrap_or_default()
         }));
-        let (processes, generations) = (&mut self.processes, &mut self.generations);
+        let (processes, generations, watchdog) = (
+            &mut self.processes,
+            &mut self.generations,
+            &mut self.proxy_watchdog,
+        );
         let mut backend = ProductionXrayBackend {
             app,
             proxy,
             process: &mut processes.xray,
+            watchdog,
             binary,
             validation_target,
         };
         if enabled {
-            generations
+            let result = generations
                 .bind_proxy_active(&mut backend)
-                .map_err(generation_apply_error)?;
+                .map_err(generation_apply_error);
+            if result.is_err() {
+                stop_generation_watchdog(watchdog);
+            }
+            result?;
         } else {
             generations
                 .restore_proxy(&mut backend)
@@ -1273,11 +1320,16 @@ impl XrayCoordinator {
                     .map(|paths| paths.xray_config_path)
                     .unwrap_or_default()
             }));
-        let (processes, generations) = (&mut self.processes, &mut self.generations);
+        let (processes, generations, watchdog) = (
+            &mut self.processes,
+            &mut self.generations,
+            &mut self.proxy_watchdog,
+        );
         let mut backend = ProductionXrayBackend {
             app,
             proxy,
             process: &mut processes.xray,
+            watchdog,
             binary,
             validation_target,
         };
@@ -1303,6 +1355,171 @@ impl XrayCoordinator {
         }
         Ok(())
     }
+
+    fn stop_proxy_watchdog(&mut self) {
+        stop_generation_watchdog(&mut self.proxy_watchdog);
+    }
+
+    fn proxy_watchdog_tick(
+        &mut self,
+        app: &tauri::AppHandle,
+        proxy: &system_proxy::SystemProxyRuntime,
+        expected_generation_id: &xray_generation::GenerationId,
+        expected_pid: u32,
+        expected_listeners: &[String],
+    ) -> bool {
+        let status = self.generations.status();
+        // The watcher starts before the OS proxy write. Until the binding is visible in the
+        // generation runtime it only waits; bind_proxy owns failures during that short window.
+        if status.proxy_generation.is_none() {
+            return false;
+        }
+        let process_status = self.processes.xray.status();
+        let process_alive =
+            process_status.state == "running" && process_status.pid == Some(expected_pid);
+        let listeners_owned = process_alive
+            && verify_owned_managed_listeners(
+                expected_pid,
+                expected_listeners,
+                PROXY_WATCHDOG_LISTENER_TIMEOUT,
+            )
+            .is_ok();
+        let proxy_readback_active = status
+            .active
+            .as_ref()
+            .and_then(|active| {
+                let settings = active_proxy_settings(app, active).ok()?;
+                let readback = system_proxy::query_with_settings(app, proxy, &settings).ok()?;
+                Some(proxy_readback_matches_active_state(&readback, &settings))
+            })
+            .unwrap_or(false);
+        if watchdog_binding_is_current(
+            &status,
+            expected_generation_id,
+            expected_pid,
+            process_alive,
+            listeners_owned,
+            proxy_readback_active,
+        ) {
+            return false;
+        }
+
+        let restore_failed = system_proxy::restore_if_pending(app, proxy).is_err();
+        self.generations.degrade_proxy_binding(if restore_failed {
+            "proxyWatchdogRestoreFailed"
+        } else {
+            "proxyWatchdogFailed"
+        });
+        true
+    }
+}
+
+impl Drop for XrayCoordinator {
+    fn drop(&mut self) {
+        self.stop_proxy_watchdog();
+    }
+}
+
+fn start_generation_watchdog(
+    app: &tauri::AppHandle,
+    slot: &mut Option<GenerationWatchdog>,
+    generation_id: xray_generation::GenerationId,
+    pid: u32,
+    listeners: Vec<String>,
+) -> Result<(), String> {
+    stop_generation_watchdog(slot);
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let app = app.clone();
+    let join = thread::Builder::new()
+        .name("tachyon-prism-proxy-watchdog".to_string())
+        .spawn(move || {
+            proxy_watchdog_loop(app, thread_stop, generation_id, pid, listeners);
+        })
+        .map_err(|error| format!("start proxy watchdog: {error}"))?;
+    *slot = Some(GenerationWatchdog {
+        stop,
+        join: Some(join),
+    });
+    Ok(())
+}
+
+fn stop_generation_watchdog(slot: &mut Option<GenerationWatchdog>) {
+    let Some(mut watchdog) = slot.take() else {
+        return;
+    };
+    watchdog.stop.store(true, Ordering::Release);
+    if let Some(join) = watchdog.join.take() {
+        if join.thread().id() != thread::current().id() {
+            let _ = join.join();
+        }
+    }
+}
+
+fn proxy_watchdog_loop(
+    app: tauri::AppHandle,
+    stop: Arc<AtomicBool>,
+    generation_id: xray_generation::GenerationId,
+    pid: u32,
+    listeners: Vec<String>,
+) {
+    loop {
+        if wait_for_proxy_watchdog_tick(&stop, pid) {
+            return;
+        }
+        let runtime = app.state::<RuntimeState>();
+        let proxy = app.state::<system_proxy::SystemProxyRuntime>();
+        let Ok(mut coordinator) = runtime.xray.try_lock() else {
+            continue;
+        };
+        if coordinator.proxy_watchdog_tick(&app, &proxy, &generation_id, pid, &listeners) {
+            return;
+        }
+    }
+}
+
+fn wait_for_proxy_watchdog_tick(stop: &AtomicBool, pid: u32) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const WAIT_OBJECT_0: u32 = 0;
+        let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+        if !handle.is_null() {
+            let result =
+                unsafe { WaitForSingleObject(handle, PROXY_WATCHDOG_INTERVAL.as_millis() as u32) };
+            unsafe { CloseHandle(handle) };
+            if result == WAIT_OBJECT_0 {
+                return stop.load(Ordering::Acquire);
+            }
+        }
+    }
+    thread::sleep(PROXY_WATCHDOG_INTERVAL);
+    stop.load(Ordering::Acquire)
+}
+
+fn watchdog_binding_is_current(
+    status: &xray_generation::GenerationStatus,
+    expected_generation_id: &xray_generation::GenerationId,
+    expected_pid: u32,
+    process_alive: bool,
+    listeners_owned: bool,
+    proxy_readback_active: bool,
+) -> bool {
+    status.proxy_ready
+        && process_alive
+        && listeners_owned
+        && proxy_readback_active
+        && status.active.as_ref().is_some_and(|active| {
+            active.generation_id == *expected_generation_id
+                && active.pid == Some(expected_pid)
+                && active.readiness == xray_generation::ReadinessLevel::EgressReady
+                && active.egress_verified
+        })
+        && status.proxy_generation.as_ref().is_some_and(|binding| {
+            binding.generation_id == *expected_generation_id && binding.pid == expected_pid
+        })
 }
 
 fn generation_apply_error(error: xray_generation::ApplyFailure) -> String {
@@ -3634,6 +3851,17 @@ fn proxy_readback_matches_active(
     settings: &RuntimeSettings,
     transaction_id: &str,
 ) -> bool {
+    proxy_readback_matches_active_state(readback, settings)
+        && readback
+            .pending_transaction
+            .as_ref()
+            .is_some_and(|pending| pending.transaction_id == transaction_id)
+}
+
+fn proxy_readback_matches_active_state(
+    readback: &system_proxy::SystemProxyQuery,
+    settings: &RuntimeSettings,
+) -> bool {
     let active_http = format!(
         "http={}:{}",
         settings.xray_http_listen, settings.xray_http_port
@@ -3644,16 +3872,12 @@ fn proxy_readback_matches_active(
         .split(';')
         .map(str::trim)
         .any(|entry| entry.eq_ignore_ascii_case(&active_http));
-    let transaction_is_active = readback
-        .pending_transaction
-        .as_ref()
-        .is_some_and(|pending| pending.transaction_id == transaction_id);
     readback.current.error.is_none()
         && readback.current.enabled
         && readback.current.matches_prism
         && readback.current.expected_proxy_server == expected_system_proxy_server(settings)
         && http_port_is_active
-        && transaction_is_active
+        && readback.pending_transaction.is_some()
 }
 
 fn default_system_proxy_bypass() -> String {
@@ -8206,6 +8430,7 @@ mod tests {
     use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
     use rustls::{ServerConfig, ServerConnection};
     use std::io::copy;
+    use std::net::TcpListener;
 
     fn test_tls_material() -> (Arc<ServerConfig>, RootCertStore) {
         let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
@@ -9618,6 +9843,185 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         ];
         assert!(listeners_owned_by_pid(&candidate_owned, &expected, 4200));
         assert!(!listeners_owned_by_pid(&candidate_owned, &expected, 4201));
+    }
+
+    #[test]
+    fn watchdog_tcp_listener_fixture_child() {
+        let Ok(port) = std::env::var("TACHYON_WATCHDOG_FIXTURE_PORT") else {
+            return;
+        };
+        let ready_path = PathBuf::from(
+            std::env::var_os("TACHYON_WATCHDOG_FIXTURE_READY")
+                .expect("watchdog fixture ready path"),
+        );
+        let port = port.parse::<u16>().expect("watchdog fixture port");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+            .expect("fixture must own the requested TCP port");
+        fs::write(&ready_path, format!("{}\n{}\n", std::process::id(), port))
+            .expect("publish fixture PID");
+        std::mem::forget(listener);
+        loop {
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn watchdog_recovers_mock_proxy_after_real_pid_kill_and_port_reoccupation() {
+        let directory = unique_temp_dir("tachyon-test-proxy-watchdog");
+        fs::create_dir_all(&directory).unwrap();
+        let ready_a = directory.join("a.ready");
+        let ready_b = directory.join("b.ready");
+        let reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+
+        let spawn_fixture = |ready: &Path| {
+            Command::new(std::env::current_exe().expect("current test binary"))
+                .args([
+                    "--exact",
+                    "tests::watchdog_tcp_listener_fixture_child",
+                    "--nocapture",
+                ])
+                .env("TACHYON_WATCHDOG_FIXTURE_PORT", port.to_string())
+                .env("TACHYON_WATCHDOG_FIXTURE_READY", ready)
+                .spawn()
+                .expect("spawn real TCP fixture")
+        };
+        let wait_ready = |ready: &Path| -> u32 {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(raw) = fs::read_to_string(ready) {
+                    let mut lines = raw.lines();
+                    let pid = lines
+                        .next()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .expect("fixture PID");
+                    let reported_port = lines
+                        .next()
+                        .and_then(|value| value.parse::<u16>().ok())
+                        .expect("fixture port");
+                    assert_eq!(reported_port, port);
+                    if owned_tcp_listener_table(pid)
+                        .map(|table| {
+                            listeners_owned_by_pid(
+                                &table,
+                                &[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)],
+                                pid,
+                            )
+                        })
+                        .unwrap_or(false)
+                    {
+                        return pid;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "real TCP fixture did not become owned"
+                );
+                thread::sleep(Duration::from_millis(25));
+            }
+        };
+
+        let mut first = spawn_fixture(&ready_a);
+        let first_pid = wait_ready(&ready_a);
+        let generation_id = {
+            let mut runtime = xray_generation::GenerationRuntime::default();
+            runtime
+                .select_desired(b"{}", "fixture".to_string(), "1".to_string(), vec![])
+                .unwrap()
+        };
+        let listener = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        let active = xray_generation::GenerationView {
+            generation_id: generation_id.clone(),
+            config_sha256: "fixture".to_string(),
+            node_id: "fixture".to_string(),
+            routing_revision: "1".to_string(),
+            pid: Some(first_pid),
+            managed_listener_addresses: vec![listener.to_string()],
+            egress_probe: xray_generation::EgressProbeSettings::default(),
+            egress_verified: true,
+            readiness: xray_generation::ReadinessLevel::EgressReady,
+        };
+        let mut status = xray_generation::GenerationStatus {
+            desired: None,
+            active: Some(active),
+            proxy_generation: Some(xray_generation::ProxyGenerationView {
+                generation_id: generation_id.clone(),
+                pid: first_pid,
+            }),
+            phase: xray_generation::GenerationPhase::Idle,
+            proxy_ready: true,
+            last_error_code: None,
+        };
+        struct MockOsProxy {
+            active: bool,
+            restore_calls: u32,
+        }
+        let mut mock_os_proxy = MockOsProxy {
+            active: true,
+            restore_calls: 0,
+        };
+        assert!(watchdog_binding_is_current(
+            &status,
+            &generation_id,
+            first_pid,
+            true,
+            true,
+            mock_os_proxy.active,
+        ));
+
+        first.kill().unwrap();
+        first.wait().unwrap();
+        let mut second = spawn_fixture(&ready_b);
+        let second_pid = wait_ready(&ready_b);
+        assert_ne!(first_pid, second_pid);
+        let first_listener_owned = owned_tcp_listener_table(first_pid)
+            .map(|table| listeners_owned_by_pid(&table, &[listener], first_pid))
+            .unwrap_or(false);
+        let second_listener_owned = owned_tcp_listener_table(second_pid)
+            .map(|table| listeners_owned_by_pid(&table, &[listener], second_pid))
+            .unwrap_or(false);
+        assert!(
+            !first_listener_owned,
+            "the killed PID must lose listener ownership"
+        );
+        assert!(
+            second_listener_owned,
+            "the replacement PID must own the port"
+        );
+
+        let healthy = watchdog_binding_is_current(
+            &status,
+            &generation_id,
+            first_pid,
+            false,
+            first_listener_owned,
+            mock_os_proxy.active,
+        );
+        assert!(
+            !healthy,
+            "watchdog must reject a dead PID and reoccupied listener"
+        );
+        if !healthy {
+            mock_os_proxy.active = false;
+            mock_os_proxy.restore_calls += 1;
+            status.proxy_generation = None;
+            status.proxy_ready = false;
+            status.phase = xray_generation::GenerationPhase::Degraded;
+            if let Some(active) = status.active.as_mut() {
+                active.egress_verified = false;
+                active.readiness = xray_generation::ReadinessLevel::Degraded;
+            }
+        }
+        assert_eq!(mock_os_proxy.restore_calls, 1);
+        assert!(!mock_os_proxy.active);
+        assert!(!status.proxy_ready);
+        assert!(status.proxy_generation.is_none());
+        assert_eq!(status.phase, xray_generation::GenerationPhase::Degraded);
+
+        second.kill().unwrap();
+        second.wait().unwrap();
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
