@@ -52,7 +52,7 @@ pub(crate) struct SystemProxyQuery {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PendingSystemProxyTransaction {
-    transaction_id: String,
+    pub(crate) transaction_id: String,
     created_at: u64,
     desired_enabled: bool,
 }
@@ -60,7 +60,7 @@ pub(crate) struct PendingSystemProxyTransaction {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SystemProxyTransactionResult {
-    transaction_id: String,
+    pub(crate) transaction_id: String,
     phase: String,
     previous: SystemProxyState,
     pub(crate) current: SystemProxyState,

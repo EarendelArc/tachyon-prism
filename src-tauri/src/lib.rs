@@ -926,6 +926,7 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
         active: &xray_generation::GenerationView,
     ) -> Result<xray_generation::ProxyReadback, xray_generation::BackendFailure> {
         if active.generation_id != *generation_id
+            || active.pid != Some(handle.pid())
             || active.readiness != xray_generation::ReadinessLevel::EgressReady
             || !active.egress_verified
         {
@@ -937,27 +938,66 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
             .map_err(|_| xray_generation::BackendFailure::Failed)?;
         let settings = active_proxy_settings(self.app, active)
             .map_err(|_| xray_generation::BackendFailure::Failed)?;
-        system_proxy::apply_with_settings(self.app, self.proxy, &settings, true)
-            .map_err(|_| xray_generation::BackendFailure::Failed)?;
-        let current = system_proxy::query_with_settings(self.app, self.proxy, &settings)
-            .map_err(|_| xray_generation::BackendFailure::Failed)?
-            .current;
-        let post_bind_ok = current.error.is_none()
-            && current.enabled
-            && current.matches_prism
-            && self.confirm_process_identity(generation_id, handle).is_ok()
-            && self
+        let applied = match system_proxy::apply_with_settings(self.app, self.proxy, &settings, true)
+        {
+            Ok(applied) => applied,
+            Err(_) => return fail_proxy_bind(self.app, self.proxy),
+        };
+
+        // Keep the system-proxy transaction tied to this generation. A successful registry
+        // write alone is not a binding: the journal and the readback must still describe the
+        // transaction created for this active Xray candidate.
+        let readback = match system_proxy::query_with_settings(self.app, self.proxy, &settings) {
+            Ok(readback) => readback,
+            Err(_) => return fail_proxy_bind(self.app, self.proxy),
+        };
+        if !proxy_readback_matches_active(&readback, &settings, &applied.transaction_id) {
+            return fail_proxy_bind(self.app, self.proxy);
+        }
+
+        if self
+            .confirm_process_identity(generation_id, handle)
+            .is_err()
+            || self
                 .confirm_listener_readiness(
                     generation_id,
                     handle,
                     &active.managed_listener_addresses,
                 )
-                .is_ok()
-            && active.egress_verified
-            && probe_xray_egress(&active.egress_probe, PROXY_BIND_EGRESS_TIMEOUT).is_ok();
-        if !post_bind_ok {
-            let _ = system_proxy::restore_if_pending(self.app, self.proxy);
-            return Err(xray_generation::BackendFailure::Failed);
+                .is_err()
+        {
+            return fail_proxy_bind(self.app, self.proxy);
+        }
+
+        // This is deliberately the last network probe. Everything after it is a local,
+        // generation-bound readback so a process kill or listener takeover cannot be reported
+        // as a green system-proxy binding.
+        if active.generation_id != *generation_id
+            || active.pid != Some(handle.pid())
+            || !active.egress_verified
+            || probe_xray_egress(&active.egress_probe, PROXY_BIND_EGRESS_TIMEOUT).is_err()
+        {
+            return fail_proxy_bind(self.app, self.proxy);
+        }
+
+        let final_readback =
+            match system_proxy::query_with_settings(self.app, self.proxy, &settings) {
+                Ok(readback) => readback,
+                Err(_) => return fail_proxy_bind(self.app, self.proxy),
+            };
+        if !proxy_readback_matches_active(&final_readback, &settings, &applied.transaction_id)
+            || self
+                .confirm_process_identity(generation_id, handle)
+                .is_err()
+            || self
+                .confirm_listener_readiness(
+                    generation_id,
+                    handle,
+                    &active.managed_listener_addresses,
+                )
+                .is_err()
+        {
+            return fail_proxy_bind(self.app, self.proxy);
         }
         Ok(xray_generation::ProxyReadback::Bound(
             xray_generation::ProxyGenerationView {
@@ -966,6 +1006,17 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
             },
         ))
     }
+}
+
+fn fail_proxy_bind(
+    app: &tauri::AppHandle,
+    proxy: &system_proxy::SystemProxyRuntime,
+) -> Result<xray_generation::ProxyReadback, xray_generation::BackendFailure> {
+    // The generation runtime clears proxy_generation and marks itself Degraded when this error
+    // reaches it. Restore the OS snapshot here as well, while the transaction journal still
+    // identifies the failed binding.
+    let _ = system_proxy::restore_if_pending(app, proxy);
+    Err(xray_generation::BackendFailure::Failed)
 }
 
 impl XrayCoordinator {
@@ -3576,6 +3627,33 @@ fn expected_system_proxy_server(settings: &RuntimeSettings) -> String {
         settings.xray_socks_listen,
         settings.xray_socks_port
     )
+}
+
+fn proxy_readback_matches_active(
+    readback: &system_proxy::SystemProxyQuery,
+    settings: &RuntimeSettings,
+    transaction_id: &str,
+) -> bool {
+    let active_http = format!(
+        "http={}:{}",
+        settings.xray_http_listen, settings.xray_http_port
+    );
+    let http_port_is_active = readback
+        .current
+        .proxy_server
+        .split(';')
+        .map(str::trim)
+        .any(|entry| entry.eq_ignore_ascii_case(&active_http));
+    let transaction_is_active = readback
+        .pending_transaction
+        .as_ref()
+        .is_some_and(|pending| pending.transaction_id == transaction_id);
+    readback.current.error.is_none()
+        && readback.current.enabled
+        && readback.current.matches_prism
+        && readback.current.expected_proxy_server == expected_system_proxy_server(settings)
+        && http_port_is_active
+        && transaction_is_active
 }
 
 fn default_system_proxy_bypass() -> String {

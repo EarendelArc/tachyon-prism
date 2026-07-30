@@ -723,7 +723,7 @@ impl GenerationRuntime {
             .map_err(|failure| match failure {
                 BackendFailure::Cancelled => ApplyFailure::Cancelled,
                 BackendFailure::Failed => ApplyFailure::EgressReadinessFailed,
-        })?;
+            })?;
         if egress_verified {
             let post_egress_failure = self
                 .require_current(&plan)
@@ -867,7 +867,15 @@ impl GenerationRuntime {
         }
         match backend.bind_proxy(&active.generation_id, handle, active) {
             Ok(ProxyReadback::Bound(binding))
-                if binding.generation_id == active.generation_id && binding.pid == handle.pid() =>
+                if self.in_flight_transaction.is_none()
+                    && self.active.as_ref().is_some_and(|current| {
+                        current.generation_id == generation_id
+                            && current.readiness == ReadinessLevel::EgressReady
+                            && current.egress_verified
+                            && current.pid == Some(handle.pid())
+                    })
+                    && binding.generation_id == active.generation_id
+                    && binding.pid == handle.pid() =>
             {
                 self.proxy_generation = Some(binding);
                 self.last_error_code = None;
@@ -1694,7 +1702,14 @@ mod tests {
         rollback_readiness_fails: bool,
         rollback_cleanup_fails: bool,
         kill_after_egress: bool,
+        final_bind_fault: Option<FinalBindFault>,
         next_pid: u32,
+    }
+
+    #[derive(Clone, Copy)]
+    enum FinalBindFault {
+        ProcessKilled,
+        ListenerReoccupied,
     }
 
     impl Default for FakeBackend {
@@ -1719,6 +1734,7 @@ mod tests {
                 rollback_readiness_fails: false,
                 rollback_cleanup_fails: false,
                 kill_after_egress: false,
+                final_bind_fault: None,
                 next_pid: 4000,
             }
         }
@@ -1888,6 +1904,19 @@ mod tests {
             _active: &GenerationView,
         ) -> Result<ProxyReadback, BackendFailure> {
             self.events.push("bindProxy".to_string());
+            if let Some(fault) = self.final_bind_fault.take() {
+                self.events.push("finalEgressProbe".to_string());
+                match fault {
+                    FinalBindFault::ProcessKilled => {
+                        self.live.retain(|token| token != handle.runner_token());
+                    }
+                    FinalBindFault::ListenerReoccupied => {
+                        self.listener_failure = Some(BackendFailure::Failed);
+                    }
+                }
+                self.confirm_process_identity(generation_id, handle)?;
+                self.confirm_listener_readiness(generation_id, handle, &[])?;
+            }
             Ok(self.bind_readback.clone().unwrap_or_else(|| {
                 ProxyReadback::Bound(ProxyGenerationView {
                     generation_id: generation_id.clone(),
@@ -2118,6 +2147,44 @@ mod tests {
         assert!(runtime.status().active.is_none());
         assert!(runtime.status().proxy_generation.is_none());
         assert_eq!(runtime.status().phase, GenerationPhase::Degraded);
+    }
+
+    #[test]
+    fn final_bind_probe_rejects_a_killed_process_and_degrades() {
+        let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let mut backend = FakeBackend::default();
+        activate(&mut runtime, &mut backend, "A");
+        runtime.proxy_generation = None;
+        backend.final_bind_fault = Some(FinalBindFault::ProcessKilled);
+
+        assert_eq!(
+            runtime.bind_proxy_active(&mut backend),
+            Err(ApplyFailure::ProxyConfirmationFailed)
+        );
+        let status = runtime.status();
+        assert_eq!(status.phase, GenerationPhase::Degraded);
+        assert!(status.proxy_generation.is_none());
+        assert!(!status.proxy_ready);
+        assert!(backend.events.contains(&"finalEgressProbe".to_string()));
+    }
+
+    #[test]
+    fn final_bind_probe_rejects_a_reoccupied_listener_and_degrades() {
+        let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let mut backend = FakeBackend::default();
+        activate(&mut runtime, &mut backend, "A");
+        runtime.proxy_generation = None;
+        backend.final_bind_fault = Some(FinalBindFault::ListenerReoccupied);
+
+        assert_eq!(
+            runtime.bind_proxy_active(&mut backend),
+            Err(ApplyFailure::ProxyConfirmationFailed)
+        );
+        let status = runtime.status();
+        assert_eq!(status.phase, GenerationPhase::Degraded);
+        assert!(status.proxy_generation.is_none());
+        assert!(!status.proxy_ready);
+        assert!(backend.events.contains(&"finalEgressProbe".to_string()));
     }
 
     #[test]

@@ -922,13 +922,50 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
               const raw = document.querySelector('textarea[data-config-draft="xray"]')?.value ?? '{}';
               const config = JSON.parse(raw);
               const rules = config.routing?.rules ?? [];
-              const trafficRule = rules.find((rule) => rule.outboundTag !== 'tachyon-xray-api') ?? {};
+              const outbounds = config.outbounds ?? [];
+              const apiTag = config.api?.tag ?? 'tachyon-xray-api';
+              const apiInboundTags = new Set(
+                (config.inbounds ?? [])
+                  .map((inbound) => inbound?.tag)
+                  .filter((tag) => typeof tag === 'string' && tag.includes('tachyon-xray-api-in')),
+              );
+              const isApiRule = (rule) =>
+                rule?.outboundTag === apiTag
+                || rule?.outboundTag === 'tachyon-xray-api'
+                || (Array.isArray(rule?.inboundTag)
+                  && rule.inboundTag.some((tag) => apiInboundTags.has(tag)));
+              const trafficRules = rules.filter((rule) => !isApiRule(rule));
+              const isExplicitCatchAll = (rule) =>
+                Boolean(rule?.outboundTag)
+                && Object.keys(rule).every((key) => key === 'type' || key === 'outboundTag');
+              const catchAllRule = trafficRules.find(isExplicitCatchAll) ?? {};
+              const catchAllOutbound = outbounds.find(
+                (outbound) => outbound?.tag === catchAllRule.outboundTag,
+              ) ?? {};
+              const directRule = trafficRules.find(
+                (rule) => rule?.outboundTag?.startsWith('tachyon-direct')
+                  && (Array.isArray(rule.ip) && rule.ip.includes('geoip:private')
+                    || Array.isArray(rule.domain) && rule.domain.includes('geosite:private')),
+              );
+              const blockRule = trafficRules.find(
+                (rule) => rule?.outboundTag?.startsWith('tachyon-block')
+                  && Array.isArray(rule.protocol)
+                  && rule.protocol.includes('bittorrent'),
+              );
+              const trafficOutboundTags = outbounds
+                .map((outbound) => outbound?.tag)
+                .filter((tag) => typeof tag === 'string' && tag !== apiTag);
               resolve({
                 domainStrategy: config.routing?.domainStrategy ?? '',
-                firstOutboundTag: rules[0]?.outboundTag ?? '',
-                firstTrafficOutboundTag: trafficRule.outboundTag ?? '',
-                hasApiRule: rules.some((rule) => rule.outboundTag === 'tachyon-xray-api'),
-                hasBlockRule: rules.some((rule) => rule.outboundTag === 'tachyon-block'),
+                firstTrafficOutboundTag: trafficRules[0]?.outboundTag ?? '',
+                firstConfiguredTrafficOutboundTag: trafficOutboundTags[0] ?? '',
+                catchAllOutboundTag: catchAllRule.outboundTag ?? '',
+                catchAllProtocol: catchAllOutbound.protocol ?? '',
+                catchAllIsExplicit: Boolean(catchAllRule.outboundTag),
+                catchAllTargetIsConfigured: Boolean(catchAllOutbound.tag),
+                hasApiRule: rules.some(isApiRule),
+                hasBlockRule: Boolean(blockRule),
+                hasPrivateDirectRule: Boolean(directRule),
                 ruleCount: rules.length
               });
             }, 350);
@@ -1762,7 +1799,13 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
         if active_routing_mode(cdp) != "global":
             raise AssertionError("global routing mode did not become active")
         summary = xray_routing_summary(cdp)
-        if not summary["hasApiRule"] or summary["firstTrafficOutboundTag"] != "tachyon-proxy":
+        if (
+            not summary["hasApiRule"]
+            or not summary["catchAllIsExplicit"]
+            or not summary["catchAllTargetIsConfigured"]
+            or summary["firstTrafficOutboundTag"] != summary["catchAllOutboundTag"]
+            or summary["catchAllProtocol"] in ("", "freedom", "blackhole")
+        ):
             raise AssertionError(f"global routing config mismatch: {summary}")
 
         text = switch_routing_mode(cdp, "direct")
@@ -1770,7 +1813,13 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
         if active_routing_mode(cdp) != "direct":
             raise AssertionError("direct routing mode did not become active")
         summary = xray_routing_summary(cdp)
-        if not summary["hasApiRule"] or summary["firstTrafficOutboundTag"] != "tachyon-direct":
+        if (
+            not summary["hasApiRule"]
+            or not summary["catchAllIsExplicit"]
+            or not summary["catchAllTargetIsConfigured"]
+            or summary["firstTrafficOutboundTag"] != summary["catchAllOutboundTag"]
+            or summary["catchAllProtocol"] != "freedom"
+        ):
             raise AssertionError(f"direct routing config mismatch: {summary}")
 
         text = switch_routing_mode(cdp, "rule")
@@ -1778,7 +1827,14 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
         if active_routing_mode(cdp) != "rule":
             raise AssertionError("rule routing mode did not become active")
         summary = xray_routing_summary(cdp)
-        if summary["domainStrategy"] != "IPIfNonMatch" or not summary["hasBlockRule"]:
+        if (
+            summary["domainStrategy"] != "IPIfNonMatch"
+            or not summary["hasApiRule"]
+            or not summary["hasBlockRule"]
+            or not summary["hasPrivateDirectRule"]
+            or not summary["catchAllIsExplicit"]
+            or not summary["catchAllTargetIsConfigured"]
+        ):
             raise AssertionError(f"rule routing config mismatch: {summary}")
         cdp.screenshot(output_dir / "routing-modes-desktop.png")
 
