@@ -69,7 +69,7 @@ pub(crate) struct SystemProxyTransactionResult {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "platform", rename_all = "camelCase")]
-enum PlatformProxySnapshot {
+pub(crate) enum PlatformProxySnapshot {
     Windows(WindowsProxySnapshot),
     #[cfg(test)]
     Test(TestProxySnapshot),
@@ -77,7 +77,7 @@ enum PlatformProxySnapshot {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct WindowsProxySnapshot {
+pub(crate) struct WindowsProxySnapshot {
     proxy_enable: Option<u32>,
     proxy_server: Option<String>,
     proxy_override: Option<String>,
@@ -86,10 +86,97 @@ struct WindowsProxySnapshot {
 #[cfg(test)]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TestProxySnapshot {
+pub(crate) struct TestProxySnapshot {
     enabled: bool,
     proxy_server: String,
     bypass: String,
+}
+
+#[cfg(test)]
+pub(crate) struct TestRegistryOps {
+    snapshot: Mutex<TestProxySnapshot>,
+}
+
+#[cfg(test)]
+impl TestRegistryOps {
+    pub(crate) fn from_state(
+        enabled: bool,
+        proxy_server: impl Into<String>,
+        bypass: impl Into<String>,
+    ) -> Self {
+        Self {
+            snapshot: Mutex::new(TestProxySnapshot {
+                enabled,
+                proxy_server: proxy_server.into(),
+                bypass: bypass.into(),
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+impl RegistryOps for TestRegistryOps {
+    fn capability(&self) -> SystemProxyCapability {
+        SystemProxyCapability {
+            platform: "test".to_string(),
+            supported: true,
+            can_query: true,
+            can_apply: true,
+            can_restore: true,
+            scope: "isolated-test".to_string(),
+            backend: "inMemoryRegistryOps".to_string(),
+            requires_elevation: false,
+            reason: None,
+        }
+    }
+
+    fn snapshot(&self) -> Result<PlatformProxySnapshot, String> {
+        Ok(PlatformProxySnapshot::Test(
+            self.snapshot
+                .lock()
+                .map_err(|error| format!("lock test registry: {error}"))?
+                .clone(),
+        ))
+    }
+
+    fn query(&self, settings: &RuntimeSettings) -> Result<SystemProxyState, String> {
+        let snapshot = self
+            .snapshot
+            .lock()
+            .map_err(|error| format!("lock test registry: {error}"))?;
+        Ok(proxy_state(
+            settings,
+            true,
+            snapshot.enabled,
+            snapshot.proxy_server.clone(),
+            snapshot.bypass.clone(),
+            None,
+        ))
+    }
+
+    fn apply(&self, settings: &RuntimeSettings, enabled: bool) -> Result<(), String> {
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .map_err(|error| format!("lock test registry: {error}"))?;
+        snapshot.enabled = enabled;
+        if enabled {
+            snapshot.proxy_server = expected_system_proxy_server(settings);
+            snapshot.bypass = settings.system_proxy_bypass.clone();
+        }
+        Ok(())
+    }
+
+    fn restore(&self, snapshot: &PlatformProxySnapshot) -> Result<(), String> {
+        let PlatformProxySnapshot::Test(snapshot) = snapshot else {
+            return Err("unexpected test registry snapshot".to_string());
+        };
+        *self
+            .snapshot
+            .lock()
+            .map_err(|error| format!("lock test registry: {error}"))? = snapshot.clone();
+        Ok(())
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -102,7 +189,7 @@ struct SystemProxyJournal {
     snapshot: PlatformProxySnapshot,
 }
 
-trait ProxyBackend {
+pub(crate) trait RegistryOps {
     fn capability(&self) -> SystemProxyCapability;
     fn snapshot(&self) -> Result<PlatformProxySnapshot, String>;
     fn query(&self, settings: &RuntimeSettings) -> Result<SystemProxyState, String>;
@@ -196,11 +283,56 @@ pub(crate) fn restore_if_pending(
         return Ok(false);
     }
     let settings = load_runtime_settings(app).or_else(|_| default_runtime_settings(app))?;
-    restore_transaction(&PlatformProxyBackend, &settings, &path, None)?;
+    restore_if_pending_at_path(&PlatformProxyBackend, &settings, &path)
+}
+
+fn restore_if_pending_at_path<B: RegistryOps>(
+    backend: &B,
+    settings: &RuntimeSettings,
+    path: &Path,
+) -> Result<bool, String> {
+    if read_optional_journal(path)?.is_none() {
+        return Ok(false);
+    }
+    restore_transaction(backend, settings, path, None)?;
     Ok(true)
 }
 
-fn apply_transaction<B: ProxyBackend>(
+#[cfg(test)]
+pub(crate) fn restore_if_pending_with_registry<B: RegistryOps>(
+    runtime: &SystemProxyRuntime,
+    backend: &B,
+    settings: &RuntimeSettings,
+    path: &Path,
+) -> Result<bool, String> {
+    let _guard = runtime
+        .transaction
+        .lock()
+        .map_err(|error| format!("lock system proxy transaction: {error}"))?;
+    restore_if_pending_at_path(backend, settings, path)
+}
+
+#[cfg(test)]
+pub(crate) fn readback_with_registry<B: RegistryOps>(
+    backend: &B,
+    settings: &RuntimeSettings,
+    path: &Path,
+) -> Result<SystemProxyQuery, String> {
+    let current = backend.query(settings)?;
+    let pending_transaction =
+        read_optional_journal(path)?.map(|journal| PendingSystemProxyTransaction {
+            transaction_id: journal.transaction_id,
+            created_at: journal.created_at,
+            desired_enabled: journal.desired_enabled,
+        });
+    Ok(SystemProxyQuery {
+        capability: backend.capability(),
+        current,
+        pending_transaction,
+    })
+}
+
+fn apply_transaction<B: RegistryOps>(
     backend: &B,
     settings: &RuntimeSettings,
     journal_path: &Path,
@@ -265,7 +397,17 @@ fn apply_transaction<B: ProxyBackend>(
     })
 }
 
-fn restore_transaction<B: ProxyBackend>(
+#[cfg(test)]
+pub(crate) fn apply_with_registry<B: RegistryOps>(
+    backend: &B,
+    settings: &RuntimeSettings,
+    path: &Path,
+    enabled: bool,
+) -> Result<SystemProxyTransactionResult, String> {
+    apply_transaction(backend, settings, path, enabled)
+}
+
+fn restore_transaction<B: RegistryOps>(
     backend: &B,
     settings: &RuntimeSettings,
     journal_path: &Path,
@@ -304,7 +446,7 @@ fn restore_transaction<B: ProxyBackend>(
     })
 }
 
-fn rollback_failed_apply<B: ProxyBackend>(
+fn rollback_failed_apply<B: RegistryOps>(
     backend: &B,
     journal_path: &Path,
     snapshot: &PlatformProxySnapshot,
@@ -352,7 +494,7 @@ fn validate_desired_settings(settings: &RuntimeSettings, enabled: bool) -> Resul
     Ok(())
 }
 
-fn query_or_error_state<B: ProxyBackend>(
+fn query_or_error_state<B: RegistryOps>(
     backend: &B,
     settings: &RuntimeSettings,
 ) -> SystemProxyState {
@@ -447,7 +589,7 @@ fn transaction_id() -> String {
 }
 
 #[cfg(target_os = "windows")]
-impl ProxyBackend for PlatformProxyBackend {
+impl RegistryOps for PlatformProxyBackend {
     fn capability(&self) -> SystemProxyCapability {
         SystemProxyCapability {
             platform: "windows".to_string(),
@@ -516,7 +658,7 @@ impl ProxyBackend for PlatformProxyBackend {
 }
 
 #[cfg(not(target_os = "windows"))]
-impl ProxyBackend for PlatformProxyBackend {
+impl RegistryOps for PlatformProxyBackend {
     fn capability(&self) -> SystemProxyCapability {
         let platform = std::env::consts::OS.to_string();
         SystemProxyCapability {
@@ -700,12 +842,12 @@ mod tests {
         ApplyWithoutDesiredState,
     }
 
-    struct FakeBackend {
+    struct InMemoryRegistryOps {
         snapshot: Mutex<TestProxySnapshot>,
         failure: FailureMode,
     }
 
-    impl FakeBackend {
+    impl InMemoryRegistryOps {
         fn new(snapshot: TestProxySnapshot, failure: FailureMode) -> Self {
             Self {
                 snapshot: Mutex::new(snapshot),
@@ -714,7 +856,7 @@ mod tests {
         }
     }
 
-    impl ProxyBackend for FakeBackend {
+    impl RegistryOps for InMemoryRegistryOps {
         fn capability(&self) -> SystemProxyCapability {
             SystemProxyCapability {
                 platform: "test".to_string(),
@@ -807,7 +949,7 @@ mod tests {
     #[test]
     fn apply_persists_snapshot_and_restore_recovers_exact_state() {
         let original = original_snapshot();
-        let backend = FakeBackend::new(original.clone(), FailureMode::None);
+        let backend = InMemoryRegistryOps::new(original.clone(), FailureMode::None);
         let path = journal_path("restore");
 
         let applied = apply_transaction(&backend, &settings(), &path, true).unwrap();
@@ -833,7 +975,7 @@ mod tests {
     #[test]
     fn apply_failure_rolls_back_and_removes_journal() {
         let original = original_snapshot();
-        let backend = FakeBackend::new(original.clone(), FailureMode::Apply);
+        let backend = InMemoryRegistryOps::new(original.clone(), FailureMode::Apply);
         let path = journal_path("apply-failure");
 
         let error = apply_transaction(&backend, &settings(), &path, true).unwrap_err();
@@ -848,7 +990,8 @@ mod tests {
     #[test]
     fn verification_failure_rolls_back() {
         let original = original_snapshot();
-        let backend = FakeBackend::new(original.clone(), FailureMode::ApplyWithoutDesiredState);
+        let backend =
+            InMemoryRegistryOps::new(original.clone(), FailureMode::ApplyWithoutDesiredState);
         let path = journal_path("verify-failure");
 
         let error = apply_transaction(&backend, &settings(), &path, true).unwrap_err();
@@ -862,7 +1005,7 @@ mod tests {
 
     #[test]
     fn failed_rollback_retains_recovery_journal() {
-        let backend = FakeBackend::new(original_snapshot(), FailureMode::Restore);
+        let backend = InMemoryRegistryOps::new(original_snapshot(), FailureMode::Restore);
         let path = journal_path("rollback-failure");
         let snapshot = backend.snapshot().unwrap();
         write_journal(
@@ -886,7 +1029,7 @@ mod tests {
 
     #[test]
     fn rejects_second_apply_while_recovery_is_pending() {
-        let backend = FakeBackend::new(original_snapshot(), FailureMode::None);
+        let backend = InMemoryRegistryOps::new(original_snapshot(), FailureMode::None);
         let path = journal_path("pending");
         let first = apply_transaction(&backend, &settings(), &path, true).unwrap();
 

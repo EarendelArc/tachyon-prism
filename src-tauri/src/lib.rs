@@ -1404,11 +1404,8 @@ impl XrayCoordinator {
             return false;
         }
 
-        let restore_failed = system_proxy::restore_if_pending(app, proxy).is_err();
-        self.generations.degrade_proxy_binding(if restore_failed {
-            "proxyWatchdogRestoreFailed"
-        } else {
-            "proxyWatchdogFailed"
+        recover_proxy_binding_after_watchdog(&mut self.generations, || {
+            system_proxy::restore_if_pending(app, proxy)
         });
         true
     }
@@ -1520,6 +1517,18 @@ fn watchdog_binding_is_current(
         && status.proxy_generation.as_ref().is_some_and(|binding| {
             binding.generation_id == *expected_generation_id && binding.pid == expected_pid
         })
+}
+
+fn recover_proxy_binding_after_watchdog(
+    generations: &mut xray_generation::GenerationRuntime,
+    restore: impl FnOnce() -> Result<bool, String>,
+) {
+    let restore_failed = restore().is_err();
+    generations.degrade_proxy_binding(if restore_failed {
+        "proxyWatchdogRestoreFailed"
+    } else {
+        "proxyWatchdogFailed"
+    });
 }
 
 fn generation_apply_error(error: xray_generation::ApplyFailure) -> String {
@@ -9942,7 +9951,7 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
             egress_verified: true,
             readiness: xray_generation::ReadinessLevel::EgressReady,
         };
-        let mut status = xray_generation::GenerationStatus {
+        let status = xray_generation::GenerationStatus {
             desired: None,
             active: Some(active),
             proxy_generation: Some(xray_generation::ProxyGenerationView {
@@ -9953,21 +9962,40 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
             proxy_ready: true,
             last_error_code: None,
         };
-        struct MockOsProxy {
-            active: bool,
-            restore_calls: u32,
-        }
-        let mut mock_os_proxy = MockOsProxy {
-            active: true,
-            restore_calls: 0,
+        let proxy_settings = RuntimeSettings {
+            xray_http_listen: "127.0.0.1".to_string(),
+            xray_http_port: 10809,
+            xray_socks_listen: "127.0.0.1".to_string(),
+            xray_socks_port: 10808,
+            system_proxy_bypass: "localhost;127.*;<local>".to_string(),
+            ..RuntimeSettings::default()
         };
+        let proxy_runtime = system_proxy::SystemProxyRuntime::default();
+        let registry =
+            system_proxy::TestRegistryOps::from_state(true, "existing.proxy:3128", "localhost");
+        let journal_path = directory.join("system-proxy-transaction.json");
+        let applied =
+            system_proxy::apply_with_registry(&registry, &proxy_settings, &journal_path, true)
+                .expect("apply isolated system proxy transaction");
+        let applied_readback =
+            system_proxy::readback_with_registry(&registry, &proxy_settings, &journal_path)
+                .expect("read isolated system proxy transaction");
+        assert_eq!(
+            applied_readback
+                .pending_transaction
+                .as_ref()
+                .map(|pending| pending.transaction_id.as_str()),
+            Some(applied.transaction_id.as_str())
+        );
+        assert!(applied_readback.current.enabled);
+        assert!(journal_path.exists());
         assert!(watchdog_binding_is_current(
             &status,
             &generation_id,
             first_pid,
             true,
             true,
-            mock_os_proxy.active,
+            true,
         ));
 
         first.kill().unwrap();
@@ -9996,28 +10024,45 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
             first_pid,
             false,
             first_listener_owned,
-            mock_os_proxy.active,
+            true,
         );
         assert!(
             !healthy,
             "watchdog must reject a dead PID and reoccupied listener"
         );
-        if !healthy {
-            mock_os_proxy.active = false;
-            mock_os_proxy.restore_calls += 1;
-            status.proxy_generation = None;
-            status.proxy_ready = false;
-            status.phase = xray_generation::GenerationPhase::Degraded;
-            if let Some(active) = status.active.as_mut() {
-                active.egress_verified = false;
-                active.readiness = xray_generation::ReadinessLevel::Degraded;
-            }
-        }
-        assert_eq!(mock_os_proxy.restore_calls, 1);
-        assert!(!mock_os_proxy.active);
-        assert!(!status.proxy_ready);
-        assert!(status.proxy_generation.is_none());
-        assert_eq!(status.phase, xray_generation::GenerationPhase::Degraded);
+        assert!(!healthy);
+        let mut recovery_runtime = xray_generation::GenerationRuntime::default();
+        recovery_runtime
+            .select_desired(b"{}", "fixture".to_string(), "1".to_string(), vec![])
+            .unwrap();
+        recover_proxy_binding_after_watchdog(&mut recovery_runtime, || {
+            system_proxy::restore_if_pending_with_registry(
+                &proxy_runtime,
+                &registry,
+                &proxy_settings,
+                &journal_path,
+            )
+        });
+        let recovered = recovery_runtime.status();
+        let restored_readback =
+            system_proxy::readback_with_registry(&registry, &proxy_settings, &journal_path)
+                .expect("read restored isolated system proxy transaction");
+        assert!(!recovered.proxy_ready);
+        assert!(recovered.proxy_generation.is_none());
+        assert_eq!(recovered.phase, xray_generation::GenerationPhase::Degraded);
+        assert_eq!(
+            recovered.last_error_code.as_deref(),
+            Some("proxyWatchdogFailed")
+        );
+        assert_eq!(
+            restored_readback.current.proxy_server,
+            "existing.proxy:3128"
+        );
+        assert_eq!(restored_readback.current.bypass, "localhost");
+        assert!(restored_readback.current.enabled);
+        assert!(!restored_readback.current.matches_prism);
+        assert!(restored_readback.pending_transaction.is_none());
+        assert!(!journal_path.exists());
 
         second.kill().unwrap();
         second.wait().unwrap();
