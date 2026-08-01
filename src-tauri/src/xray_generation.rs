@@ -2,10 +2,13 @@ use crate::write_atomic;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+#[cfg(unix)]
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 
 const CLOCK_VERSION: u32 = 1;
@@ -108,33 +111,175 @@ pub struct RunnerHandle {
 #[derive(Debug)]
 pub struct ConfigLease {
     path: PathBuf,
+    #[cfg(unix)]
+    name: OsString,
+    #[cfg(not(unix))]
     orphan_journal: PathBuf,
+    #[cfg(not(unix))]
     orphan_recovery_failure: PathBuf,
     recovery_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
     leased_paths: Arc<Mutex<HashSet<PathBuf>>>,
     root_binding: Option<ConfigRootBinding>,
+    #[cfg(unix)]
+    config_file: File,
+    #[cfg(test)]
+    race_hook: GenerationRaceHook,
 }
 
 #[derive(Debug)]
 struct ConfigRootBinding {
+    #[cfg(not(unix))]
     path: PathBuf,
     directory: File,
     #[cfg(unix)]
     _anchor: File,
 }
 
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct GenerationRaceHook(Arc<Mutex<Option<GenerationRaceSwap>>>);
+
+#[cfg(test)]
+struct GenerationRaceSwap {
+    before: Box<dyn FnOnce() + Send>,
+    after: Box<dyn FnOnce() + Send>,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for GenerationRaceHook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("GenerationRaceHook")
+    }
+}
+
+#[cfg(test)]
+fn with_generation_race<T>(hook: &GenerationRaceHook, operation: impl FnOnce() -> T) -> T {
+    let swap = hook.0.lock().ok().and_then(|mut value| value.take());
+    if let Some(swap) = swap {
+        (swap.before)();
+        let result = operation();
+        (swap.after)();
+        result
+    } else {
+        operation()
+    }
+}
+
 impl ConfigLease {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    pub(crate) fn child_config_path(&self) -> PathBuf {
+        #[cfg(unix)]
+        {
+            PathBuf::from(format!("/dev/fd/{XRAY_CONFIG_CHILD_FD}"))
+        }
+        #[cfg(not(unix))]
+        {
+            self.path.clone()
+        }
+    }
+
+    pub(crate) fn spawn_command(&self, command: &mut Command) -> std::io::Result<Child> {
+        self.prepare_child_command(command)?;
+        #[cfg(test)]
+        let mut child = with_generation_race(&self.race_hook, || command.spawn())?;
+        #[cfg(not(test))]
+        let mut child = command.spawn()?;
+        if let Err(error) = self.verify_child_source() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        Ok(child)
+    }
+
+    fn prepare_child_command(&self, _command: &mut Command) -> std::io::Result<()> {
+        self.verify_child_source()?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            use std::os::unix::process::CommandExt;
+
+            let command = _command;
+            let source = self.config_file.as_raw_fd();
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::dup2(source, XRAY_CONFIG_CHILD_FD) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if libc::fcntl(XRAY_CONFIG_CHILD_FD, libc::F_SETFD, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verify_child_source(&self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            crate::unix_generation_fs::validate_open_regular(&self.config_file)?;
+            let binding = self.root_binding.as_ref().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "missing root binding")
+            })?;
+            let linked = crate::unix_generation_fs::open_read(&binding.directory, &self.name)?;
+            let opened = crate::unix_generation_fs::validate_open_regular(&self.config_file)?;
+            let current = crate::unix_generation_fs::validate_open_regular(&linked)?;
+            if opened.st_dev != current.st_dev || opened.st_ino != current.st_ino {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "generation config entry no longer matches its retained descriptor",
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if !self.path.is_file() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "generation config is missing",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
+
+#[cfg(unix)]
+const XRAY_CONFIG_CHILD_FD: i32 = 198;
 
 impl Drop for ConfigLease {
     fn drop(&mut self) {
         if let Ok(mut paths) = self.leased_paths.lock() {
             paths.remove(&self.path);
         }
-        release_config_lease(
+        #[cfg(unix)]
+        {
+            if verify_config_root_binding(self.root_binding.as_ref()).is_err()
+                || self.verify_child_source().is_err()
+            {
+                self.recovery_failure
+                    .store(true, std::sync::atomic::Ordering::Release);
+                return;
+            }
+            let operation = || {
+                release_config_lease_unix(
+                    &self.name,
+                    &self.recovery_failure,
+                    self.root_binding.as_ref(),
+                )
+            };
+            #[cfg(test)]
+            with_generation_race(&self.race_hook, operation);
+            #[cfg(not(test))]
+            operation();
+        }
+        #[cfg(not(unix))]
+        release_config_lease_path(
             &self.path,
             &self.orphan_journal,
             &self.orphan_recovery_failure,
@@ -145,11 +290,45 @@ impl Drop for ConfigLease {
     }
 }
 
+#[cfg(not(unix))]
 fn remove_config_file(path: &Path) -> std::io::Result<()> {
     fs::remove_file(path)
 }
 
-fn release_config_lease(
+#[cfg(unix)]
+fn release_config_lease_unix(
+    name: &OsStr,
+    recovery_failure: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    root_binding: Option<&ConfigRootBinding>,
+) {
+    let Some(binding) = root_binding else {
+        recovery_failure.store(true, std::sync::atomic::Ordering::Release);
+        return;
+    };
+    match crate::unix_generation_fs::remove(&binding.directory, name) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            if crate::unix_generation_fs::replace(
+                &binding.directory,
+                OsStr::new(ORPHAN_JOURNAL_FILE),
+                b"{\"version\":1,\"pending\":true}\n",
+            )
+            .is_err()
+            {
+                recovery_failure.store(true, std::sync::atomic::Ordering::Release);
+                let _ = crate::unix_generation_fs::replace(
+                    &binding.directory,
+                    OsStr::new(ORPHAN_RECOVERY_FAILURE_FILE),
+                    b"{\"version\":1,\"pending\":true,\"reason\":\"orphanJournalWriteFailed\"}\n",
+                );
+            }
+        }
+    }
+}
+
+#[cfg(any(not(unix), test))]
+fn release_config_lease_path(
     path: &Path,
     orphan_journal: &Path,
     orphan_recovery_failure: &Path,
@@ -183,6 +362,7 @@ fn release_config_lease(
     }
 }
 
+#[cfg(any(not(unix), test))]
 fn guarded_config_root_io<T>(
     binding: Option<&ConfigRootBinding>,
     operation: impl FnOnce() -> std::io::Result<T>,
@@ -197,6 +377,15 @@ fn verify_config_root_binding(binding: Option<&ConfigRootBinding>) -> Result<(),
     let Some(binding) = binding else {
         return Ok(());
     };
+    #[cfg(unix)]
+    {
+        crate::unix_generation_fs::validate_open_regular(&binding._anchor)
+            .map_err(|_| "generation-anchor-fd-invalid".to_string())?;
+        crate::unix_generation_fs::validate_root(&binding.directory)
+            .map_err(|_| "generation-root-fd-invalid".to_string())?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
     verify_root_directory_binding(&binding.path, &binding.directory)
 }
 
@@ -218,6 +407,10 @@ impl CandidateHandle {
 
     pub fn config_path(&self) -> &Path {
         self.config.path()
+    }
+
+    pub(crate) fn config_lease(&self) -> &ConfigLease {
+        &self.config
     }
 }
 
@@ -268,7 +461,11 @@ pub enum ApplyFailure {
 }
 
 pub trait ApplyBackend {
-    fn validate_config(&mut self, plan: &ApplyPlan) -> Result<(), BackendFailure>;
+    fn validate_config(
+        &mut self,
+        plan: &ApplyPlan,
+        config: &ConfigLease,
+    ) -> Result<(), BackendFailure>;
     fn capture_proxy_snapshot(&mut self) -> Result<Option<ProxySnapshotHandle>, BackendFailure>;
     fn restore_proxy_snapshot(
         &mut self,
@@ -686,16 +883,16 @@ impl GenerationRuntime {
             Ok(snapshot) => snapshot,
             Err(_) => return self.finish_proxy_uncertain(plan, ApplyFailure::ProxyRestoreFailed),
         };
-        if backend.validate_config(&plan).is_err() {
-            return self.finish_before_proxy_change(plan, ApplyFailure::ConfigValidationFailed);
-        }
-        self.set_desired_readiness(&plan, ReadinessLevel::ConfigValidated)?;
         let config_lease = match self.store.stage(&plan) {
             Ok(lease) => lease,
             Err(_) => {
                 return self.finish_before_proxy_change(plan, ApplyFailure::GenerationPersistFailed)
             }
         };
+        if backend.validate_config(&plan, &config_lease).is_err() {
+            return self.finish_before_proxy_change(plan, ApplyFailure::ConfigValidationFailed);
+        }
+        self.set_desired_readiness(&plan, ReadinessLevel::ConfigValidated)?;
         if let Some(snapshot) = &plan.proxy_snapshot {
             match backend.restore_proxy_snapshot(snapshot) {
                 Ok(ProxyReadback::Restored) => self.proxy_generation = None,
@@ -1179,6 +1376,8 @@ pub struct GenerationStore {
     recovery_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
     instance_lease: Option<InstanceLease>,
     leased_paths: Arc<Mutex<HashSet<PathBuf>>>,
+    #[cfg(test)]
+    race_hook: GenerationRaceHook,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1194,6 +1393,7 @@ struct InstanceLeaseMetadata {
 struct InstanceLease {
     _file: File,
     _parent_dir: File,
+    #[cfg(not(unix))]
     root: PathBuf,
     #[cfg(unix)]
     _anchor_file: File,
@@ -1267,11 +1467,14 @@ fn verify_windows_file_identity(
 
 impl InstanceLease {
     fn verify(&self) -> Result<(), String> {
+        #[cfg(not(unix))]
         verify_root_directory_binding(&self.root, &self._parent_dir)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
 
+            crate::unix_generation_fs::validate_open_regular(&self._anchor_file)
+                .map_err(|_| "generation-instance-anchor-invalid".to_string())?;
             unsafe extern "C" {
                 fn geteuid() -> u32;
             }
@@ -1287,7 +1490,8 @@ impl InstanceLease {
                 ._file
                 .metadata()
                 .map_err(|_| "generation-instance-lease-read-failed".to_string())?;
-            if !file.is_file() || file.uid() != uid || file.mode() & 0o077 != 0 {
+            if !file.is_file() || file.uid() != uid || file.nlink() != 1 || file.mode() & 0o077 != 0
+            {
                 return Err("generation-instance-lease-file-invalid".to_string());
             }
         }
@@ -1341,6 +1545,7 @@ fn acquire_instance_lease(root: &Path) -> Option<InstanceLease> {
     Some(InstanceLease {
         _file: file,
         _parent_dir: parent_dir,
+        #[cfg(not(unix))]
         root: root.to_path_buf(),
         #[cfg(unix)]
         _anchor_file: anchor_file,
@@ -1359,29 +1564,9 @@ fn write_instance_lease_metadata(file: &mut File, data: &[u8]) -> std::io::Resul
     file.sync_data()
 }
 
+#[cfg(not(unix))]
 fn verify_root_directory_binding(root: &Path, directory: &File) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-
-        let path_metadata = fs::symlink_metadata(root)
-            .map_err(|_| "generation-root-path-read-failed".to_string())?;
-        let held_metadata = directory
-            .metadata()
-            .map_err(|_| "generation-root-fd-read-failed".to_string())?;
-        if path_metadata.file_type().is_symlink()
-            || !path_metadata.is_dir()
-            || !held_metadata.is_dir()
-            || path_metadata.dev() != held_metadata.dev()
-            || path_metadata.ino() != held_metadata.ino()
-        {
-            return Err("generation-root-identity-mismatch".to_string());
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (root, directory);
-    }
+    let _ = (root, directory);
     Ok(())
 }
 
@@ -1456,7 +1641,7 @@ fn open_locked_instance_file(path: &Path) -> std::io::Result<LockedInstanceFile>
     }
     let file = unsafe { File::from_raw_fd(fd) };
     let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.uid() != unsafe { geteuid() } {
+    if !metadata.is_file() || metadata.uid() != unsafe { geteuid() } || metadata.nlink() != 1 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "lease path is not an owned regular file",
@@ -1510,7 +1695,7 @@ fn open_unix_root_anchor(root: &Path) -> std::io::Result<File> {
     let anchor = unsafe { File::from_raw_fd(fd) };
     let metadata = anchor.metadata()?;
     let uid = unsafe { libc::geteuid() };
-    if !metadata.is_file() || metadata.uid() != uid {
+    if !metadata.is_file() || metadata.uid() != uid || metadata.nlink() != 1 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "generation anchor is not an owned regular file",
@@ -1689,11 +1874,71 @@ impl GenerationStore {
             recovery_failure: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             instance_lease,
             leased_paths: Arc::new(Mutex::new(HashSet::new())),
+            #[cfg(test)]
+            race_hook: GenerationRaceHook::default(),
         }
+    }
+
+    #[cfg(all(test, unix))]
+    fn set_race_hook(
+        &self,
+        before: impl FnOnce() + Send + 'static,
+        after: impl FnOnce() + Send + 'static,
+    ) {
+        *self.race_hook.0.lock().unwrap() = Some(GenerationRaceSwap {
+            before: Box::new(before),
+            after: Box::new(after),
+        });
     }
 
     pub fn stage(&self, plan: &ApplyPlan) -> Result<ConfigLease, String> {
         self.verify_instance_lease()?;
+        #[cfg(test)]
+        return with_generation_race(&self.race_hook, || self.stage_inner(plan));
+        #[cfg(not(test))]
+        self.stage_inner(plan)
+    }
+
+    #[cfg(unix)]
+    fn stage_inner(&self, plan: &ApplyPlan) -> Result<ConfigLease, String> {
+        let name = OsString::from(format!("generation-{}.json", plan.generation_id().as_str()));
+        let instance_lease = self
+            .instance_lease
+            .as_ref()
+            .ok_or_else(|| "generation-instance-lease-unavailable".to_string())?;
+        let config_file =
+            crate::unix_generation_fs::write_new(&instance_lease._parent_dir, &name, plan.config())
+                .map_err(|_| "generation-config-write-failed".to_string())?;
+        let path = self.root.join(&name);
+        let lease = ConfigLease {
+            path,
+            name: name.clone(),
+            recovery_failure: std::sync::Arc::clone(&self.recovery_failure),
+            leased_paths: Arc::clone(&self.leased_paths),
+            root_binding: Some(ConfigRootBinding {
+                directory: instance_lease
+                    ._parent_dir
+                    .try_clone()
+                    .map_err(|_| "generation-root-fd-clone-failed".to_string())?,
+                _anchor: instance_lease
+                    ._anchor_file
+                    .try_clone()
+                    .map_err(|_| "generation-anchor-fd-clone-failed".to_string())?,
+            }),
+            config_file,
+            #[cfg(test)]
+            race_hook: self.race_hook.clone(),
+        };
+        self.leased_paths
+            .lock()
+            .map_err(|_| "generation-lease-state-failed".to_string())?
+            .insert(lease.path.clone());
+        self.cleanup_stale_unix(&name)?;
+        Ok(lease)
+    }
+
+    #[cfg(not(unix))]
+    fn stage_inner(&self, plan: &ApplyPlan) -> Result<ConfigLease, String> {
         let path = self
             .root
             .join(format!("generation-{}.json", plan.generation_id().as_str()));
@@ -1718,23 +1963,83 @@ impl GenerationStore {
                     ._parent_dir
                     .try_clone()
                     .map_err(|_| "generation-root-fd-clone-failed".to_string())?,
-                #[cfg(unix)]
-                _anchor: instance_lease
-                    ._anchor_file
-                    .try_clone()
-                    .map_err(|_| "generation-anchor-fd-clone-failed".to_string())?,
             }),
+            #[cfg(test)]
+            race_hook: self.race_hook.clone(),
         };
         self.leased_paths
             .lock()
             .map_err(|_| "generation-lease-state-failed".to_string())?
             .insert(lease.path.clone());
-        self.cleanup_stale(lease.path())?;
+        self.cleanup_stale_path(lease.path())?;
         self.verify_instance_lease()?;
         Ok(lease)
     }
 
     pub fn sweep_orphans(&self) -> Result<(), String> {
+        self.verify_instance_lease()?;
+        #[cfg(test)]
+        return with_generation_race(&self.race_hook, || self.sweep_orphans_inner());
+        #[cfg(not(test))]
+        self.sweep_orphans_inner()
+    }
+
+    #[cfg(unix)]
+    fn sweep_orphans_inner(&self) -> Result<(), String> {
+        let root = &self
+            .instance_lease
+            .as_ref()
+            .ok_or_else(|| "generation-instance-lease-unavailable".to_string())?
+            ._parent_dir;
+        let entries = crate::unix_generation_fs::list(root)
+            .map_err(|_| "generation-dir-read-failed".to_string())?;
+        for entry in entries {
+            let path = self.root.join(&entry.name);
+            let is_generation = entry
+                .name
+                .to_str()
+                .is_some_and(|name| name.starts_with("generation-") && name.ends_with(".json"));
+            let leased = self
+                .leased_paths
+                .lock()
+                .map_err(|_| "generation-lease-state-failed".to_string())?
+                .contains(&path);
+            if is_generation && !leased {
+                crate::unix_generation_fs::remove(root, &entry.name)
+                    .map_err(|_| "generation-orphan-cleanup-failed".to_string())?;
+            }
+        }
+        self.remove_optional_unix(
+            root,
+            OsStr::new(ORPHAN_JOURNAL_FILE),
+            "generation-orphan-journal-cleanup-failed",
+        )?;
+        self.remove_optional_unix(
+            root,
+            OsStr::new(ORPHAN_RECOVERY_FAILURE_FILE),
+            "generation-orphan-recovery-marker-cleanup-failed",
+        )?;
+        self.recovery_failure
+            .store(false, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn remove_optional_unix(
+        &self,
+        root: &File,
+        name: &OsStr,
+        error_code: &'static str,
+    ) -> Result<(), String> {
+        match crate::unix_generation_fs::remove(root, name) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(error_code.to_string()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn sweep_orphans_inner(&self) -> Result<(), String> {
         let entries = self.guarded_root_io("generation-dir-read-failed", || {
             fs::read_dir(&self.root)?
                 .map(|entry| entry.map(|value| value.path()))
@@ -1781,6 +2086,7 @@ impl GenerationStore {
             .verify()
     }
 
+    #[cfg(not(unix))]
     fn guarded_root_result<T>(
         &self,
         operation: impl FnOnce() -> std::io::Result<T>,
@@ -1791,6 +2097,7 @@ impl GenerationStore {
         Ok(result)
     }
 
+    #[cfg(not(unix))]
     fn guarded_root_io<T>(
         &self,
         error_code: &'static str,
@@ -1800,7 +2107,49 @@ impl GenerationStore {
             .map_err(|_| error_code.to_string())
     }
 
-    fn cleanup_stale(&self, current: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    fn cleanup_stale_unix(&self, current: &OsStr) -> Result<(), String> {
+        let root = &self
+            .instance_lease
+            .as_ref()
+            .ok_or_else(|| "generation-instance-lease-unavailable".to_string())?
+            ._parent_dir;
+        let mut files = crate::unix_generation_fs::list(root)
+            .map_err(|_| "generation-dir-read-failed".to_string())?
+            .into_iter()
+            .filter(|entry| {
+                entry
+                    .name
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("generation-") && name.ends_with(".json"))
+            })
+            .collect::<Vec<_>>();
+        let leased_paths = self
+            .leased_paths
+            .lock()
+            .map_err(|_| "generation-lease-state-failed".to_string())?
+            .clone();
+        files.retain(|entry| {
+            entry.name != current && !leased_paths.contains(&self.root.join(&entry.name))
+        });
+        files.sort_by_key(|entry| {
+            (
+                entry.modified_seconds,
+                entry.modified_nanoseconds,
+                entry.name.clone(),
+            )
+        });
+        let keep = self.retained.max(1);
+        let remove_count = files.len().saturating_sub(keep - 1);
+        for entry in files.into_iter().take(remove_count) {
+            crate::unix_generation_fs::remove(root, &entry.name)
+                .map_err(|_| "generation-stale-cleanup-failed".to_string())?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn cleanup_stale_path(&self, current: &Path) -> Result<(), String> {
         let mut files = self.guarded_root_io("generation-dir-read-failed", || {
             fs::read_dir(&self.root)?
                 .filter_map(Result::ok)
@@ -1937,7 +2286,11 @@ mod tests {
     }
 
     impl ApplyBackend for FakeBackend {
-        fn validate_config(&mut self, plan: &ApplyPlan) -> Result<(), BackendFailure> {
+        fn validate_config(
+            &mut self,
+            plan: &ApplyPlan,
+            _config: &ConfigLease,
+        ) -> Result<(), BackendFailure> {
             self.events
                 .push(format!("validate:{}", plan.generation_id().as_str()));
             self.validate_failure.take().map_or(Ok(()), Err)
@@ -2244,11 +2597,54 @@ mod tests {
         let binding = lease.root_binding.as_ref().unwrap();
         close_on_exec(&binding._anchor);
         close_on_exec(&binding.directory);
+        close_on_exec(&lease.config_file);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn install_root_swap_hook(
+        store: &GenerationStore,
+        root: &Path,
+        moved: &Path,
+        wait_for: Option<PathBuf>,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let untouched = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let before_root = root.to_path_buf();
+        let before_moved = moved.to_path_buf();
+        let after_root = root.to_path_buf();
+        let after_moved = moved.to_path_buf();
+        let after_untouched = Arc::clone(&untouched);
+        store.set_race_hook(
+            move || {
+                fs::rename(&before_root, &before_moved).unwrap();
+                fs::create_dir(&before_root).unwrap();
+                fs::write(before_root.join("replacement-sentinel"), b"replacement").unwrap();
+            },
+            move || {
+                if let Some(path) = wait_for {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                    while !path.is_file() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
+                let mut names = fs::read_dir(&after_root)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect::<Vec<_>>();
+                names.sort();
+                after_untouched.store(
+                    names == [OsString::from("replacement-sentinel")],
+                    std::sync::atomic::Ordering::Release,
+                );
+                fs::remove_dir_all(&after_root).unwrap();
+                fs::rename(&after_moved, &after_root).unwrap();
+            },
+        );
+        untouched
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn replaced_root_blocks_second_instance_and_existing_store_operations() {
+    fn replaced_root_blocks_second_instance() {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("generations");
         let moved = parent.path().join("moved-generations");
@@ -2259,23 +2655,76 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let second = GenerationStore::new(root.clone());
         assert!(second.instance_lease.is_none());
-        assert_eq!(
-            first.sweep_orphans().unwrap_err(),
-            "generation-root-identity-mismatch"
-        );
-
-        let mut runtime = GenerationRuntime::default();
-        select(&mut runtime, "A", 1);
-        let plan = runtime.begin_apply().unwrap();
-        assert_eq!(
-            first.stage(&plan).unwrap_err(),
-            "generation-root-identity-mismatch"
-        );
+        fs::remove_dir(&root).unwrap();
+        fs::rename(&moved, &root).unwrap();
+        drop(first);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn config_lease_delete_fails_closed_after_root_replacement() {
+    fn stage_uses_retained_root_fd_during_deterministic_swap() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("generations");
+        let moved = parent.path().join("moved-generations");
+        let store = GenerationStore::new(root.clone());
+        let untouched = install_root_swap_hook(&store, &root, &moved, None);
+        let mut runtime = GenerationRuntime::default();
+        select(&mut runtime, "A", 1);
+        let lease = store.stage(&runtime.begin_apply().unwrap()).unwrap();
+        assert!(untouched.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(fs::read(lease.path()).unwrap(), b"config");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn sweep_uses_retained_root_fd_during_deterministic_swap() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("generations");
+        let moved = parent.path().join("moved-generations");
+        let store = GenerationStore::new(root.clone());
+        let orphan = root.join("generation-orphan.json");
+        write_atomic(&orphan, "{}").unwrap();
+        let untouched = install_root_swap_hook(&store, &root, &moved, None);
+        store.sweep_orphans().unwrap();
+        assert!(untouched.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!orphan.exists());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn stale_cleanup_deletes_only_from_retained_root_during_deterministic_swap() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("generations");
+        let moved = parent.path().join("moved-generations");
+        let mut store = GenerationStore::new(root.clone());
+        store.retained = 2;
+        for index in 0..3 {
+            let path = root.join(format!("generation-old-{index}.json"));
+            write_atomic(&path, "{}").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let untouched = install_root_swap_hook(&store, &root, &moved, None);
+        let mut runtime = GenerationRuntime::default();
+        select(&mut runtime, "A", 1);
+        let current = store.stage(&runtime.begin_apply().unwrap()).unwrap();
+        assert!(untouched.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(fs::read(current.path()).unwrap(), b"config");
+        let remaining_old = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("generation-old-")
+            })
+            .count();
+        assert_eq!(remaining_old, 1);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn lease_release_uses_retained_root_fd_during_deterministic_swap() {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("generations");
         let moved = parent.path().join("moved-generations");
@@ -2283,16 +2732,107 @@ mod tests {
         let mut runtime = GenerationRuntime::default();
         select(&mut runtime, "A", 1);
         let lease = store.stage(&runtime.begin_apply().unwrap()).unwrap();
-        let file_name = lease.path().file_name().unwrap().to_owned();
-
-        fs::rename(&root, &moved).unwrap();
-        fs::create_dir(&root).unwrap();
+        let generation = lease.path().to_path_buf();
+        let untouched = install_root_swap_hook(&store, &root, &moved, None);
         drop(lease);
-
-        assert!(store
+        assert!(untouched.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!generation.exists());
+        assert!(!store
             .recovery_failure
             .load(std::sync::atomic::Ordering::Acquire));
-        assert!(moved.join(file_name).is_file());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn child_reads_retained_config_fd_during_deterministic_swap() {
+        use std::process::Stdio;
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("generations");
+        let moved = parent.path().join("moved-generations");
+        let output = parent.path().join("child-config.json");
+        let store = GenerationStore::new(root.clone());
+        let mut runtime = GenerationRuntime::default();
+        select(&mut runtime, "A", 1);
+        let lease = store.stage(&runtime.begin_apply().unwrap()).unwrap();
+        let untouched = install_root_swap_hook(&store, &root, &moved, Some(output.clone()));
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "cat \"$1\" > \"$2\"", "tachyon-config-reader"])
+            .arg(lease.child_config_path())
+            .arg(&output)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = lease.spawn_command(&mut command).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(untouched.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(fs::read(output).unwrap(), b"config");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn post_spawn_identity_failure_kills_and_reaps_child() {
+        use std::process::Stdio;
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("generations");
+        let output = parent.path().join("child-survived");
+        let saved = parent.path().join("saved-generation.json");
+        let store = GenerationStore::new(root);
+        let mut runtime = GenerationRuntime::default();
+        select(&mut runtime, "A", 1);
+        let lease = store.stage(&runtime.begin_apply().unwrap()).unwrap();
+        let generation = lease.path().to_path_buf();
+        let swap_generation = generation.clone();
+        let swap_saved = saved.clone();
+        store.set_race_hook(
+            || {},
+            move || {
+                fs::rename(&swap_generation, &swap_saved).unwrap();
+                write_atomic(&swap_generation, "{}").unwrap();
+            },
+        );
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 1; printf survived > \"$1\"", "tachyon-child"])
+            .arg(&output)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        assert!(lease.spawn_command(&mut command).is_err());
+        fs::remove_file(&generation).unwrap();
+        fs::rename(&saved, &generation).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!output.exists());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn stage_and_sweep_reject_hardlink_anomalies_without_touching_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("generations");
+        let store = GenerationStore::new(root.clone());
+        let target = parent.path().join("target.json");
+        fs::write(&target, b"target-secret").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut runtime = GenerationRuntime::default();
+        let generation_id = select(&mut runtime, "A", 1);
+        let malicious = root.join(format!("generation-{}.json", generation_id.as_str()));
+        fs::hard_link(&target, &malicious).unwrap();
+        let plan = runtime.begin_apply().unwrap();
+        assert_eq!(
+            store.stage(&plan).unwrap_err(),
+            "generation-config-write-failed"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"target-secret");
+        assert_eq!(
+            store.sweep_orphans().unwrap_err(),
+            "generation-dir-read-failed"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"target-secret");
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2932,7 +3472,7 @@ mod tests {
 
         let recovery_marker = root.join(ORPHAN_RECOVERY_FAILURE_FILE);
         let recovery_failure = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        release_config_lease(
+        release_config_lease_path(
             &generation,
             &journal,
             &recovery_marker,
@@ -2983,7 +3523,7 @@ mod tests {
         fs::create_dir_all(&missing_parent).unwrap();
         fs::create_dir(&journal).unwrap();
         fs::create_dir(&marker).unwrap();
-        release_config_lease(
+        release_config_lease_path(
             &generation,
             &journal,
             &marker,

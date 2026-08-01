@@ -22,7 +22,12 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 mod secure_vault;
 mod system_proxy;
+#[cfg(unix)]
+mod unix_generation_fs;
 mod xray_generation;
+
+const XRAY_RUN_CONFIG_ARGS: [&str; 4] = ["run", "-format", "json", "-config"];
+const XRAY_TEST_CONFIG_ARGS: [&str; 5] = ["run", "-test", "-format", "json", "-config"];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -712,6 +717,11 @@ struct ManagedProcess {
     stop_fault: Option<StopFault>,
 }
 
+enum ManagedConfigDelivery<'a> {
+    Path(PathBuf),
+    Generation(&'a xray_generation::ConfigLease),
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StopFault {
@@ -726,19 +736,15 @@ struct ProductionXrayBackend<'a> {
     process: &'a mut ManagedProcess,
     watchdog: &'a mut Option<GenerationWatchdog>,
     binary: PathBuf,
-    validation_target: PathBuf,
 }
 
 impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
     fn validate_config(
         &mut self,
-        plan: &xray_generation::ApplyPlan,
+        _plan: &xray_generation::ApplyPlan,
+        config: &xray_generation::ConfigLease,
     ) -> Result<(), xray_generation::BackendFailure> {
-        let contents = std::str::from_utf8(plan.config())
-            .map_err(|_| xray_generation::BackendFailure::Failed)?;
-        let candidate = SyncedTempFile::create(&self.validation_target, contents)
-            .map_err(|_| xray_generation::BackendFailure::Failed)?;
-        let validation = validate_xray_config_file(&self.binary, &candidate.path)
+        let validation = validate_xray_config_lease(&self.binary, config)
             .map_err(|_| xray_generation::BackendFailure::Failed)?;
         if validation.ok {
             Ok(())
@@ -818,12 +824,12 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
     ) -> Result<xray_generation::RunnerHandle, xray_generation::BackendFailure> {
         let status = self
             .process
-            .start(
+            .start_generation(
                 "xray",
                 ManagedBinaryKind::Xray,
                 path_string(&self.binary),
-                path_string(config.path()),
-                &["run", "-config"],
+                config,
+                &XRAY_RUN_CONFIG_ARGS,
             )
             .map_err(|_| xray_generation::BackendFailure::Failed)?;
         let pid = status.pid.ok_or(xray_generation::BackendFailure::Failed)?;
@@ -894,12 +900,12 @@ impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
     ) -> Result<xray_generation::RunnerHandle, xray_generation::RollbackFailure> {
         let status = self
             .process
-            .start(
+            .start_generation(
                 "xray",
                 ManagedBinaryKind::Xray,
                 path_string(&self.binary),
-                path_string(previous_handle.config_path()),
-                &["run", "-config"],
+                previous_handle.config_lease(),
+                &XRAY_RUN_CONFIG_ARGS,
             )
             .map_err(|_| xray_generation::RollbackFailure { runner: None })?;
         let pid = status
@@ -1091,7 +1097,6 @@ impl XrayCoordinator {
             process: &mut processes.xray,
             watchdog,
             binary,
-            validation_target: source,
         };
         generations
             .execute_latest(&mut backend)
@@ -1121,12 +1126,6 @@ impl XrayCoordinator {
                 .clone()
                 .unwrap_or_else(|| settings.xray_binary_path.clone()),
         );
-        let validation_target =
-            PathBuf::from(process_status.config_path.clone().unwrap_or_else(|| {
-                draft_paths(app)
-                    .map(|paths| paths.xray_config_path)
-                    .unwrap_or_default()
-            }));
         let (processes, generations, watchdog) = (
             &mut self.processes,
             &mut self.generations,
@@ -1138,7 +1137,6 @@ impl XrayCoordinator {
             process: &mut processes.xray,
             watchdog,
             binary,
-            validation_target,
         };
         generations
             .stop_active(&mut backend)
@@ -1267,11 +1265,6 @@ impl XrayCoordinator {
                 .clone()
                 .unwrap_or_else(|| settings.xray_binary_path.clone()),
         );
-        let validation_target = PathBuf::from(status.config_path.clone().unwrap_or_else(|| {
-            draft_paths(app)
-                .map(|paths| paths.xray_config_path)
-                .unwrap_or_default()
-        }));
         let (processes, generations, watchdog) = (
             &mut self.processes,
             &mut self.generations,
@@ -1283,7 +1276,6 @@ impl XrayCoordinator {
             process: &mut processes.xray,
             watchdog,
             binary,
-            validation_target,
         };
         if enabled {
             let result = generations
@@ -1314,12 +1306,6 @@ impl XrayCoordinator {
                 .clone()
                 .unwrap_or_else(|| settings.xray_binary_path.clone()),
         );
-        let validation_target =
-            PathBuf::from(process_status.config_path.clone().unwrap_or_else(|| {
-                draft_paths(app)
-                    .map(|paths| paths.xray_config_path)
-                    .unwrap_or_default()
-            }));
         let (processes, generations, watchdog) = (
             &mut self.processes,
             &mut self.generations,
@@ -1331,7 +1317,6 @@ impl XrayCoordinator {
             process: &mut processes.xray,
             watchdog,
             binary,
-            validation_target,
         };
         generations
             .revalidate_active(&mut backend)
@@ -2454,6 +2439,32 @@ fn validate_xray_config_file(
         &["run", "-test", "-config"],
         Duration::from_secs(8),
     )
+}
+
+fn validate_xray_config_lease(
+    binary: &Path,
+    config: &xray_generation::ConfigLease,
+) -> Result<ConfigValidationResult, String> {
+    if !binary.is_file() {
+        return Err(format!("xray binary not found: {}", binary.display()));
+    }
+    let child_path = config.child_config_path();
+    let command_line = validation_command_line(binary, &XRAY_TEST_CONFIG_ARGS, &child_path);
+    let mut command = Command::new(binary);
+    command.args(XRAY_TEST_CONFIG_ARGS);
+    command.arg(&child_path);
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    if let Some(work_dir) = binary.parent() {
+        command.current_dir(work_dir);
+    }
+    hide_command_window(&mut command);
+    let child = config
+        .spawn_command(&mut command)
+        .map_err(|error| format!("spawn Xray config validation: {error}"))?;
+    let output = child_output_with_timeout(child, Duration::from_secs(8))?;
+    Ok(config_validation_result("xray", command_line, Ok(output)))
 }
 
 fn validate_tachyon_core_config_file(
@@ -4265,11 +4276,15 @@ fn run_command(program: &str, args: &[&str]) -> Result<String, String> {
 
 fn command_output_with_timeout(mut command: Command, timeout: Duration) -> Result<Output, String> {
     hide_command_window(&mut command);
-    let mut child = command
+    let child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| format!("spawn command: {err}"))?;
+    child_output_with_timeout(child, timeout)
+}
+
+fn child_output_with_timeout(mut child: Child, timeout: Duration) -> Result<Output, String> {
     let started = Instant::now();
     loop {
         if child
@@ -8013,11 +8028,6 @@ impl ManagedProcess {
         config_path: String,
         args: &[&str],
     ) -> Result<ProcessStatus, String> {
-        self.refresh(label)?;
-        if self.child.is_some() {
-            return Err(format!("{label} is already running"));
-        }
-
         let binary = PathBuf::from(clean_path_input(&binary_path));
         if !binary.is_file() {
             return Err(format!("{label} binary not found: {}", binary.display()));
@@ -8027,25 +8037,81 @@ impl ManagedProcess {
             return Err(format!("{label} config not found: {}", config.display()));
         }
         validate_process_start_inputs(label, kind, &binary, &config)?;
+        self.start_prepared(
+            label,
+            kind,
+            binary,
+            ManagedConfigDelivery::Path(config),
+            args,
+        )
+    }
+
+    fn start_generation(
+        &mut self,
+        label: &str,
+        kind: ManagedBinaryKind,
+        binary_path: String,
+        config: &xray_generation::ConfigLease,
+        args: &[&str],
+    ) -> Result<ProcessStatus, String> {
+        let binary = PathBuf::from(clean_path_input(&binary_path));
+        validate_process_binary_inputs(label, kind, &binary)?;
+        config
+            .verify_child_source()
+            .map_err(|error| format!("{label} secure config unavailable: {error}"))?;
+        self.start_prepared(
+            label,
+            kind,
+            binary,
+            ManagedConfigDelivery::Generation(config),
+            args,
+        )
+    }
+
+    fn start_prepared(
+        &mut self,
+        label: &str,
+        kind: ManagedBinaryKind,
+        binary: PathBuf,
+        delivery: ManagedConfigDelivery<'_>,
+        args: &[&str],
+    ) -> Result<ProcessStatus, String> {
+        self.refresh(label)?;
+        if self.child.is_some() {
+            return Err(format!("{label} is already running"));
+        }
         self.sanitize_diagnostics = matches!(
             kind,
             ManagedBinaryKind::Xray | ManagedBinaryKind::TachyonCore
         );
 
+        let (config_status_path, config_argument, secure_config) = match &delivery {
+            ManagedConfigDelivery::Path(path) => (path.as_path(), path.clone(), None),
+            ManagedConfigDelivery::Generation(config) => {
+                (config.path(), config.child_config_path(), Some(*config))
+            }
+        };
         let mut command = Command::new(&binary);
         command.args(args);
-        command.arg(&config);
+        command.arg(&config_argument);
         command.stdin(Stdio::null());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
-        if let Some(work_dir) = config.parent().or_else(|| binary.parent()) {
+        let work_dir = if secure_config.is_some() {
+            binary.parent()
+        } else {
+            config_status_path.parent().or_else(|| binary.parent())
+        };
+        if let Some(work_dir) = work_dir {
             command.current_dir(work_dir);
         }
         hide_command_window(&mut command);
 
-        let mut child = command
-            .spawn()
-            .map_err(|err| format!("start {label}: {err}"))?;
+        let mut child = match secure_config {
+            Some(config) => config.spawn_command(&mut command),
+            None => command.spawn(),
+        }
+        .map_err(|err| format!("start {label}: {err}"))?;
         self.stdout_tail = Arc::new(Mutex::new(String::new()));
         self.stderr_tail = Arc::new(Mutex::new(String::new()));
         self.stdout_reader = child
@@ -8058,7 +8124,7 @@ impl ManagedProcess {
             .map(|stderr| spawn_log_reader(stderr, Arc::clone(&self.stderr_tail)));
         self.child = Some(child);
         self.binary_path = Some(path_string(&binary));
-        self.config_path = Some(path_string(&config));
+        self.config_path = Some(path_string(config_status_path));
         self.started_at = Some(now_epoch_seconds());
         self.last_error = None;
         self.exit_code = None;
@@ -8315,11 +8381,19 @@ fn validate_process_start_inputs(
     binary: &Path,
     config: &Path,
 ) -> Result<(), String> {
-    if !binary.is_file() {
-        return Err(format!("{label} binary not found: {}", binary.display()));
-    }
     if !config.is_file() {
         return Err(format!("{label} config not found: {}", config.display()));
+    }
+    validate_process_binary_inputs(label, kind, binary)
+}
+
+fn validate_process_binary_inputs(
+    label: &str,
+    kind: ManagedBinaryKind,
+    binary: &Path,
+) -> Result<(), String> {
+    if !binary.is_file() {
+        return Err(format!("{label} binary not found: {}", binary.display()));
     }
     for dep in sidecar_dependencies(kind, binary) {
         if dep.required && !dep.exists {
@@ -11955,6 +12029,15 @@ stat: <
         assert!(line.contains("\"C:\\Program Files\\Xray\\xray.exe\""));
         assert!(line.contains("run -test -config"));
         assert!(line.contains("\"C:\\Users\\Test User\\xray-client.json\""));
+    }
+
+    #[test]
+    fn inherited_xray_config_fd_always_uses_explicit_json_format() {
+        assert_eq!(XRAY_RUN_CONFIG_ARGS, ["run", "-format", "json", "-config"]);
+        assert_eq!(
+            XRAY_TEST_CONFIG_ARGS,
+            ["run", "-test", "-format", "json", "-config"]
+        );
     }
 
     #[test]

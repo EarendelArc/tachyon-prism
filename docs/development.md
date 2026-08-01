@@ -115,13 +115,24 @@ port. Tachyon Core diagnostics must pass through the same bounded secret
 redaction boundary as Xray diagnostics.
 
 Unix generation storage holds a stable path-derived anchor lock outside the
-replaceable generation root, plus a descriptor for the original root. Every
-root-relative stage, sweep, cleanup, and lease-release path operation verifies
-the root path device/inode against that descriptor before and after I/O and
-fails closed on replacement. Anchor, root, lease, and cloned lease-binding
-descriptors use close-on-exec so unrelated child processes cannot extend lock
-lifetime. Tests cover root rename/replacement and a real long-lived fork/exec
-child followed by immediate lease reacquisition.
+replaceable generation root and retains a descriptor for the original root.
+After acquisition, stage, publication, read, sweep, stale cleanup, and lease
+release use only descriptor-relative `openat`/no-replace `renameat`/`unlinkat`/
+`fstatat`/directory-enumeration operations. Names must be one ordinary path
+component; descriptors are opened with no-follow and close-on-exec semantics;
+and directories, symlinks, foreign owners, permissive modes, and multi-link
+files fail closed. Rebinding the visible root path cannot redirect these
+operations to the replacement directory.
+
+The generation config is retained as a verified read-only descriptor. Xray
+validation, candidate start, and rollback inherit only a fixed child descriptor
+and receive `/dev/fd/198` through `-config` on Unix. The display path is
+diagnostic metadata and is never the child delivery authority. The source and
+root bindings stay locked until spawn identity is reverified; a failed
+post-spawn verification terminates and reaps the child. Tests deterministically
+swap and restore the root after initial verification, assert zero replacement
+directory changes across stage/sweep/stale-delete/release and child reads, and
+cover close-on-exec with a real long-lived fork/exec child.
 
 ### Subscription boundary
 

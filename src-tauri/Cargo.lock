@@ -3912,6 +3912,7 @@ dependencies = [
  "rand",
  "rcgen",
  "regex",
+ "rustix",
  "rustls",
  "serde",
  "serde_json",

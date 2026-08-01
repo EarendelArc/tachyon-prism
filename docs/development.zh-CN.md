@@ -65,11 +65,18 @@ keyring 或加密文件实现。生产后端由 Rust vault 测试覆盖。
 运行，避免系统代理继续指向已停止的本地端口。Tachyon Core 诊断必须和 Xray 诊断一样经过
 有长度限制的敏感信息脱敏边界。
 
-Unix generation 存储会在可替换 root 之外持有按路径派生的稳定 anchor lock，并持有原始
-root 的目录描述符。所有相对 root 的 stage、sweep、cleanup 与 lease release 路径操作都在
-I/O 前后核对 root 路径的 device/inode 与该描述符，发生替换时封闭失败。anchor、root、
-lease 以及复制给 lease binding 的描述符均启用 close-on-exec，避免无关子进程延长锁生命周期。
-测试覆盖持锁后重命名/替换 root，以及真实长生命周期 fork/exec 子进程存在时立即重新获取租约。
+Unix generation 存储会在可替换 root 之外持有按路径派生的稳定 anchor lock，并保留原始
+root 的目录描述符。获取后，stage、发布、读取、sweep、陈旧文件清理和 lease release 只使用
+基于描述符的 `openat`、禁止覆盖的 `renameat`、`unlinkat`、`fstatat` 与目录枚举操作。名称必须
+是单个普通路径组件；描述符采用 no-follow 与 close-on-exec；目录、符号链接、非当前用户所有、
+权限过宽或多硬链接文件都会封闭失败。可见 root 路径被重新绑定时，这些操作也不会转向替换目录。
+
+generation 配置以已验证的只读描述符持续持有。Unix 上的 Xray 校验、候选启动和回滚只继承
+固定的子进程描述符，并通过 `-config /dev/fd/198` 读取；展示路径仅用于诊断，不再是配置交付
+授权依据。启动前会持续持有源文件与 root binding，启动后重新核验身份；后置核验失败会立即
+终止并回收子进程。确定性竞态测试会在首次校验后替换并恢复 root，验证 stage、sweep、陈旧
+文件删除、release 和子进程读取均不会触碰替换目录；另有真实长生命周期 fork/exec 测试验证
+close-on-exec 不会延长租约。
 
 ### 订阅边界
 
