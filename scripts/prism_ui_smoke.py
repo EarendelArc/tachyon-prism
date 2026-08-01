@@ -991,17 +991,44 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
               const trafficOutboundTags = outbounds
                 .map((outbound) => outbound?.tag)
                 .filter((tag) => trafficOutbounds.some((outbound) => outbound.tag === tag));
+              const vault = JSON.parse(
+                localStorage.getItem('tachyon.prism.uiSmokeVault.v1') || 'null',
+              );
+              const subscriptions = vault?.payload?.subscriptions;
+              const selectedSubscriptionId = subscriptions?.selectedSubscriptionId ?? '';
+              const selectedNodeId = subscriptions?.selectedNodeId ?? '';
+              const activeSubscription = Array.isArray(subscriptions?.subscriptions)
+                ? subscriptions.subscriptions.find(
+                    (subscription) => subscription?.id === selectedSubscriptionId,
+                  )
+                : undefined;
+              const selectedNode = Array.isArray(activeSubscription?.nodes)
+                ? activeSubscription.nodes.find((node) => node?.id === selectedNodeId)
+                : undefined;
+              const selectedTemplate = selectedNode?.xrayConfigId
+                ? activeSubscription?.xrayConfigTemplates?.[selectedNode.xrayConfigId]
+                : undefined;
+              const selectedTemplateOutbound = Number.isInteger(selectedNode?.xrayOutboundIndex)
+                && Array.isArray(selectedTemplate?.outbounds)
+                ? selectedTemplate.outbounds[selectedNode.xrayOutboundIndex]
+                : undefined;
+              const selectedNodeOutbound = selectedTemplateOutbound ?? selectedNode?.outbound;
+              const selectedNodeOutboundTag = selectedNodeOutbound?.tag ?? '';
               const catchAllIndex = trafficRules.findIndex(isExplicitCatchAll);
               resolve({
                 domainStrategy: config.routing?.domainStrategy ?? '',
                 firstTrafficOutboundTag: trafficRules[0]?.outboundTag ?? '',
                 firstConfiguredTrafficOutboundTag: trafficOutboundTags[0] ?? '',
-                selectedTrafficOutboundTag: trafficOutboundTags[0] ?? '',
+                selectedSubscriptionId,
+                selectedNodeId,
+                selectedNodeName: selectedNode?.name ?? '',
+                selectedNodeOutboundTag,
                 catchAllOutboundTag: catchAllRule.outboundTag ?? '',
                 catchAllProtocol: catchAllOutbound.protocol ?? '',
                 catchAllIsExplicit: Boolean(catchAllRule.outboundTag),
                 catchAllTargetIsConfigured: Boolean(catchAllOutbound.tag),
                 catchAllTargetIsTrafficOutbound: trafficOutboundTags.includes(catchAllRule.outboundTag),
+                selectedNodeIsConfiguredTrafficOutbound: trafficOutboundTags.includes(selectedNodeOutboundTag),
                 trafficRulesBeforeCatchAll: catchAllIndex < 0 ? -1 : catchAllIndex,
                 catchAllRejectedProtocol: controlProtocols.has(catchAllOutbound.protocol ?? '')
                   || controlTag(catchAllOutbound.tag),
@@ -1847,10 +1874,15 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
             or not global_summary["catchAllIsExplicit"]
             or not global_summary["catchAllTargetIsConfigured"]
             or not global_summary["catchAllTargetIsTrafficOutbound"]
+            or not global_summary["selectedSubscriptionId"]
+            or not global_summary["selectedNodeId"]
+            or not global_summary["selectedNodeName"]
+            or not global_summary["selectedNodeOutboundTag"]
+            or not global_summary["selectedNodeIsConfiguredTrafficOutbound"]
             or global_summary["trafficRulesBeforeCatchAll"] != 0
             or global_summary["catchAllRejectedProtocol"]
             or global_summary["firstTrafficOutboundTag"] != global_summary["catchAllOutboundTag"]
-            or global_summary["selectedTrafficOutboundTag"] != global_summary["catchAllOutboundTag"]
+            or global_summary["selectedNodeOutboundTag"] != global_summary["catchAllOutboundTag"]
             or global_summary["catchAllProtocol"] in ("", "freedom", "blackhole")
         ):
             raise AssertionError(f"global routing config mismatch: {global_summary}")
@@ -2075,10 +2107,13 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
             "port": port,
             "viewport": {"width": 800, "height": 540},
             "globalRouting": {
-                "selectedTrafficOutboundTag": global_summary["selectedTrafficOutboundTag"],
+                "selectedSubscriptionId": global_summary["selectedSubscriptionId"],
+                "selectedNodeId": global_summary["selectedNodeId"],
+                "selectedNodeName": global_summary["selectedNodeName"],
+                "selectedNodeOutboundTag": global_summary["selectedNodeOutboundTag"],
                 "catchAllOutboundTag": global_summary["catchAllOutboundTag"],
                 "strictSelectedTrafficOutboundMatch": (
-                    global_summary["selectedTrafficOutboundTag"]
+                    global_summary["selectedNodeOutboundTag"]
                     == global_summary["catchAllOutboundTag"]
                 ),
             },
