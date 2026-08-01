@@ -88,6 +88,26 @@ object 和 `unsafe-eval` 均被阻止。Tachyon 遥测由 Rust 后端轮询并�
 旧值只有在成功写入并验证迁移后才能删除。供两个核心运行的配置文件仍会暂时存在于磁盘，
 必须使用受保护文件写入器。非敏感 UI 偏好可以继续保存在 `localStorage`。
 
+## Core preview 固定版本
+
+当前审计目标是已经发布的 Tachyon Core annotated preview tag `v0.1.0-alpha.22`，
+tag object 为 `65f57643ae5644233033c3a3a7332290ff1ceeb6`，peel 后 commit 为
+`80d9fb742c025387c1f036da846fc663ed8a7067`。这是明确的已发布 preview 契约，
+不表示 Prism 自动跟随最新 Core。升级必须等待更新版本正式发布并通过同等契约审查；
+不得预填未发布 commit 或臆测未来 Release SHA。
+
+## UI 证据与跨平台构建
+
+`npm run test:ui:twice` 要求工作树干净且最终 Prism 可执行文件已经构建。命令会运行
+两轮隔离 UI smoke，并在 `artifacts/ui-smoke-runs/` 生成适合 CI 上传的不可变证据结构。
+SHA-256 manifest 绑定精确 Git commit、两轮子 `RESULT.json`、关键截图和复制后的受测
+可执行文件；汇总 `RESULT.json` 会以带摘要的引用指向所有子结果、截图、可执行文件和
+manifest。该证据只证明对应构建的渲染器行为，不会在 Windows UIPI 阻止自动化时虚假
+声明原生 L2 输入通过。
+
+CI 还会在六个受支持的平台/CPU 矩阵项上执行本地 Tauri bundle 构建。这些检查只在
+作业内部生成 bundle，不签名、不发布、不上传到 Release，也不会产生发布副作用。
+
 ## Cargo Registry
 
 Prism 在 `.cargo/config.toml` 中使用仓库本地 Cargo source replacement，将 crates.io

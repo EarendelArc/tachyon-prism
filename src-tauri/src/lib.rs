@@ -1476,6 +1476,8 @@ fn proxy_watchdog_loop(
 }
 
 fn wait_for_proxy_watchdog_tick(stop: &AtomicBool, pid: u32) -> bool {
+    #[cfg(not(target_os = "windows"))]
+    let _ = pid;
     #[cfg(target_os = "windows")]
     {
         use windows_sys::Win32::Foundation::CloseHandle;
@@ -7894,9 +7896,9 @@ fn parse_linux_tcp_listeners(
 #[cfg(target_os = "macos")]
 fn owned_tcp_listener_table(pid: u32) -> Result<Vec<OwnedTcpListener>, String> {
     use libproc::libproc::bsd_info::BSDInfo;
-    use libproc::libproc::file_info::{listpidinfo, pidfdinfo, ListFDs, ProcFDType};
+    use libproc::libproc::file_info::{pidfdinfo, ListFDs, ProcFDType};
     use libproc::libproc::net_info::{SocketFDInfo, SocketInfoKind, TcpSIState};
-    use libproc::libproc::proc_pid::pidinfo;
+    use libproc::libproc::proc_pid::{listpidinfo, pidinfo};
 
     const MAX_PROCESS_FDS: usize = 65_536;
     let process = pidinfo::<BSDInfo>(pid as i32, 0)
@@ -7936,7 +7938,7 @@ fn owned_tcp_listener_table(pid: u32) -> Result<Vec<OwnedTcpListener>, String> {
 
 #[cfg(target_os = "macos")]
 fn macos_tcp_listener_address(tcp: &libproc::libproc::net_info::TcpSockInfo) -> Option<SocketAddr> {
-    let port = macos_tcp_listener_port(tcp.tcpsi_ini.insi_lport);
+    let port = macos_tcp_listener_port(tcp.tcpsi_ini.insi_lport)?;
     if port == 0 {
         return None;
     }
@@ -7950,8 +7952,8 @@ fn macos_tcp_listener_address(tcp: &libproc::libproc::net_info::TcpSockInfo) -> 
 }
 
 #[allow(dead_code)]
-fn macos_tcp_listener_port(network_order: u16) -> u16 {
-    u16::from_be(network_order)
+fn macos_tcp_listener_port(network_order: i32) -> Option<u16> {
+    u16::try_from(network_order).ok().map(u16::from_be)
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
@@ -11220,9 +11222,16 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
     #[test]
     fn macos_listener_port_decodes_network_order_as_u16() {
         for port in [1_u16, 80, 443, 10808, 65535] {
-            assert_eq!(macos_tcp_listener_port(port.to_be()), port);
+            assert_eq!(macos_tcp_listener_port(i32::from(port.to_be())), Some(port));
         }
-        assert_eq!(macos_tcp_listener_port(0), 0);
+        assert_eq!(macos_tcp_listener_port(0), Some(0));
+    }
+
+    #[test]
+    fn macos_listener_port_rejects_signed_or_wider_mock_values() {
+        assert_eq!(macos_tcp_listener_port(-1), None);
+        assert_eq!(macos_tcp_listener_port(i32::from(u16::MAX) + 1), None);
+        assert_eq!(macos_tcp_listener_port(i32::MAX), None);
     }
 
     #[test]

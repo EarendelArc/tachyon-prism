@@ -11,6 +11,7 @@
         "build:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
         "typecheck": "tsc --noEmit",
         "test": "vitest run",
+        "test:scripts": "python -m unittest discover -s scripts -p \"test_*.py\"",
         "test:core-contract": "vitest run --config vitest.contract.config.ts --reporter=verbose",
         "test:ui": "vite build --configLoader runner --mode ui-smoke && python scripts/prism_ui_smoke.py --port 0",
         "test:ui:twice": "vite build --configLoader runner --mode ui-smoke && python scripts/prism_ui_smoke_twice.py",

@@ -1322,15 +1322,25 @@ fn open_locked_instance_file(path: &Path) -> std::io::Result<LockedInstanceFile>
     let parent_path = path
         .parent()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "lease parent"))?;
+    let path_metadata = fs::symlink_metadata(parent_path)?;
+    if path_metadata.file_type().is_symlink() || !path_metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "lease parent must be a real directory",
+        ));
+    }
     let parent = fs::OpenOptions::new()
         .read(true)
         .custom_flags(O_NOFOLLOW)
         .open(parent_path)?;
     let parent_metadata = parent.metadata()?;
-    if !parent_metadata.is_dir() {
+    if !parent_metadata.is_dir()
+        || parent_metadata.dev() != path_metadata.dev()
+        || parent_metadata.ino() != path_metadata.ino()
+    {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "lease parent directory is not private",
+            "lease parent changed while opening",
         ));
     }
     unsafe extern "C" {
@@ -2043,6 +2053,10 @@ mod tests {
         let link = root.path().join("link");
         fs::create_dir(&real).unwrap();
         symlink(&real, &link).unwrap();
+        let error = open_locked_instance_file(&link.join(INSTANCE_LEASE_FILE))
+            .err()
+            .expect("symlinked lease parent must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(GenerationStore::new(link).instance_lease.is_none());
     }
 

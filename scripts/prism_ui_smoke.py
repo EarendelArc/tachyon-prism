@@ -934,12 +934,12 @@ def active_routing_mode(cdp: CDP) -> str:
 
 def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
     return cdp.evaluate(
-        """
+        r"""
         new Promise((resolve) => {
           location.hash = 'settings';
           setTimeout(() => {
             document.querySelectorAll('.settings-sidebar button')[1]?.click();
-            setTimeout(() => {
+            setTimeout(async () => {
               const raw = document.querySelector('textarea[data-config-draft="xray"]')?.value ?? '{}';
               const config = JSON.parse(raw);
               const rules = config.routing?.rules ?? [];
@@ -960,9 +960,21 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
                 Boolean(rule?.outboundTag)
                 && Object.keys(rule).every((key) => key === 'type' || key === 'outboundTag');
               const catchAllRule = trafficRules.find(isExplicitCatchAll) ?? {};
-              const catchAllOutbound = outbounds.find(
+              const outboundTagCounts = outbounds.reduce((counts, outbound) => {
+                const tag = typeof outbound?.tag === 'string' ? outbound.tag : '';
+                if (tag) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+                return counts;
+              }, new Map());
+              const duplicateOutboundTags = Array.from(outboundTagCounts.entries())
+                .filter(([, count]) => count > 1)
+                .map(([tag]) => tag)
+                .sort();
+              const catchAllOutboundMatches = outbounds.filter(
                 (outbound) => outbound?.tag === catchAllRule.outboundTag,
-              ) ?? {};
+              );
+              const catchAllOutbound = catchAllOutboundMatches.length === 1
+                ? catchAllOutboundMatches[0]
+                : {};
               const controlProtocols = new Set(['freedom', 'blackhole', 'dns', 'loopback']);
               const controlTag = (tag) =>
                 typeof tag === 'string'
@@ -1014,6 +1026,86 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
                 : undefined;
               const selectedNodeOutbound = selectedTemplateOutbound ?? selectedNode?.outbound;
               const selectedNodeOutboundTag = selectedNodeOutbound?.tag ?? '';
+              const asRecord = (value) => value && typeof value === 'object' && !Array.isArray(value)
+                ? value
+                : {};
+              const firstRecord = (value) => Array.isArray(value)
+                ? asRecord(value.find((item) => item && typeof item === 'object'))
+                : {};
+              const endpointFromOutbound = (outbound) => {
+                const settings = asRecord(outbound?.settings);
+                const candidate = Object.keys(asRecord(settings.address)).length > 0
+                  ? asRecord(settings.address)
+                  : Object.keys(firstRecord(settings.servers)).length > 0
+                    ? firstRecord(settings.servers)
+                    : Object.keys(firstRecord(settings.vnext)).length > 0
+                      ? firstRecord(settings.vnext)
+                      : settings;
+                let address = typeof candidate.address === 'string' ? candidate.address : '';
+                let port = Number.isFinite(Number(candidate.port)) ? Number(candidate.port) : 0;
+                if ((!address || !port) && Array.isArray(settings.peers)) {
+                  const endpoint = String(firstRecord(settings.peers).endpoint ?? '');
+                  const match = endpoint.match(/^\[([^\]]+)\]:(\d+)$|^([^:]+):(\d+)$/);
+                  address = match?.[1] ?? match?.[3] ?? address;
+                  port = Number(match?.[2] ?? match?.[4] ?? port);
+                }
+                return {
+                  address: address.trim().toLowerCase(),
+                  port: Number.isInteger(port) && port > 0 ? port : 0,
+                };
+              };
+              const outboundDescriptor = (outbound) => {
+                const settings = asRecord(outbound?.settings);
+                const stream = asRecord(outbound?.streamSettings);
+                const tls = asRecord(stream.tlsSettings);
+                const reality = asRecord(stream.realitySettings);
+                const ws = asRecord(stream.wsSettings);
+                const xhttp = asRecord(stream.xhttpSettings);
+                const grpc = asRecord(stream.grpcSettings);
+                const firstServer = firstRecord(settings.servers);
+                const firstVnext = firstRecord(settings.vnext);
+                const firstUser = firstRecord(firstVnext.users);
+                const endpoint = endpointFromOutbound(outbound);
+                return {
+                  protocol: String(outbound?.protocol ?? '').trim().toLowerCase(),
+                  address: endpoint.address,
+                  port: endpoint.port,
+                  transport: String(stream.network ?? '').trim().toLowerCase(),
+                  security: String(stream.security ?? settings.security ?? '').trim().toLowerCase(),
+                  cipher: String(
+                    settings.method
+                    ?? settings.encryption
+                    ?? firstServer.method
+                    ?? firstUser.encryption
+                    ?? '',
+                  ).trim().toLowerCase(),
+                  flow: String(settings.flow ?? firstUser.flow ?? '').trim(),
+                  tlsServerName: String(tls.serverName ?? '').trim().toLowerCase(),
+                  realityServerName: String(reality.serverName ?? '').trim().toLowerCase(),
+                  fingerprint: String(
+                    reality.fingerprint ?? tls.fingerprint ?? '',
+                  ).trim().toLowerCase(),
+                  wsPath: String(ws.path ?? '').trim(),
+                  xhttpPath: String(xhttp.path ?? '').trim(),
+                  grpcServiceName: String(grpc.serviceName ?? '').trim(),
+                };
+              };
+              const stableValue = (value) => {
+                if (Array.isArray(value)) return value.map(stableValue);
+                if (!value || typeof value !== 'object') return value;
+                return Object.fromEntries(
+                  Object.keys(value).sort().map((key) => [key, stableValue(value[key])]),
+                );
+              };
+              const descriptorDigest = async (descriptor) => {
+                const bytes = new TextEncoder().encode(JSON.stringify(stableValue(descriptor)));
+                const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+                return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+              };
+              const selectedOutboundDescriptor = outboundDescriptor(selectedNodeOutbound);
+              const catchAllOutboundDescriptor = outboundDescriptor(catchAllOutbound);
+              const selectedOutboundDigest = await descriptorDigest(selectedOutboundDescriptor);
+              const catchAllOutboundDigest = await descriptorDigest(catchAllOutboundDescriptor);
               const catchAllIndex = trafficRules.findIndex(isExplicitCatchAll);
               resolve({
                 domainStrategy: config.routing?.domainStrategy ?? '',
@@ -1023,12 +1115,21 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
                 selectedNodeId,
                 selectedNodeName: selectedNode?.name ?? '',
                 selectedNodeOutboundTag,
+                selectedOutboundDescriptor,
+                selectedOutboundDigest,
                 catchAllOutboundTag: catchAllRule.outboundTag ?? '',
                 catchAllProtocol: catchAllOutbound.protocol ?? '',
+                catchAllOutboundDescriptor,
+                catchAllOutboundDigest,
                 catchAllIsExplicit: Boolean(catchAllRule.outboundTag),
-                catchAllTargetIsConfigured: Boolean(catchAllOutbound.tag),
+                catchAllTargetIsConfigured: catchAllOutboundMatches.length === 1,
                 catchAllTargetIsTrafficOutbound: trafficOutboundTags.includes(catchAllRule.outboundTag),
                 selectedNodeIsConfiguredTrafficOutbound: trafficOutboundTags.includes(selectedNodeOutboundTag),
+                selectedNodeTagReferenceCount: outbounds.filter(
+                  (outbound) => outbound?.tag === selectedNodeOutboundTag,
+                ).length,
+                duplicateOutboundTags,
+                outboundObjectsMatch: selectedOutboundDigest === catchAllOutboundDigest,
                 trafficRulesBeforeCatchAll: catchAllIndex < 0 ? -1 : catchAllIndex,
                 catchAllRejectedProtocol: controlProtocols.has(catchAllOutbound.protocol ?? '')
                   || controlTag(catchAllOutbound.tag),
@@ -1879,6 +1980,14 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
             or not global_summary["selectedNodeName"]
             or not global_summary["selectedNodeOutboundTag"]
             or not global_summary["selectedNodeIsConfiguredTrafficOutbound"]
+            or global_summary["selectedNodeTagReferenceCount"] != 1
+            or global_summary["duplicateOutboundTags"]
+            or not global_summary["outboundObjectsMatch"]
+            or not global_summary["selectedOutboundDescriptor"]["protocol"]
+            or not global_summary["selectedOutboundDescriptor"]["address"]
+            or global_summary["selectedOutboundDescriptor"]["port"] <= 0
+            or len(global_summary["selectedOutboundDigest"]) != 64
+            or len(global_summary["catchAllOutboundDigest"]) != 64
             or global_summary["trafficRulesBeforeCatchAll"] != 0
             or global_summary["catchAllRejectedProtocol"]
             or global_summary["firstTrafficOutboundTag"] != global_summary["catchAllOutboundTag"]
@@ -2111,11 +2220,17 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
                 "selectedNodeId": global_summary["selectedNodeId"],
                 "selectedNodeName": global_summary["selectedNodeName"],
                 "selectedNodeOutboundTag": global_summary["selectedNodeOutboundTag"],
+                "selectedOutboundDescriptor": global_summary["selectedOutboundDescriptor"],
+                "selectedOutboundDigest": global_summary["selectedOutboundDigest"],
                 "catchAllOutboundTag": global_summary["catchAllOutboundTag"],
+                "catchAllOutboundDescriptor": global_summary["catchAllOutboundDescriptor"],
+                "catchAllOutboundDigest": global_summary["catchAllOutboundDigest"],
+                "duplicateOutboundTags": global_summary["duplicateOutboundTags"],
                 "strictSelectedTrafficOutboundMatch": (
                     global_summary["selectedNodeOutboundTag"]
                     == global_summary["catchAllOutboundTag"]
                 ),
+                "strictSelectedOutboundObjectMatch": global_summary["outboundObjectsMatch"],
             },
         }
     finally:

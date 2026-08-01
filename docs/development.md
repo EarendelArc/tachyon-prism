@@ -26,10 +26,15 @@ contract explicitly with `npm run test:core-contract`. CI and Release execute it
 on Linux, macOS, and Windows against the exact source pin in
 [`core-contract.json`](../core-contract.json).
 
-The audited pin is the annotated Tachyon Core tag `v0.1.0-alpha.22`, tag object
-`65f57643ae5644233033c3a3a7332290ff1ceeb6`, peeled to commit
+The audited preview pin is the published annotated Tachyon Core tag
+`v0.1.0-alpha.22`, tag object `65f57643ae5644233033c3a3a7332290ff1ceeb6`, peeled to commit
 `80d9fb742c025387c1f036da846fc663ed8a7067`. An unavailable ref, a tag-object
 mismatch, or a peeled-commit mismatch is a hard failure.
+
+This is an explicit published preview contract, not a claim that Prism tracks the
+latest Core release. Upgrade it only after the newer published release has passed
+the same contract review. Never substitute an unpublished Core commit or an
+anticipated release SHA.
 
 The contract does not enable TUN. Linux and macOS assert that the real Core
 process rejects non-empty selective routes before reporting `TUN device ready`.
@@ -62,6 +67,19 @@ and does not enable the system proxy or TUN.
 
 Neither desktop gate substitutes for isolated system-proxy, TUN, or real-server
 end-to-end testing.
+
+`npm run test:ui:twice` requires a clean worktree and a prebuilt final Prism
+executable. It runs the isolated UI smoke twice and writes
+`artifacts/ui-smoke-runs/` as an immutable CI artifact candidate. The manifest
+binds the exact Git commit, both child `RESULT.json` files, the key screenshots,
+and a copied subject executable with SHA-256 digests. The summary `RESULT.json`
+contains digest-bearing references to every child result, screenshot, executable,
+and manifest. The evidence proves deterministic renderer behavior for that build;
+it does not claim native L2 input success when Windows UIPI prevents automation.
+
+CI also performs a local Tauri bundle build on all six supported platform/CPU
+matrix entries. These bundle checks retain artifacts only inside the job and do
+not publish, sign, upload to a release, or otherwise produce release side effects.
 
 ## Security-sensitive development
 

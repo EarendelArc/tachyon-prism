@@ -1,6 +1,8 @@
+#[cfg(target_os = "windows")]
+use super::run_command;
 use super::{
     default_runtime_settings, expected_system_proxy_server, load_runtime_settings,
-    normalize_proxy_server, now_epoch_seconds, run_command, write_atomic, RuntimeSettings,
+    normalize_proxy_server, now_epoch_seconds, write_atomic, RuntimeSettings,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;

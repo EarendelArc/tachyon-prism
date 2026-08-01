@@ -238,6 +238,33 @@ describe("release workflow checksum assets", () => {
     }
   });
 
+  it("preserves the Rust toolchain in the isolated Linux keyring session", () => {
+    const workflow = readFileSync(ciWorkflowPath, "utf8");
+
+    expect(workflow).toContain(
+      'export LIVE_RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"',
+    );
+    expect(workflow).toContain(
+      'export LIVE_CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"',
+    );
+    expect(workflow).toContain('export RUSTUP_HOME="${LIVE_RUSTUP_HOME}"');
+    expect(workflow).toContain('export CARGO_HOME="${LIVE_CARGO_HOME}"');
+    expect(workflow).toContain(
+      "cargo test --locked --features system-keyring-live-test",
+    );
+  });
+
+  it("builds every Tauri matrix bundle without release publication", () => {
+    const workflow = readFileSync(ciWorkflowPath, "utf8");
+
+    expect(workflow).toContain("Verify Tauri bundle without publishing");
+    expect(workflow).toContain(
+      "npm run build -- --target ${{ matrix.rust_target }} ${{ matrix.bundle_args }}",
+    );
+    expect(workflow).not.toContain("softprops/action-gh-release");
+    expect(workflow).not.toContain("gh release create");
+  });
+
   it("keeps live contracts out of ordinary npm test collection", () => {
     const packageJson = JSON.parse(readFileSync(packagePath, "utf8")) as {
       scripts: Record<string, string>;
