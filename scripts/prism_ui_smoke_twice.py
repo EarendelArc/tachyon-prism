@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from smoke_evidence import (
     build_evidence_manifest,
     current_git_commit,
     ensure_clean_worktree,
+    secure_file_measure,
     sha256_file,
     write_json,
 )
@@ -21,7 +23,9 @@ from smoke_evidence import (
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ARTIFACTS = ROOT / "artifacts" / "ui-smoke-runs"
 DEFAULT_EXECUTABLE = ROOT / "src-tauri" / "target" / "release" / "tachyon-prism.exe"
-MANIFEST_NAME = "EVIDENCE_MANIFEST.json"
+RENDERER_MANIFEST_NAME = "RENDERER_EVIDENCE_MANIFEST.json"
+NATIVE_MANIFEST_NAME = "NATIVE_BUILD_MANIFEST.json"
+LEGACY_COMBINED_MANIFEST_NAME = "EVIDENCE_MANIFEST.json"
 KEY_SCREENSHOTS = {
     "overview-desktop.png",
     "subscriptions-desktop.png",
@@ -80,23 +84,26 @@ def main() -> None:
     parser.add_argument("--executable", default=str(DEFAULT_EXECUTABLE))
     args = parser.parse_args()
 
-    artifacts = Path(args.out).resolve()
+    artifacts = Path(os.path.abspath(args.out))
     artifacts.mkdir(parents=True, exist_ok=True)
     result_path = artifacts / "RESULT.json"
     error_path = artifacts / "ERROR.json"
-    manifest_path = artifacts / MANIFEST_NAME
+    renderer_manifest_path = artifacts / RENDERER_MANIFEST_NAME
+    native_manifest_path = artifacts / NATIVE_MANIFEST_NAME
+    legacy_manifest_path = artifacts / LEGACY_COMBINED_MANIFEST_NAME
     result_path.unlink(missing_ok=True)
     error_path.unlink(missing_ok=True)
-    manifest_path.unlink(missing_ok=True)
+    renderer_manifest_path.unlink(missing_ok=True)
+    native_manifest_path.unlink(missing_ok=True)
+    legacy_manifest_path.unlink(missing_ok=True)
     commit = current_git_commit(ROOT)
     try:
         ensure_clean_worktree(ROOT)
         edge = Path(args.edge).resolve()
         if not edge.is_file():
             raise FileNotFoundError(f"Edge executable not found: {edge}")
-        executable = Path(args.executable).resolve()
-        if not executable.is_file():
-            raise FileNotFoundError(f"Prism executable not found: {executable}")
+        executable = Path(os.path.abspath(args.executable))
+        source_measure_before = secure_file_measure(executable)
         runs = [
             run_once(edge, artifacts / "run-1", "run-1", commit),
             run_once(edge, artifacts / "run-2", "run-2", commit),
@@ -106,14 +113,35 @@ def main() -> None:
         subject_dir.mkdir(parents=True, exist_ok=True)
         subject_executable = subject_dir / executable.name
         shutil.copy2(executable, subject_executable)
+        source_measure_after = secure_file_measure(executable)
+        subject_measure = secure_file_measure(subject_executable)
+        if source_measure_before != source_measure_after or subject_measure != source_measure_before:
+            raise RuntimeError("native build executable changed during evidence copy")
 
-        evidence_files: list[tuple[Path, str]] = [(subject_executable, "subject-executable")]
+        renderer_files: list[tuple[Path, str]] = []
         for run in runs:
-            evidence_files.append((run["resultPath"], "run-result"))
-            evidence_files.extend((path, "screenshot") for path in run["screenshots"])
-        manifest = build_evidence_manifest(artifacts, commit, evidence_files)
-        write_json(manifest_path, manifest)
-        entries = {entry["path"]: entry for entry in manifest["files"]}
+            renderer_files.append((run["resultPath"], "renderer-run-result"))
+            renderer_files.extend(
+                (path, "renderer-fixture-screenshot") for path in run["screenshots"]
+            )
+        renderer_manifest = build_evidence_manifest(
+            artifacts,
+            commit,
+            renderer_files,
+            artifact_type="tachyon-prism-renderer-fixture-evidence",
+        )
+        native_manifest = build_evidence_manifest(
+            artifacts,
+            commit,
+            [(subject_executable, "native-build-executable-not-executed")],
+            artifact_type="tachyon-prism-native-build-evidence",
+        )
+        write_json(renderer_manifest_path, renderer_manifest)
+        write_json(native_manifest_path, native_manifest)
+        renderer_entries = {
+            entry["path"]: entry for entry in renderer_manifest["files"]
+        }
+        native_entries = {entry["path"]: entry for entry in native_manifest["files"]}
 
         run_references = []
         for run in runs:
@@ -124,24 +152,41 @@ def main() -> None:
             run_references.append(
                 {
                     "label": run["label"],
-                    "result": manifest_reference(entries[result_relative]),
+                    "result": manifest_reference(renderer_entries[result_relative]),
                     "screenshots": [
-                        manifest_reference(entries[path])
+                        manifest_reference(renderer_entries[path])
                         for path in screenshot_relatives
                     ],
                 }
             )
         subject_relative = subject_executable.relative_to(artifacts).as_posix()
         result = {
-            "status": "passed",
-            "schemaVersion": 1,
-            "artifactType": "tachyon-prism-ui-smoke-evidence",
+            "status": "layered-evidence-complete",
+            "schemaVersion": 2,
+            "artifactType": "tachyon-prism-layered-evidence-index",
             "gitCommit": commit,
-            "runs": run_references,
-            "subjectExecutable": manifest_reference(entries[subject_relative]),
-            "manifest": {
-                "path": MANIFEST_NAME,
-                "sha256": sha256_file(manifest_path),
+            "rendererFixtureEvidence": {
+                "status": "passed",
+                "executionSubject": "vite-ui-smoke-renderer-fixture",
+                "nativeExecutableExecuted": False,
+                "runs": run_references,
+                "manifest": {
+                    "path": RENDERER_MANIFEST_NAME,
+                    "sha256": sha256_file(renderer_manifest_path),
+                },
+            },
+            "nativeBuildEvidence": {
+                "status": "built-not-executed",
+                "executable": manifest_reference(native_entries[subject_relative]),
+                "manifest": {
+                    "path": NATIVE_MANIFEST_NAME,
+                    "sha256": sha256_file(native_manifest_path),
+                },
+            },
+            "causalClaims": {
+                "rendererFixtureExecutionProven": True,
+                "nativeExecutableExecutionProven": False,
+                "screenshotsProducedByNativeExecutable": False,
             },
         }
         write_json(result_path, result)

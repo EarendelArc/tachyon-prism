@@ -318,6 +318,10 @@ jobs:
         working-directory: .
         run: npm ci
 
+      - name: Test descriptor-safe evidence tooling
+        working-directory: .
+        run: npm run test:scripts
+
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
         with:

@@ -1097,15 +1097,30 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
                   Object.keys(value).sort().map((key) => [key, stableValue(value[key])]),
                 );
               };
-              const descriptorDigest = async (descriptor) => {
-                const bytes = new TextEncoder().encode(JSON.stringify(stableValue(descriptor)));
-                const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
-                return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+              const canonicalOutbound = (outbound) => JSON.stringify(stableValue(asRecord(outbound)));
+              const hmacKey = await crypto.subtle.importKey(
+                'raw',
+                crypto.getRandomValues(new Uint8Array(32)),
+                { name: 'HMAC', hash: 'SHA-256' },
+                false,
+                ['sign'],
+              );
+              const outboundHmac = async (canonical) => {
+                const bytes = new TextEncoder().encode(canonical);
+                const signature = new Uint8Array(
+                  await crypto.subtle.sign('HMAC', hmacKey, bytes),
+                );
+                return Array.from(
+                  signature,
+                  (byte) => byte.toString(16).padStart(2, '0'),
+                ).join('');
               };
               const selectedOutboundDescriptor = outboundDescriptor(selectedNodeOutbound);
               const catchAllOutboundDescriptor = outboundDescriptor(catchAllOutbound);
-              const selectedOutboundDigest = await descriptorDigest(selectedOutboundDescriptor);
-              const catchAllOutboundDigest = await descriptorDigest(catchAllOutboundDescriptor);
+              const selectedOutboundCanonical = canonicalOutbound(selectedNodeOutbound);
+              const catchAllOutboundCanonical = canonicalOutbound(catchAllOutbound);
+              const selectedOutboundHmac = await outboundHmac(selectedOutboundCanonical);
+              const catchAllOutboundHmac = await outboundHmac(catchAllOutboundCanonical);
               const catchAllIndex = trafficRules.findIndex(isExplicitCatchAll);
               resolve({
                 domainStrategy: config.routing?.domainStrategy ?? '',
@@ -1116,11 +1131,11 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
                 selectedNodeName: selectedNode?.name ?? '',
                 selectedNodeOutboundTag,
                 selectedOutboundDescriptor,
-                selectedOutboundDigest,
+                selectedOutboundHmac,
                 catchAllOutboundTag: catchAllRule.outboundTag ?? '',
                 catchAllProtocol: catchAllOutbound.protocol ?? '',
                 catchAllOutboundDescriptor,
-                catchAllOutboundDigest,
+                catchAllOutboundHmac,
                 catchAllIsExplicit: Boolean(catchAllRule.outboundTag),
                 catchAllTargetIsConfigured: catchAllOutboundMatches.length === 1,
                 catchAllTargetIsTrafficOutbound: trafficOutboundTags.includes(catchAllRule.outboundTag),
@@ -1129,7 +1144,8 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
                   (outbound) => outbound?.tag === selectedNodeOutboundTag,
                 ).length,
                 duplicateOutboundTags,
-                outboundObjectsMatch: selectedOutboundDigest === catchAllOutboundDigest,
+                outboundObjectsMatch: selectedOutboundCanonical === catchAllOutboundCanonical
+                  && selectedOutboundHmac === catchAllOutboundHmac,
                 trafficRulesBeforeCatchAll: catchAllIndex < 0 ? -1 : catchAllIndex,
                 catchAllRejectedProtocol: controlProtocols.has(catchAllOutbound.protocol ?? '')
                   || controlTag(catchAllOutbound.tag),
@@ -1986,8 +2002,8 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
             or not global_summary["selectedOutboundDescriptor"]["protocol"]
             or not global_summary["selectedOutboundDescriptor"]["address"]
             or global_summary["selectedOutboundDescriptor"]["port"] <= 0
-            or len(global_summary["selectedOutboundDigest"]) != 64
-            or len(global_summary["catchAllOutboundDigest"]) != 64
+            or len(global_summary["selectedOutboundHmac"]) != 64
+            or len(global_summary["catchAllOutboundHmac"]) != 64
             or global_summary["trafficRulesBeforeCatchAll"] != 0
             or global_summary["catchAllRejectedProtocol"]
             or global_summary["firstTrafficOutboundTag"] != global_summary["catchAllOutboundTag"]
@@ -2221,10 +2237,10 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
                 "selectedNodeName": global_summary["selectedNodeName"],
                 "selectedNodeOutboundTag": global_summary["selectedNodeOutboundTag"],
                 "selectedOutboundDescriptor": global_summary["selectedOutboundDescriptor"],
-                "selectedOutboundDigest": global_summary["selectedOutboundDigest"],
+                "selectedOutboundHmac": global_summary["selectedOutboundHmac"],
                 "catchAllOutboundTag": global_summary["catchAllOutboundTag"],
                 "catchAllOutboundDescriptor": global_summary["catchAllOutboundDescriptor"],
-                "catchAllOutboundDigest": global_summary["catchAllOutboundDigest"],
+                "catchAllOutboundHmac": global_summary["catchAllOutboundHmac"],
                 "duplicateOutboundTags": global_summary["duplicateOutboundTags"],
                 "strictSelectedTrafficOutboundMatch": (
                     global_summary["selectedNodeOutboundTag"]

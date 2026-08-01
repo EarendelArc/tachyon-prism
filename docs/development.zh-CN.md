@@ -100,10 +100,19 @@ tag object 为 `65f57643ae5644233033c3a3a7332290ff1ceeb6`，peel 后 commit 为
 
 `npm run test:ui:twice` 要求工作树干净且最终 Prism 可执行文件已经构建。命令会运行
 两轮隔离 UI smoke，并在 `artifacts/ui-smoke-runs/` 生成适合 CI 上传的不可变证据结构。
-SHA-256 manifest 绑定精确 Git commit、两轮子 `RESULT.json`、关键截图和复制后的受测
-可执行文件；汇总 `RESULT.json` 会以带摘要的引用指向所有子结果、截图、可执行文件和
-manifest。该证据只证明对应构建的渲染器行为，不会在 Windows UIPI 阻止自动化时虚假
-声明原生 L2 输入通过。
+renderer 与 native build 证据会严格分层：`RENDERER_EVIDENCE_MANIFEST.json` 只绑定
+精确 Git commit、两轮子 `RESULT.json` 和确实由 Vite/Edge renderer fixture 生成的截图；
+`NATIVE_BUILD_MANIFEST.json` 只绑定已构建但未执行的最终可执行文件。汇总索引会明确说明
+native EXE 没有生成 renderer 截图，也不会在 Windows UIPI 或“不干扰交互用户”约束阻止
+自动化时虚假声明原生 L2 输入通过。
+
+manifest 哈希读取会拒绝路径中任何 symlink 或 Windows reparse 分量，在系统支持时使用
+no-follow 打开语义，仅通过一个文件描述符计算哈希，并在读取后重新核对描述符和路径
+identity。文件替换或原地修改都会使证据生成失败。
+
+全局路由 smoke 会在内存中规范化并比较完整的已选与生成后 Xray outbound 对象，认证字段
+同样参与比较，再使用临时随机密钥计算 HMAC。RESULT 只写入 HMAC 与公开去敏描述，不会
+输出凭据或 HMAC 密钥。
 
 CI 还会在六个受支持的平台/CPU 矩阵项上执行本地 Tauri bundle 构建。这些检查只在
 作业内部生成 bundle，不签名、不发布、不上传到 Release，也不会产生发布副作用。

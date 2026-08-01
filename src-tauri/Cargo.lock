@@ -3907,6 +3907,7 @@ dependencies = [
  "base64 0.23.0",
  "chacha20poly1305",
  "keyring",
+ "libc",
  "libproc",
  "rand",
  "rcgen",

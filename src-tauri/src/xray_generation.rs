@@ -1314,11 +1314,6 @@ fn open_locked_instance_file(path: &Path) -> std::io::Result<LockedInstanceFile>
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
-    const O_NOFOLLOW: i32 = if cfg!(target_os = "linux") {
-        0x20000
-    } else {
-        0x100
-    };
     let parent_path = path
         .parent()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "lease parent"))?;
@@ -1331,7 +1326,7 @@ fn open_locked_instance_file(path: &Path) -> std::io::Result<LockedInstanceFile>
     }
     let parent = fs::OpenOptions::new()
         .read(true)
-        .custom_flags(O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(parent_path)?;
     let parent_metadata = parent.metadata()?;
     if !parent_metadata.is_dir()
@@ -1364,14 +1359,18 @@ fn open_locked_instance_file(path: &Path) -> std::io::Result<LockedInstanceFile>
             "lease parent directory is not private",
         ));
     }
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "lease file must not be a symlink",
+        ));
+    }
     let name = b"instance-lease.json\0";
-    const O_RDWR: i32 = 2;
-    const O_CREAT: i32 = 0x40;
     let fd = unsafe {
         openat(
             parent.as_raw_fd(),
             name.as_ptr().cast(),
-            O_RDWR | O_CREAT | O_NOFOLLOW,
+            libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW,
             0o600,
         )
     };
@@ -2043,7 +2042,24 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn instance_lease_open_flags_use_platform_libc_constants() {
+        let flags = libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW;
+        assert_eq!(flags & libc::O_RDWR, libc::O_RDWR);
+        assert_eq!(flags & libc::O_CREAT, libc::O_CREAT);
+        assert_eq!(flags & libc::O_NOFOLLOW, libc::O_NOFOLLOW);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn instance_lease_accepts_real_private_parent_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let store = GenerationStore::new(root.path().join("real"));
+        assert!(store.instance_lease.is_some());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn instance_lease_rejects_symlinked_parent_directory() {
         use std::os::unix::fs::symlink;
@@ -2058,6 +2074,23 @@ mod tests {
             .expect("symlinked lease parent must be rejected");
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(GenerationStore::new(link).instance_lease.is_none());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn instance_lease_rejects_symlinked_lease_file() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target.json");
+        fs::write(&target, b"do-not-overwrite").unwrap();
+        let lease_path = root.path().join(INSTANCE_LEASE_FILE);
+        symlink(&target, &lease_path).unwrap();
+        let error = open_locked_instance_file(&lease_path)
+            .err()
+            .expect("symlinked lease file must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&target).unwrap(), b"do-not-overwrite");
     }
 
     #[cfg(target_os = "windows")]
