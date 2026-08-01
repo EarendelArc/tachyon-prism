@@ -82,12 +82,18 @@ non-interference policy prevents automation.
 Manifest hashing rejects every symlink or Windows reparse path component, opens
 the file with no-follow semantics where the operating system exposes them, hashes
 through one descriptor, and verifies descriptor and path identities after the
-read. Replacement or in-place mutation fails the evidence run.
+read. After both manifests and the top-level `RESULT.json` are complete, the
+harness performs a final full-tree re-verification: manifest content, summary
+references, every file digest/size, and exact tree membership must still agree.
+Replacement, in-place mutation, or an unmanifested file fails the evidence run.
 
 The global-routing smoke canonicalizes the complete selected and generated Xray
 outbound objects in memory, including authentication fields. It compares the
 canonical values and an ephemeral-key HMAC. Result files contain only the HMAC
 and a public redacted descriptor; credentials and the HMAC key are never emitted.
+The browser harness and Node tests execute the same `outbound_evidence.cjs`
+implementation. Every six-target CI matrix entry checks authentication-field
+differences, fresh random keys, stable canonicalization, and redacted output.
 
 CI also performs a local Tauri bundle build on all six supported platform/CPU
 matrix entries. These bundle checks retain artifacts only inside the job and do
@@ -107,6 +113,15 @@ Prism restores the previous proxy snapshot; if restoration fails, shutdown is
 blocked and Xray is kept running so the proxy does not point to a dead local
 port. Tachyon Core diagnostics must pass through the same bounded secret
 redaction boundary as Xray diagnostics.
+
+Unix generation storage holds a stable path-derived anchor lock outside the
+replaceable generation root, plus a descriptor for the original root. Every
+root-relative stage, sweep, cleanup, and lease-release path operation verifies
+the root path device/inode against that descriptor before and after I/O and
+fails closed on replacement. Anchor, root, lease, and cloned lease-binding
+descriptors use close-on-exec so unrelated child processes cannot extend lock
+lifetime. Tests cover root rename/replacement and a real long-lived fork/exec
+child followed by immediate lease reacquisition.
 
 ### Subscription boundary
 

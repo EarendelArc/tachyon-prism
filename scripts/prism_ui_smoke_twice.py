@@ -16,6 +16,7 @@ from smoke_evidence import (
     ensure_clean_worktree,
     secure_file_measure,
     sha256_file,
+    verify_layered_evidence_tree,
     write_json,
 )
 
@@ -190,6 +191,13 @@ def main() -> None:
             },
         }
         write_json(result_path, result)
+        verify_layered_evidence_tree(
+            artifacts,
+            result_path,
+            renderer_manifest_path,
+            native_manifest_path,
+            commit,
+        )
     except Exception as error:
         write_json(
             error_path,

@@ -112,6 +112,15 @@ pub struct ConfigLease {
     orphan_recovery_failure: PathBuf,
     recovery_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
     leased_paths: Arc<Mutex<HashSet<PathBuf>>>,
+    root_binding: Option<ConfigRootBinding>,
+}
+
+#[derive(Debug)]
+struct ConfigRootBinding {
+    path: PathBuf,
+    directory: File,
+    #[cfg(unix)]
+    _anchor: File,
 }
 
 impl ConfigLease {
@@ -130,6 +139,7 @@ impl Drop for ConfigLease {
             &self.orphan_journal,
             &self.orphan_recovery_failure,
             &self.recovery_failure,
+            self.root_binding.as_ref(),
             remove_config_file,
         );
     }
@@ -144,21 +154,50 @@ fn release_config_lease(
     orphan_journal: &Path,
     orphan_recovery_failure: &Path,
     recovery_failure: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    root_binding: Option<&ConfigRootBinding>,
     remove: impl FnOnce(&Path) -> std::io::Result<()>,
 ) {
-    match remove(path) {
+    match guarded_config_root_io(root_binding, || remove(path)) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => {
-            if write_atomic(orphan_journal, "{\"version\":1,\"pending\":true}\n").is_err() {
+            if guarded_config_root_io(root_binding, || {
+                write_atomic(orphan_journal, "{\"version\":1,\"pending\":true}\n")
+                    .map_err(std::io::Error::other)
+            })
+            .is_err()
+            {
                 recovery_failure.store(true, std::sync::atomic::Ordering::Release);
-                let _ = write_atomic(
-                    orphan_recovery_failure,
-                    "{\"version\":1,\"pending\":true,\"reason\":\"orphanJournalWriteFailed\"}\n",
-                );
+                let _ = guarded_config_root_io(root_binding, || {
+                    write_atomic(
+                        orphan_recovery_failure,
+                        "{\"version\":1,\"pending\":true,\"reason\":\"orphanJournalWriteFailed\"}\n",
+                    )
+                    .map_err(std::io::Error::other)
+                });
             }
         }
     }
+    if verify_config_root_binding(root_binding).is_err() {
+        recovery_failure.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn guarded_config_root_io<T>(
+    binding: Option<&ConfigRootBinding>,
+    operation: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    verify_config_root_binding(binding).map_err(std::io::Error::other)?;
+    let result = operation();
+    verify_config_root_binding(binding).map_err(std::io::Error::other)?;
+    result
+}
+
+fn verify_config_root_binding(binding: Option<&ConfigRootBinding>) -> Result<(), String> {
+    let Some(binding) = binding else {
+        return Ok(());
+    };
+    verify_root_directory_binding(&binding.path, &binding.directory)
 }
 
 #[derive(Debug)]
@@ -1155,6 +1194,9 @@ struct InstanceLeaseMetadata {
 struct InstanceLease {
     _file: File,
     _parent_dir: File,
+    root: PathBuf,
+    #[cfg(unix)]
+    _anchor_file: File,
     #[cfg(target_os = "windows")]
     file_identity: WindowsFileIdentity,
     #[cfg(target_os = "windows")]
@@ -1165,6 +1207,8 @@ struct InstanceLease {
 struct LockedInstanceFile {
     file: File,
     parent_dir: File,
+    #[cfg(unix)]
+    anchor_file: File,
     #[cfg(target_os = "windows")]
     file_identity: WindowsFileIdentity,
     #[cfg(target_os = "windows")]
@@ -1223,6 +1267,7 @@ fn verify_windows_file_identity(
 
 impl InstanceLease {
     fn verify(&self) -> Result<(), String> {
+        verify_root_directory_binding(&self.root, &self._parent_dir)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -1277,6 +1322,8 @@ fn acquire_instance_lease(root: &Path) -> Option<InstanceLease> {
     let LockedInstanceFile {
         mut file,
         parent_dir,
+        #[cfg(unix)]
+        anchor_file,
         #[cfg(target_os = "windows")]
         file_identity,
         #[cfg(target_os = "windows")]
@@ -1294,6 +1341,9 @@ fn acquire_instance_lease(root: &Path) -> Option<InstanceLease> {
     Some(InstanceLease {
         _file: file,
         _parent_dir: parent_dir,
+        root: root.to_path_buf(),
+        #[cfg(unix)]
+        _anchor_file: anchor_file,
         #[cfg(target_os = "windows")]
         file_identity,
         #[cfg(target_os = "windows")]
@@ -1309,6 +1359,32 @@ fn write_instance_lease_metadata(file: &mut File, data: &[u8]) -> std::io::Resul
     file.sync_data()
 }
 
+fn verify_root_directory_binding(root: &Path, directory: &File) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let path_metadata = fs::symlink_metadata(root)
+            .map_err(|_| "generation-root-path-read-failed".to_string())?;
+        let held_metadata = directory
+            .metadata()
+            .map_err(|_| "generation-root-fd-read-failed".to_string())?;
+        if path_metadata.file_type().is_symlink()
+            || !path_metadata.is_dir()
+            || !held_metadata.is_dir()
+            || path_metadata.dev() != held_metadata.dev()
+            || path_metadata.ino() != held_metadata.ino()
+        {
+            return Err("generation-root-identity-mismatch".to_string());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, directory);
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn open_locked_instance_file(path: &Path) -> std::io::Result<LockedInstanceFile> {
     use std::os::fd::{AsRawFd, FromRawFd};
@@ -1317,6 +1393,7 @@ fn open_locked_instance_file(path: &Path) -> std::io::Result<LockedInstanceFile>
     let parent_path = path
         .parent()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "lease parent"))?;
+    let anchor_file = open_unix_root_anchor(parent_path)?;
     let path_metadata = fs::symlink_metadata(parent_path)?;
     if path_metadata.file_type().is_symlink() || !path_metadata.is_dir() {
         return Err(std::io::Error::new(
@@ -1326,7 +1403,7 @@ fn open_locked_instance_file(path: &Path) -> std::io::Result<LockedInstanceFile>
     }
     let parent = fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(parent_path)?;
     let parent_metadata = parent.metadata()?;
     if !parent_metadata.is_dir()
@@ -1370,7 +1447,7 @@ fn open_locked_instance_file(path: &Path) -> std::io::Result<LockedInstanceFile>
         openat(
             parent.as_raw_fd(),
             name.as_ptr().cast(),
-            libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW,
+            libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             0o600,
         )
     };
@@ -1394,15 +1471,64 @@ fn open_locked_instance_file(path: &Path) -> std::io::Result<LockedInstanceFile>
             "lease file is not private",
         ));
     }
-    const LOCK_EX: i32 = 2;
-    const LOCK_NB: i32 = 4;
-    if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
+    if unsafe { flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
     Ok(LockedInstanceFile {
         file,
         parent_dir: parent,
+        anchor_file,
     })
+}
+
+#[cfg(unix)]
+fn open_unix_root_anchor(root: &Path) -> std::io::Result<File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let parent_path = root
+        .parent()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "root parent"))?;
+    let parent = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(parent_path)?;
+    let canonical_key = sha256_bytes(root.as_os_str().as_bytes());
+    let anchor_name = format!(".tachyon-generation-{canonical_key}.lock\0");
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            anchor_name.as_ptr().cast(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let anchor = unsafe { File::from_raw_fd(fd) };
+    let metadata = anchor.metadata()?;
+    let uid = unsafe { libc::geteuid() };
+    if !metadata.is_file() || metadata.uid() != uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "generation anchor is not an owned regular file",
+        ));
+    }
+    if unsafe { libc::fchmod(anchor.as_raw_fd(), 0o600) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if anchor.metadata()?.mode() & 0o077 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "generation anchor is not private",
+        ));
+    }
+    if unsafe { libc::flock(anchor.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(anchor)
 }
 
 #[cfg(target_os = "windows")]
@@ -1549,6 +1675,13 @@ fn open_locked_instance_file(_path: &Path) -> std::io::Result<LockedInstanceFile
 
 impl GenerationStore {
     pub fn new(root: PathBuf) -> Self {
+        let root = if root.is_absolute() {
+            root
+        } else {
+            std::env::current_dir()
+                .map(|current| current.join(&root))
+                .unwrap_or(root)
+        };
         let instance_lease = acquire_instance_lease(&root);
         Self {
             root,
@@ -1561,39 +1694,53 @@ impl GenerationStore {
 
     pub fn stage(&self, plan: &ApplyPlan) -> Result<ConfigLease, String> {
         self.verify_instance_lease()?;
-        fs::create_dir_all(&self.root).map_err(|_| "generation-dir-create-failed".to_string())?;
         let path = self
             .root
             .join(format!("generation-{}.json", plan.generation_id().as_str()));
         let config = std::str::from_utf8(plan.config())
             .map_err(|_| "generation-config-not-utf8".to_string())?;
-        write_atomic(&path, config).map_err(|_| "generation-config-write-failed".to_string())?;
+        self.guarded_root_io("generation-config-write-failed", || {
+            write_atomic(&path, config).map_err(std::io::Error::other)
+        })?;
+        let instance_lease = self
+            .instance_lease
+            .as_ref()
+            .ok_or_else(|| "generation-instance-lease-unavailable".to_string())?;
         let lease = ConfigLease {
             path,
             orphan_journal: self.root.join(ORPHAN_JOURNAL_FILE),
             orphan_recovery_failure: self.root.join(ORPHAN_RECOVERY_FAILURE_FILE),
             recovery_failure: std::sync::Arc::clone(&self.recovery_failure),
             leased_paths: Arc::clone(&self.leased_paths),
+            root_binding: Some(ConfigRootBinding {
+                path: self.root.clone(),
+                directory: instance_lease
+                    ._parent_dir
+                    .try_clone()
+                    .map_err(|_| "generation-root-fd-clone-failed".to_string())?,
+                #[cfg(unix)]
+                _anchor: instance_lease
+                    ._anchor_file
+                    .try_clone()
+                    .map_err(|_| "generation-anchor-fd-clone-failed".to_string())?,
+            }),
         };
         self.leased_paths
             .lock()
             .map_err(|_| "generation-lease-state-failed".to_string())?
             .insert(lease.path.clone());
         self.cleanup_stale(lease.path())?;
+        self.verify_instance_lease()?;
         Ok(lease)
     }
 
     pub fn sweep_orphans(&self) -> Result<(), String> {
-        self.verify_instance_lease()?;
-        if !self.root.exists() {
-            return Ok(());
-        }
-        for entry in
-            fs::read_dir(&self.root).map_err(|_| "generation-dir-read-failed".to_string())?
-        {
-            let path = entry
-                .map_err(|_| "generation-dir-read-failed".to_string())?
-                .path();
+        let entries = self.guarded_root_io("generation-dir-read-failed", || {
+            fs::read_dir(&self.root)?
+                .map(|entry| entry.map(|value| value.path()))
+                .collect::<std::io::Result<Vec<_>>>()
+        })?;
+        for path in entries {
             let is_generation = path
                 .file_name()
                 .and_then(|value| value.to_str())
@@ -1604,24 +1751,26 @@ impl GenerationStore {
                 .map_err(|_| "generation-lease-state-failed".to_string())?
                 .contains(&path);
             if is_generation && !leased {
-                fs::remove_file(path)
-                    .map_err(|_| "generation-orphan-cleanup-failed".to_string())?;
+                self.guarded_root_io("generation-orphan-cleanup-failed", || {
+                    fs::remove_file(&path)
+                })?;
             }
         }
         let journal = self.root.join(ORPHAN_JOURNAL_FILE);
-        match fs::remove_file(journal) {
+        match self.guarded_root_result(|| fs::remove_file(&journal))? {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err("generation-orphan-journal-cleanup-failed".to_string()),
         }
         let marker = self.root.join(ORPHAN_RECOVERY_FAILURE_FILE);
-        match fs::remove_file(marker) {
+        match self.guarded_root_result(|| fs::remove_file(&marker))? {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err("generation-orphan-recovery-marker-cleanup-failed".to_string()),
         }
         self.recovery_failure
             .store(false, std::sync::atomic::Ordering::Release);
+        self.verify_instance_lease()?;
         Ok(())
     }
 
@@ -1632,37 +1781,54 @@ impl GenerationStore {
             .verify()
     }
 
+    fn guarded_root_result<T>(
+        &self,
+        operation: impl FnOnce() -> std::io::Result<T>,
+    ) -> Result<std::io::Result<T>, String> {
+        self.verify_instance_lease()?;
+        let result = operation();
+        self.verify_instance_lease()?;
+        Ok(result)
+    }
+
+    fn guarded_root_io<T>(
+        &self,
+        error_code: &'static str,
+        operation: impl FnOnce() -> std::io::Result<T>,
+    ) -> Result<T, String> {
+        self.guarded_root_result(operation)?
+            .map_err(|_| error_code.to_string())
+    }
+
     fn cleanup_stale(&self, current: &Path) -> Result<(), String> {
-        let mut files = fs::read_dir(&self.root)
-            .map_err(|_| "generation-dir-read-failed".to_string())?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.extension().and_then(|value| value.to_str()) == Some("json")
-                    && path
-                        .file_name()
-                        .and_then(|value| value.to_str())
-                        .is_some_and(|name| name.starts_with("generation-"))
-            })
-            .collect::<Vec<_>>();
+        let mut files = self.guarded_root_io("generation-dir-read-failed", || {
+            fs::read_dir(&self.root)?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension().and_then(|value| value.to_str()) == Some("json")
+                        && path
+                            .file_name()
+                            .and_then(|value| value.to_str())
+                            .is_some_and(|name| name.starts_with("generation-"))
+                })
+                .map(|path| {
+                    let modified = fs::metadata(&path)?.modified().ok();
+                    Ok((path, modified))
+                })
+                .collect::<std::io::Result<Vec<_>>>()
+        })?;
         let leased_paths = self
             .leased_paths
             .lock()
             .map_err(|_| "generation-lease-state-failed".to_string())?
             .clone();
-        files.retain(|path| path != current && !leased_paths.contains(path));
-        files.sort_by_key(|path| {
-            (
-                fs::metadata(path)
-                    .and_then(|metadata| metadata.modified())
-                    .ok(),
-                path.clone(),
-            )
-        });
+        files.retain(|(path, _)| path != current && !leased_paths.contains(path));
+        files.sort_by_key(|(path, modified)| (*modified, path.clone()));
         let keep = self.retained.max(1);
         let remove_count = files.len().saturating_sub(keep - 1);
-        for path in files.into_iter().take(remove_count) {
-            fs::remove_file(path).map_err(|_| "generation-stale-cleanup-failed".to_string())?;
+        for (path, _) in files.into_iter().take(remove_count) {
+            self.guarded_root_io("generation-stale-cleanup-failed", || fs::remove_file(&path))?;
         }
         Ok(())
     }
@@ -2045,10 +2211,116 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn instance_lease_open_flags_use_platform_libc_constants() {
-        let flags = libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW;
+        let flags = libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let directory_flags = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
         assert_eq!(flags & libc::O_RDWR, libc::O_RDWR);
         assert_eq!(flags & libc::O_CREAT, libc::O_CREAT);
         assert_eq!(flags & libc::O_NOFOLLOW, libc::O_NOFOLLOW);
+        assert_eq!(flags & libc::O_CLOEXEC, libc::O_CLOEXEC);
+        assert_eq!(directory_flags & libc::O_DIRECTORY, libc::O_DIRECTORY);
+        assert_eq!(directory_flags & libc::O_CLOEXEC, libc::O_CLOEXEC);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn every_generation_lease_descriptor_is_close_on_exec() {
+        use std::os::fd::AsRawFd;
+
+        let close_on_exec = |file: &File| {
+            let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+            assert!(flags >= 0);
+            assert_eq!(flags & libc::FD_CLOEXEC, libc::FD_CLOEXEC);
+        };
+        let parent = tempfile::tempdir().unwrap();
+        let store = GenerationStore::new(parent.path().join("generations"));
+        let instance = store.instance_lease.as_ref().unwrap();
+        close_on_exec(&instance._anchor_file);
+        close_on_exec(&instance._parent_dir);
+        close_on_exec(&instance._file);
+
+        let mut runtime = GenerationRuntime::default();
+        select(&mut runtime, "A", 1);
+        let lease = store.stage(&runtime.begin_apply().unwrap()).unwrap();
+        let binding = lease.root_binding.as_ref().unwrap();
+        close_on_exec(&binding._anchor);
+        close_on_exec(&binding.directory);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn replaced_root_blocks_second_instance_and_existing_store_operations() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("generations");
+        let moved = parent.path().join("moved-generations");
+        let first = GenerationStore::new(root.clone());
+        assert!(first.instance_lease.is_some());
+
+        fs::rename(&root, &moved).unwrap();
+        fs::create_dir(&root).unwrap();
+        let second = GenerationStore::new(root.clone());
+        assert!(second.instance_lease.is_none());
+        assert_eq!(
+            first.sweep_orphans().unwrap_err(),
+            "generation-root-identity-mismatch"
+        );
+
+        let mut runtime = GenerationRuntime::default();
+        select(&mut runtime, "A", 1);
+        let plan = runtime.begin_apply().unwrap();
+        assert_eq!(
+            first.stage(&plan).unwrap_err(),
+            "generation-root-identity-mismatch"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn config_lease_delete_fails_closed_after_root_replacement() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("generations");
+        let moved = parent.path().join("moved-generations");
+        let store = GenerationStore::new(root.clone());
+        let mut runtime = GenerationRuntime::default();
+        select(&mut runtime, "A", 1);
+        let lease = store.stage(&runtime.begin_apply().unwrap()).unwrap();
+        let file_name = lease.path().file_name().unwrap().to_owned();
+
+        fs::rename(&root, &moved).unwrap();
+        fs::create_dir(&root).unwrap();
+        drop(lease);
+
+        assert!(store
+            .recovery_failure
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert!(moved.join(file_name).is_file());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn lease_descriptors_do_not_survive_exec() {
+        use std::process::Stdio;
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("generations");
+        let first = GenerationStore::new(root.clone());
+        assert!(first.instance_lease.is_some());
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 5"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        drop(first);
+        let second = GenerationStore::new(root);
+        let acquired = second.instance_lease.is_some();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            acquired,
+            "exec child inherited a generation lease descriptor"
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2665,6 +2937,7 @@ mod tests {
             &journal,
             &recovery_marker,
             &recovery_failure,
+            None,
             |_| {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -2710,12 +2983,19 @@ mod tests {
         fs::create_dir_all(&missing_parent).unwrap();
         fs::create_dir(&journal).unwrap();
         fs::create_dir(&marker).unwrap();
-        release_config_lease(&generation, &journal, &marker, &recovery_failure, |_| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "injected delete failure",
-            ))
-        });
+        release_config_lease(
+            &generation,
+            &journal,
+            &marker,
+            &recovery_failure,
+            None,
+            |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected delete failure",
+                ))
+            },
+        );
         assert!(recovery_failure.load(std::sync::atomic::Ordering::Acquire));
         assert!(journal.is_dir());
         assert!(marker.is_dir());

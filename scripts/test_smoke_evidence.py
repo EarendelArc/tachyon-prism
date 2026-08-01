@@ -14,6 +14,9 @@ from smoke_evidence import (
     build_evidence_manifest,
     evidence_file_entry,
     secure_file_measure,
+    sha256_file,
+    verify_layered_evidence_tree,
+    write_json,
 )
 
 
@@ -21,6 +24,112 @@ COMMIT = "1" * 40
 
 
 class SmokeEvidenceManifestTests(unittest.TestCase):
+    def build_layered_tree(self, root: Path) -> tuple[Path, Path, Path, Path]:
+        run_one = root / "run-1" / "RESULT.json"
+        run_two = root / "run-2" / "RESULT.json"
+        screenshot_one = root / "run-1" / "overview.png"
+        screenshot_two = root / "run-2" / "overview.png"
+        executable = root / "subject" / "tachyon-prism.exe"
+        for path, content in (
+            (run_one, b'{"status":"passed"}\n'),
+            (run_two, b'{"status":"passed"}\n'),
+            (screenshot_one, b"png-one"),
+            (screenshot_two, b"png-two"),
+            (executable, b"native-build"),
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        renderer_path = root / "RENDERER_EVIDENCE_MANIFEST.json"
+        native_path = root / "NATIVE_BUILD_MANIFEST.json"
+        renderer = build_evidence_manifest(
+            root,
+            COMMIT,
+            [
+                (run_one, "renderer-run-result"),
+                (run_two, "renderer-run-result"),
+                (screenshot_one, "renderer-fixture-screenshot"),
+                (screenshot_two, "renderer-fixture-screenshot"),
+            ],
+        )
+        native = build_evidence_manifest(
+            root,
+            COMMIT,
+            [(executable, "native-build-executable-not-executed")],
+            artifact_type="tachyon-prism-native-build-evidence",
+        )
+        write_json(renderer_path, renderer)
+        write_json(native_path, native)
+        renderer_entries = {entry["path"]: entry for entry in renderer["files"]}
+        native_entry = native["files"][0]
+
+        def reference(entry: dict[str, object]) -> dict[str, object]:
+            return {
+                "path": entry["path"],
+                "sha256": entry["sha256"],
+                "sizeBytes": entry["sizeBytes"],
+            }
+
+        result_path = root / "RESULT.json"
+        write_json(
+            result_path,
+            {
+                "status": "layered-evidence-complete",
+                "schemaVersion": 2,
+                "artifactType": "tachyon-prism-layered-evidence-index",
+                "gitCommit": COMMIT,
+                "rendererFixtureEvidence": {
+                    "status": "passed",
+                    "executionSubject": "vite-ui-smoke-renderer-fixture",
+                    "nativeExecutableExecuted": False,
+                    "runs": [
+                        {
+                            "result": reference(renderer_entries["run-1/RESULT.json"]),
+                            "screenshots": [reference(renderer_entries["run-1/overview.png"])],
+                        },
+                        {
+                            "result": reference(renderer_entries["run-2/RESULT.json"]),
+                            "screenshots": [reference(renderer_entries["run-2/overview.png"])],
+                        },
+                    ],
+                    "manifest": {
+                        "path": renderer_path.name,
+                        "sha256": sha256_file(renderer_path),
+                    },
+                },
+                "nativeBuildEvidence": {
+                    "status": "built-not-executed",
+                    "executable": reference(native_entry),
+                    "manifest": {
+                        "path": native_path.name,
+                        "sha256": sha256_file(native_path),
+                    },
+                },
+                "causalClaims": {
+                    "rendererFixtureExecutionProven": True,
+                    "nativeExecutableExecutionProven": False,
+                    "screenshotsProducedByNativeExecutable": False,
+                },
+            },
+        )
+        return result_path, renderer_path, native_path, screenshot_two
+
+    def test_final_layered_tree_reverify_detects_post_manifest_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result, renderer, native, mutable = self.build_layered_tree(root)
+            verify_layered_evidence_tree(root, result, renderer, native, COMMIT)
+            mutable.write_bytes(b"changed-after-result")
+            with self.assertRaisesRegex(ValueError, "manifest mismatch"):
+                verify_layered_evidence_tree(root, result, renderer, native, COMMIT)
+
+    def test_final_layered_tree_reverify_rejects_unmanifested_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result, renderer, native, _ = self.build_layered_tree(root)
+            (root / "unexpected.txt").write_text("not manifested", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "tree membership mismatch"):
+                verify_layered_evidence_tree(root, result, renderer, native, COMMIT)
+
     def test_manifest_is_sorted_and_content_addressed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

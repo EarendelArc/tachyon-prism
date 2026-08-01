@@ -65,6 +65,12 @@ keyring 或加密文件实现。生产后端由 Rust vault 测试覆盖。
 运行，避免系统代理继续指向已停止的本地端口。Tachyon Core 诊断必须和 Xray 诊断一样经过
 有长度限制的敏感信息脱敏边界。
 
+Unix generation 存储会在可替换 root 之外持有按路径派生的稳定 anchor lock，并持有原始
+root 的目录描述符。所有相对 root 的 stage、sweep、cleanup 与 lease release 路径操作都在
+I/O 前后核对 root 路径的 device/inode 与该描述符，发生替换时封闭失败。anchor、root、
+lease 以及复制给 lease binding 的描述符均启用 close-on-exec，避免无关子进程延长锁生命周期。
+测试覆盖持锁后重命名/替换 root，以及真实长生命周期 fork/exec 子进程存在时立即重新获取租约。
+
 ### 订阅边界
 
 订阅下载由 Rust 后端执行。它只接受不含内嵌凭据的 HTTP(S) 地址，对每一跳重定向分别执行
@@ -108,11 +114,14 @@ native EXE 没有生成 renderer 截图，也不会在 Windows UIPI 或“不干
 
 manifest 哈希读取会拒绝路径中任何 symlink 或 Windows reparse 分量，在系统支持时使用
 no-follow 打开语义，仅通过一个文件描述符计算哈希，并在读取后重新核对描述符和路径
-identity。文件替换或原地修改都会使证据生成失败。
+identity。两份 manifest 与顶层 `RESULT.json` 全部写完后，脚本还会执行最终全树复核：
+manifest 内容、汇总引用、每个文件的摘要/大小以及精确目录成员必须继续一致。文件替换、
+原地修改或出现未纳入 manifest 的文件，都会使证据生成失败。
 
 全局路由 smoke 会在内存中规范化并比较完整的已选与生成后 Xray outbound 对象，认证字段
 同样参与比较，再使用临时随机密钥计算 HMAC。RESULT 只写入 HMAC 与公开去敏描述，不会
-输出凭据或 HMAC 密钥。
+输出凭据或 HMAC 密钥。浏览器 harness 与 Node 测试执行同一份 `outbound_evidence.cjs`
+实现；六目标 CI 矩阵的每个条目都会检查认证字段差异、随机新密钥、稳定规范化和输出脱敏。
 
 CI 还会在六个受支持的平台/CPU 矩阵项上执行本地 Tauri bundle 构建。这些检查只在
 作业内部生成 bundle，不签名、不发布、不上传到 Release，也不会产生发布副作用。

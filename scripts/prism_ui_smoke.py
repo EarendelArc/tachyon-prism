@@ -24,6 +24,9 @@ ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
 ARTIFACTS = ROOT / "artifacts" / "ui-smoke"
 EDGE = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
+OUTBOUND_EVIDENCE_SOURCE = (ROOT / "scripts" / "outbound_evidence.cjs").read_text(
+    encoding="utf-8"
+)
 SMOKE_URL_SUBSCRIPTION = "\n".join(
     [
         "vless://url-test-uuid@url-vless.example.com:443?encryption=none&security=tls&type=ws&sni=url.example.com#Smoke URL VLESS",
@@ -933,6 +936,7 @@ def active_routing_mode(cdp: CDP) -> str:
 
 
 def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
+    cdp.evaluate(OUTBOUND_EVIDENCE_SOURCE)
     return cdp.evaluate(
         r"""
         new Promise((resolve) => {
@@ -1026,101 +1030,10 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
                 : undefined;
               const selectedNodeOutbound = selectedTemplateOutbound ?? selectedNode?.outbound;
               const selectedNodeOutboundTag = selectedNodeOutbound?.tag ?? '';
-              const asRecord = (value) => value && typeof value === 'object' && !Array.isArray(value)
-                ? value
-                : {};
-              const firstRecord = (value) => Array.isArray(value)
-                ? asRecord(value.find((item) => item && typeof item === 'object'))
-                : {};
-              const endpointFromOutbound = (outbound) => {
-                const settings = asRecord(outbound?.settings);
-                const candidate = Object.keys(asRecord(settings.address)).length > 0
-                  ? asRecord(settings.address)
-                  : Object.keys(firstRecord(settings.servers)).length > 0
-                    ? firstRecord(settings.servers)
-                    : Object.keys(firstRecord(settings.vnext)).length > 0
-                      ? firstRecord(settings.vnext)
-                      : settings;
-                let address = typeof candidate.address === 'string' ? candidate.address : '';
-                let port = Number.isFinite(Number(candidate.port)) ? Number(candidate.port) : 0;
-                if ((!address || !port) && Array.isArray(settings.peers)) {
-                  const endpoint = String(firstRecord(settings.peers).endpoint ?? '');
-                  const match = endpoint.match(/^\[([^\]]+)\]:(\d+)$|^([^:]+):(\d+)$/);
-                  address = match?.[1] ?? match?.[3] ?? address;
-                  port = Number(match?.[2] ?? match?.[4] ?? port);
-                }
-                return {
-                  address: address.trim().toLowerCase(),
-                  port: Number.isInteger(port) && port > 0 ? port : 0,
-                };
-              };
-              const outboundDescriptor = (outbound) => {
-                const settings = asRecord(outbound?.settings);
-                const stream = asRecord(outbound?.streamSettings);
-                const tls = asRecord(stream.tlsSettings);
-                const reality = asRecord(stream.realitySettings);
-                const ws = asRecord(stream.wsSettings);
-                const xhttp = asRecord(stream.xhttpSettings);
-                const grpc = asRecord(stream.grpcSettings);
-                const firstServer = firstRecord(settings.servers);
-                const firstVnext = firstRecord(settings.vnext);
-                const firstUser = firstRecord(firstVnext.users);
-                const endpoint = endpointFromOutbound(outbound);
-                return {
-                  protocol: String(outbound?.protocol ?? '').trim().toLowerCase(),
-                  address: endpoint.address,
-                  port: endpoint.port,
-                  transport: String(stream.network ?? '').trim().toLowerCase(),
-                  security: String(stream.security ?? settings.security ?? '').trim().toLowerCase(),
-                  cipher: String(
-                    settings.method
-                    ?? settings.encryption
-                    ?? firstServer.method
-                    ?? firstUser.encryption
-                    ?? '',
-                  ).trim().toLowerCase(),
-                  flow: String(settings.flow ?? firstUser.flow ?? '').trim(),
-                  tlsServerName: String(tls.serverName ?? '').trim().toLowerCase(),
-                  realityServerName: String(reality.serverName ?? '').trim().toLowerCase(),
-                  fingerprint: String(
-                    reality.fingerprint ?? tls.fingerprint ?? '',
-                  ).trim().toLowerCase(),
-                  wsPath: String(ws.path ?? '').trim(),
-                  xhttpPath: String(xhttp.path ?? '').trim(),
-                  grpcServiceName: String(grpc.serviceName ?? '').trim(),
-                };
-              };
-              const stableValue = (value) => {
-                if (Array.isArray(value)) return value.map(stableValue);
-                if (!value || typeof value !== 'object') return value;
-                return Object.fromEntries(
-                  Object.keys(value).sort().map((key) => [key, stableValue(value[key])]),
-                );
-              };
-              const canonicalOutbound = (outbound) => JSON.stringify(stableValue(asRecord(outbound)));
-              const hmacKey = await crypto.subtle.importKey(
-                'raw',
-                crypto.getRandomValues(new Uint8Array(32)),
-                { name: 'HMAC', hash: 'SHA-256' },
-                false,
-                ['sign'],
+              const outboundEvidence = await globalThis.TachyonOutboundEvidence.compareOutbounds(
+                selectedNodeOutbound,
+                catchAllOutbound,
               );
-              const outboundHmac = async (canonical) => {
-                const bytes = new TextEncoder().encode(canonical);
-                const signature = new Uint8Array(
-                  await crypto.subtle.sign('HMAC', hmacKey, bytes),
-                );
-                return Array.from(
-                  signature,
-                  (byte) => byte.toString(16).padStart(2, '0'),
-                ).join('');
-              };
-              const selectedOutboundDescriptor = outboundDescriptor(selectedNodeOutbound);
-              const catchAllOutboundDescriptor = outboundDescriptor(catchAllOutbound);
-              const selectedOutboundCanonical = canonicalOutbound(selectedNodeOutbound);
-              const catchAllOutboundCanonical = canonicalOutbound(catchAllOutbound);
-              const selectedOutboundHmac = await outboundHmac(selectedOutboundCanonical);
-              const catchAllOutboundHmac = await outboundHmac(catchAllOutboundCanonical);
               const catchAllIndex = trafficRules.findIndex(isExplicitCatchAll);
               resolve({
                 domainStrategy: config.routing?.domainStrategy ?? '',
@@ -1130,12 +1043,12 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
                 selectedNodeId,
                 selectedNodeName: selectedNode?.name ?? '',
                 selectedNodeOutboundTag,
-                selectedOutboundDescriptor,
-                selectedOutboundHmac,
+                selectedOutboundDescriptor: outboundEvidence.selectedDescriptor,
+                selectedOutboundHmac: outboundEvidence.selectedHmac,
                 catchAllOutboundTag: catchAllRule.outboundTag ?? '',
                 catchAllProtocol: catchAllOutbound.protocol ?? '',
-                catchAllOutboundDescriptor,
-                catchAllOutboundHmac,
+                catchAllOutboundDescriptor: outboundEvidence.catchAllDescriptor,
+                catchAllOutboundHmac: outboundEvidence.catchAllHmac,
                 catchAllIsExplicit: Boolean(catchAllRule.outboundTag),
                 catchAllTargetIsConfigured: catchAllOutboundMatches.length === 1,
                 catchAllTargetIsTrafficOutbound: trafficOutboundTags.includes(catchAllRule.outboundTag),
@@ -1144,8 +1057,7 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
                   (outbound) => outbound?.tag === selectedNodeOutboundTag,
                 ).length,
                 duplicateOutboundTags,
-                outboundObjectsMatch: selectedOutboundCanonical === catchAllOutboundCanonical
-                  && selectedOutboundHmac === catchAllOutboundHmac,
+                outboundObjectsMatch: outboundEvidence.objectsMatch,
                 trafficRulesBeforeCatchAll: catchAllIndex < 0 ? -1 : catchAllIndex,
                 catchAllRejectedProtocol: controlProtocols.has(catchAllOutbound.protocol ?? '')
                   || controlTag(catchAllOutbound.tag),
