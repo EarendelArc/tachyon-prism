@@ -4,13 +4,18 @@ use rustix::fs::{
 };
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+static AFTER_PUBLISH_HOOK: OnceLock<Mutex<Option<Box<dyn FnOnce() + Send>>>> = OnceLock::new();
 
 #[derive(Debug)]
 pub(crate) struct Entry {
@@ -41,20 +46,60 @@ pub(crate) fn write_new(root: &File, name: &OsStr, contents: &[u8]) -> io::Resul
     validate_root(root)?;
     validate_component(name)?;
     let temporary = temporary_name();
+    let mut published_stat = None;
     let result = (|| {
         let mut file = create_private(root, &temporary)?;
         file.write_all(contents)?;
         file.sync_all()?;
-        validate_open_regular(&file)?;
+        let original = validate_open_regular(&file)?;
         renameat_with(root, &temporary, root, name, RenameFlags::NOREPLACE)
             .map_err(io::Error::from)?;
+        published_stat = Some(original);
         fsync(root).map_err(io::Error::from)?;
-        open_read(root, name)
+        #[cfg(test)]
+        invoke_after_publish_hook();
+        let published = statat(root, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
+        validate_stat(&published)?;
+        if published.st_dev != original.st_dev || published.st_ino != original.st_ino {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "generation entry changed after publication",
+            ));
+        }
+        file.seek(SeekFrom::Start(0))?;
+        Ok(file)
     })();
     if result.is_err() {
-        let _ = unlinkat(root, &temporary, AtFlags::empty());
+        if let Some(original) = published_stat {
+            if let Ok(published) = statat(root, name, AtFlags::SYMLINK_NOFOLLOW) {
+                if published.st_dev == original.st_dev && published.st_ino == original.st_ino {
+                    let _ = unlinkat(root, name, AtFlags::empty());
+                    let _ = fsync(root);
+                }
+            }
+        } else {
+            let _ = unlinkat(root, &temporary, AtFlags::empty());
+        }
     }
     result
+}
+
+#[cfg(test)]
+pub(crate) fn set_after_publish_hook(hook: impl FnOnce() + Send + 'static) {
+    let slot = AFTER_PUBLISH_HOOK.get_or_init(|| Mutex::new(None));
+    *slot.lock().unwrap() = Some(Box::new(hook));
+}
+
+#[cfg(test)]
+fn invoke_after_publish_hook() {
+    let hook = AFTER_PUBLISH_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap()
+        .take();
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 
 pub(crate) fn replace(root: &File, name: &OsStr, contents: &[u8]) -> io::Result<()> {
@@ -160,7 +205,7 @@ fn create_private(root: &File, name: &OsStr) -> io::Result<File> {
     let descriptor = openat(
         root,
         name,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::RUSR | Mode::WUSR,
     )
     .map_err(io::Error::from)?;
@@ -199,6 +244,7 @@ fn temporary_name() -> OsString {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
     use std::os::unix::fs::{symlink, MetadataExt};
 
     fn root() -> (tempfile::TempDir, File) {
@@ -242,5 +288,49 @@ mod tests {
         .unwrap();
         assert!(list(&directory).is_err());
         assert!(write_new(&directory, OsStr::new("generation.json"), b"{}").is_err());
+    }
+
+    #[test]
+    fn write_new_returns_the_published_descriptor_at_offset_zero() {
+        let (temporary, directory) = root();
+        let file = write_new(&directory, OsStr::new("generation.json"), b"config").unwrap();
+        let opened = validate_open_regular(&file).unwrap();
+        let linked = statat(
+            &directory,
+            OsStr::new("generation.json"),
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+        assert_eq!(opened.st_dev, linked.st_dev);
+        assert_eq!(opened.st_ino, linked.st_ino);
+        let mut contents = Vec::new();
+        (&file).read_to_end(&mut contents).unwrap();
+        assert_eq!(contents, b"config");
+        drop(file);
+        assert_eq!(
+            std::fs::read(temporary.path().join("generation.json")).unwrap(),
+            b"config"
+        );
+    }
+
+    #[test]
+    fn write_new_rejects_post_publish_swap_without_deleting_replacement() {
+        let (temporary, directory) = root();
+        let path = temporary.path().join("generation.json");
+        set_after_publish_hook({
+            let path = path.clone();
+            move || {
+                let saved = temporary.path().join("published-original");
+                std::fs::rename(&path, saved).unwrap();
+                std::fs::write(&path, b"replacement").unwrap();
+                std::fs::set_permissions(
+                    &path,
+                    std::os::unix::fs::PermissionsExt::from_mode(0o600),
+                )
+                .unwrap();
+            }
+        });
+        assert!(write_new(&directory, OsStr::new("generation.json"), b"config").is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"replacement");
     }
 }

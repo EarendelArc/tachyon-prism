@@ -2456,7 +2456,7 @@ fn validate_xray_config_lease(
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
-    if let Some(work_dir) = binary.parent() {
+    if let Some(work_dir) = generation_config_work_dir(binary, config.path()) {
         command.current_dir(work_dir);
     }
     hide_command_window(&mut command);
@@ -2583,6 +2583,16 @@ fn validation_command_line(binary: &Path, args_before_config: &[&str], config: &
         .map(|part| quote_command_part(&part))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(unix)]
+fn generation_config_work_dir<'a>(binary: &'a Path, _config: &'a Path) -> Option<&'a Path> {
+    binary.parent()
+}
+
+#[cfg(not(unix))]
+fn generation_config_work_dir<'a>(binary: &'a Path, config: &'a Path) -> Option<&'a Path> {
+    config.parent().or_else(|| binary.parent())
 }
 
 fn preflight_command_line(binary: &Path, config: &Path) -> String {
@@ -8098,7 +8108,7 @@ impl ManagedProcess {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         let work_dir = if secure_config.is_some() {
-            binary.parent()
+            generation_config_work_dir(&binary, config_status_path)
         } else {
             config_status_path.parent().or_else(|| binary.parent())
         };
@@ -12037,6 +12047,28 @@ stat: <
         assert_eq!(
             XRAY_TEST_CONFIG_ARGS,
             ["run", "-test", "-format", "json", "-config"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generation_process_cwd_uses_binary_parent_for_unix_fd_delivery() {
+        let binary = Path::new("/opt/tachyon/bin/xray");
+        let config = Path::new("/home/user/.config/tachyon/generation.json");
+        assert_eq!(
+            generation_config_work_dir(binary, config),
+            Some(Path::new("/opt/tachyon/bin"))
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn generation_process_cwd_uses_config_parent_on_windows() {
+        let binary = Path::new(r"C:\Program Files\Tachyon\xray.exe");
+        let config = Path::new(r"C:\Users\Test\AppData\Tachyon\generation.json");
+        assert_eq!(
+            generation_config_work_dir(binary, config),
+            Some(Path::new(r"C:\Users\Test\AppData\Tachyon"))
         );
     }
 

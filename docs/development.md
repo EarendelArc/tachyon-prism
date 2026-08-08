@@ -125,14 +125,16 @@ files fail closed. Rebinding the visible root path cannot redirect these
 operations to the replacement directory.
 
 The generation config is retained as a verified read-only descriptor. Xray
-validation, candidate start, and rollback inherit only a fixed child descriptor
-and receive `/dev/fd/198` through `-config` on Unix. The display path is
-diagnostic metadata and is never the child delivery authority. The source and
-root bindings stay locked until spawn identity is reverified; a failed
-post-spawn verification terminates and reaps the child. Tests deterministically
-swap and restore the root after initial verification, assert zero replacement
-directory changes across stage/sweep/stale-delete/release and child reads, and
-cover close-on-exec with a real long-lived fork/exec child.
+validation, candidate start, and rollback use a fixed child descriptor and
+receive `/dev/fd/198` through `-config` on Unix. Generation-owned descriptors
+are opened with close-on-exec semantics; this is not a claim that unrelated
+descriptors in the process are globally closed. The display path is diagnostic
+metadata and is never the child delivery authority. The source and root
+bindings stay locked until spawn identity is reverified; a failed post-spawn
+verification terminates and reaps the child. Tests deterministically swap and
+restore the root after initial verification, assert zero replacement directory
+changes across stage/sweep/stale-delete/release and child reads, and cover
+close-on-exec with a real long-lived fork/exec child.
 
 ### Subscription boundary
 

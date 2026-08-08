@@ -206,6 +206,9 @@ impl ConfigLease {
             let source = self.config_file.as_raw_fd();
             unsafe {
                 command.pre_exec(move || {
+                    if libc::lseek(source, 0, libc::SEEK_SET) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
                     if libc::dup2(source, XRAY_CONFIG_CHILD_FD) < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
@@ -2768,6 +2771,37 @@ mod tests {
         assert!(child.wait().unwrap().success());
         assert!(untouched.load(std::sync::atomic::Ordering::Acquire));
         assert_eq!(fs::read(output).unwrap(), b"config");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn consecutive_validate_then_start_reads_the_generation_from_offset_zero() {
+        use std::process::Stdio;
+
+        let parent = tempfile::tempdir().unwrap();
+        let store = GenerationStore::new(parent.path().join("generations"));
+        let mut runtime = GenerationRuntime::default();
+        select(&mut runtime, "A", 1);
+        let lease = store.stage(&runtime.begin_apply().unwrap()).unwrap();
+
+        for phase in ["validate", "start"] {
+            let output = parent.path().join(format!("{phase}-config.json"));
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", "cat \"$1\" > \"$2\"", "tachyon-config-reader"])
+                .arg(lease.child_config_path())
+                .arg(&output)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let mut child = lease.spawn_command(&mut command).unwrap();
+            assert!(child.wait().unwrap().success(), "{phase} child failed");
+            assert_eq!(
+                fs::read(output).unwrap(),
+                b"config",
+                "{phase} read a stale offset"
+            );
+        }
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
