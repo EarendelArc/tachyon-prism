@@ -508,8 +508,7 @@ export async function validateXrayConfig(
 
 export async function commitValidatedXrayConfig(
   contents: string,
-  configMode: "managed" | "advanced",
-  advancedConfirmed = false,
+  authorizationTicket?: string,
 ): Promise<ConfigDraftPaths> {
   if (!isTauriRuntime()) {
     return {
@@ -520,8 +519,20 @@ export async function commitValidatedXrayConfig(
   }
   return invokeDesktop<ConfigDraftPaths>("commit_validated_xray_config", {
     contents,
-    configMode,
-    advancedConfirmed,
+    authorizationTicket: authorizationTicket ?? null,
+  });
+}
+
+export async function requestAdvancedXrayAuthorization(
+  contents: string,
+  language: string,
+): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return "preview-native-confirmation";
+  }
+  return invokeDesktop<string | null>("request_advanced_xray_authorization", {
+    contents,
+    language,
   });
 }
 
@@ -578,6 +589,7 @@ export interface TachyonCorePreflightMessages {
   passed: string;
   startBlocked: string;
   unknownCheck: string;
+  upgradeRequired: string;
   warnings: string;
   xrayIndependent: string;
 }
@@ -602,11 +614,12 @@ const defaultTachyonCorePreflightMessages: TachyonCorePreflightMessages = {
   checkSkipped: "{label}: skipped",
   checkWarning: "{label}: requires attention",
   diagnosticDetails: "Diagnostic details: {details}",
-  fallback: "Core version lacks preflight; validate only",
+  fallback: "Core version lacks required preflight and must be upgraded",
   issues: "Tachyon Core preflight found readiness issues: {details}",
   passed: "Tachyon Core preflight passed",
   startBlocked: "Tachyon Core game acceleration cannot start: {details}.",
   unknownCheck: "Core check {code}",
+  upgradeRequired: "Tachyon Core must be upgraded before game acceleration can start.",
   warnings: "Tachyon Core preflight completed with warnings: {details}",
   xrayIndependent: "Xray local proxy can still run independently.",
 };
@@ -741,20 +754,24 @@ export function tachyonCorePreflightStartBlockReason(
   if (!result) {
     return null;
   }
+  if (!result.supported) {
+    return `${messages.upgradeRequired} ${messages.xrayIndependent}`;
+  }
+  if (result.ok) {
+    return null;
+  }
   const blockingChecks = result.checks.filter(
     (check) =>
       tachyonCoreStartBlockCodes.has(check.code.toUpperCase()) &&
       ["error", "failed", "fail"].includes(check.status.toLowerCase()),
   );
-  if (blockingChecks.length === 0) {
-    return null;
-  }
+  const summaryChecks = blockingChecks.length > 0 ? blockingChecks : result.checks;
   const summary = `${preflightMessage(messages.startBlocked, {
-    details: preflightCheckSummary(blockingChecks, messages),
+    details: preflightCheckSummary(summaryChecks, messages) || messages.capabilityUnavailable,
   })} ${messages.xrayIndependent}`;
   return appendPreflightDiagnostics(
     summary,
-    preflightDiagnosticSummary(blockingChecks),
+    preflightDiagnosticSummary(summaryChecks, result.error),
     messages,
   );
 }

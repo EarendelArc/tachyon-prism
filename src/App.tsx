@@ -25,7 +25,7 @@ import {
 } from "./domain/diagnostics";
 import {
   getConfigPaths,
-  saveConfigDraft,
+  commitValidatedTachyonCoreConfig,
   type ConfigDraftPaths,
 } from "./domain/desktopConfig";
 import type { GameProfile, LauncherSettings } from "./domain/gameProfiles";
@@ -57,6 +57,7 @@ import {
   getSystemProxyStatus,
   getXrayTrafficStats,
   commitValidatedXrayConfig,
+  requestAdvancedXrayAuthorization,
   disableSystemProxy,
   enableSystemProxy,
   installLatestTachyonCore,
@@ -222,7 +223,6 @@ interface XrayProbeStatus {
 }
 
 interface XrayAdvancedEditorState {
-  confirmed: boolean;
   enabled: boolean;
   mode: XrayConfigMode;
   text: string;
@@ -442,9 +442,9 @@ const zh = {
   advancedXrayConfig: "高级 Xray JSON",
   advancedXrayDescription: "直接编辑完整配置；未知字段与未来协议保持原样。保存和启动前会运行 Xray 配置测试。",
   advancedXrayEnable: "使用高级完整配置",
-  advancedXrayConfirm: "我确认此完整 JSON 来自本地可信编辑，并理解它可控制 Xray 的监听、日志、API 与路由。",
-  advancedXrayConfirmationRequired: "请先确认高级完整 JSON 的安全提示；内容改变后需要重新确认。",
-  advancedXraySecurityMode: "本地高级模式：完整配置仅在明确确认后提交。远程订阅永远不能进入此模式。",
+  advancedXrayConfirm: "保存或启动时，Prism 会显示系统原生确认对话框；取消、超时、内容变化或重复使用授权都会失败。",
+  advancedXrayConfirmationRequired: "高级 Xray 配置未获得本次原生确认授权。",
+  advancedXraySecurityMode: "本地高级模式：Rust 仅在原生确认后签发短时单次授权。远程订阅永远不能进入此模式。",
   xrayManagedConfigMode: "节点托管模式",
   xrayRawConfigMode: "原始配置模式",
   xrayRawModeDescription: "原始配置保持自身路由语义；当前节点选择不会控制其默认出口。",
@@ -719,7 +719,7 @@ const zh = {
   xrayIndependentDetail: "即使 Tachyon Core 游戏加速被阻止，Xray 本地 HTTP/SOCKS 代理仍可独立使用。",
   gameAccelerationStartable: "游戏加速可启动",
   preflightNoStartupBlocker: "Tachyon Core 启动前检查未发现 TUN、Wintun 或选择性路由阻断项。",
-  preflightFallbackUnconfirmed: "Core 版本不支持启动前检查；空游戏路由仅验证配置，无法确认 TUN/Wintun 就绪状态。",
+  preflightFallbackUnconfirmed: "Core 版本缺少必需的启动前检查；必须升级后才能启动游戏加速。",
   preflightNotRun: "尚未运行启动前检查；启动 Tachyon Core 前会先检查。",
   gameProfilesReadiness: "游戏规则",
   gameProfilesEnabled: "已启用 {count} 条游戏规则。",
@@ -888,9 +888,9 @@ const en: typeof zh = {
   advancedXrayConfig: "Advanced Xray JSON",
   advancedXrayDescription: "Edit the complete config directly. Unknown fields and future protocols remain untouched. Xray config-test runs before save and start.",
   advancedXrayEnable: "Use advanced complete config",
-  advancedXrayConfirm: "I confirm this complete JSON is locally trusted and understand that it can control Xray listeners, logs, API, and routing.",
-  advancedXrayConfirmationRequired: "Confirm the advanced JSON safety notice first. Any content change requires confirmation again.",
-  advancedXraySecurityMode: "Local advanced mode: the complete config is committed only after explicit confirmation. Remote subscriptions can never enter this mode.",
+  advancedXrayConfirm: "On save or start, Prism opens a native system confirmation dialog. Cancellation, expiry, content changes, and authorization replay all fail.",
+  advancedXrayConfirmationRequired: "This advanced Xray config did not receive native confirmation authorization.",
+  advancedXraySecurityMode: "Local advanced mode: Rust issues a short-lived single-use authorization only after native confirmation. Remote subscriptions can never enter this mode.",
   xrayManagedConfigMode: "Node-managed mode",
   xrayRawConfigMode: "Raw config mode",
   xrayRawModeDescription: "Raw config keeps its own routing semantics; the selected node does not control its default outbound.",
@@ -1165,7 +1165,7 @@ const en: typeof zh = {
   xrayIndependentDetail: "Xray local HTTP/SOCKS proxy can be usable even when Tachyon Core game acceleration is blocked.",
   gameAccelerationStartable: "Game acceleration startable",
   preflightNoStartupBlocker: "No preflight TUN, Wintun, or selective-route startup blocker detected for Tachyon Core.",
-  preflightFallbackUnconfirmed: "Core version lacks preflight; empty game routes use validate-only fallback without confirming TUN/Wintun readiness.",
+  preflightFallbackUnconfirmed: "Core lacks required preflight and must be upgraded before game acceleration can start.",
   preflightNotRun: "Preflight has not run yet; Start will check before launching Tachyon Core.",
   gameProfilesReadiness: "Game profiles",
   gameProfilesEnabled: "{count} game profile(s) enabled.",
@@ -1367,7 +1367,7 @@ function saveRoutingMode(mode: XrayRoutingMode): void {
 
 function xrayAdvancedEditorFromStored(value: unknown): XrayAdvancedEditorState {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return { confirmed: false, enabled: false, mode: "managed", text: "" };
+    return { enabled: false, mode: "managed", text: "" };
   }
   const stored = value as Partial<XrayAdvancedEditorState>;
   const mode: XrayConfigMode =
@@ -1377,7 +1377,6 @@ function xrayAdvancedEditorFromStored(value: unknown): XrayAdvancedEditorState {
         ? "raw"
         : "managed";
   return {
-    confirmed: false,
     enabled: mode === "raw",
     mode,
     text: typeof stored.text === "string" ? stored.text : "",
@@ -1795,7 +1794,7 @@ export function App() {
   );
   const [routingMode, setRoutingMode] = useState<XrayRoutingMode>(loadRoutingMode);
   const [xrayAdvancedEditor, setXrayAdvancedEditor] =
-    useState<XrayAdvancedEditorState>({ confirmed: false, enabled: false, mode: "managed", text: "" });
+    useState<XrayAdvancedEditorState>({ enabled: false, mode: "managed", text: "" });
   const [secureStorageReady, setSecureStorageReady] = useState(false);
   const [canonicalXrayText, setCanonicalXrayText] = useState("");
   const [canonicalXrayLoadState, setCanonicalXrayLoadState] =
@@ -2620,7 +2619,6 @@ export function App() {
   function setAdvancedXrayEnabled(enabled: boolean) {
     setXrayAdvancedEditor((current) => ({
       ...current,
-      confirmed: false,
       enabled,
       mode: enabled ? "raw" : "managed",
       text: initializeAdvancedXrayDraftText({
@@ -2636,15 +2634,10 @@ export function App() {
   function updateAdvancedXrayText(text: string) {
     setXrayAdvancedEditor((current) => ({
       ...current,
-      confirmed: false,
       enabled: true,
       mode: "raw",
       text,
     }));
-  }
-
-  function setAdvancedXrayConfirmed(confirmed: boolean) {
-    setXrayAdvancedEditor((current) => ({ ...current, confirmed }));
   }
 
   async function importAdvancedXray(file: File | undefined) {
@@ -2656,7 +2649,6 @@ export function App() {
       parseXrayConfigText(text, language);
       setXrayAdvancedEditor((current) => ({
         ...current,
-        confirmed: false,
         enabled: true,
         mode: "raw",
         text,
@@ -2684,7 +2676,6 @@ export function App() {
     }
     setXrayAdvancedEditor((current) => ({
       ...current,
-      confirmed: false,
       enabled: true,
       mode: "raw",
       text,
@@ -2859,13 +2850,17 @@ export function App() {
     }
     parseXrayConfigText(drafts.xray, language);
     const advanced = xrayAdvancedEditor.mode === "raw";
-    if (advanced && !xrayAdvancedEditor.confirmed) {
-      throw new Error(ui.advancedXrayConfirmationRequired);
+    let authorizationTicket: string | undefined;
+    if (advanced) {
+      authorizationTicket =
+        (await requestAdvancedXrayAuthorization(drafts.xray, language)) ?? undefined;
+      if (!authorizationTicket) {
+        throw new Error(ui.advancedXrayConfirmationRequired);
+      }
     }
     const paths = await commitValidatedXrayConfig(
       drafts.xray,
-      advanced ? "advanced" : "managed",
-      advanced && xrayAdvancedEditor.confirmed,
+      authorizationTicket,
     );
     setCanonicalXrayText(drafts.xray);
     setConfigPaths(paths);
@@ -2891,7 +2886,7 @@ export function App() {
       if (!drafts.core) {
         throw new Error(drafts.coreError || ui.coreConfigDraftUnavailable);
       }
-      const paths = await saveConfigDraft("core", drafts.core);
+      const paths = await commitValidatedTachyonCoreConfig(drafts.core);
       setConfigPaths(paths);
       return paths;
     }
@@ -2903,11 +2898,11 @@ export function App() {
       return commitXrayDraft();
     }
     if (!drafts.xray) {
-      const paths = await saveConfigDraft("core", drafts.core);
+      const paths = await commitValidatedTachyonCoreConfig(drafts.core);
       setConfigPaths(paths);
       return paths;
     }
-    await saveConfigDraft("core", drafts.core);
+    await commitValidatedTachyonCoreConfig(drafts.core);
     return commitXrayDraft();
   }
 
@@ -4082,7 +4077,6 @@ export function App() {
             onImportAdvancedXray={(file) => void importAdvancedXray(file)}
             onRestoreAdvancedXray={restoreAdvancedXray}
             onSetAdvancedXrayEnabled={setAdvancedXrayEnabled}
-            onSetAdvancedXrayConfirmed={setAdvancedXrayConfirmed}
             onUpdateAdvancedXrayText={updateAdvancedXrayText}
             onUseManaged={(kind) => void useManagedBinary(kind)}
             onValidateConfigs={() => void validateAllConfigs()}
@@ -5162,7 +5156,6 @@ function SettingsView({
   onImportAdvancedXray,
   onRestoreAdvancedXray,
   onSetAdvancedXrayEnabled,
-  onSetAdvancedXrayConfirmed,
   onUpdateAdvancedXrayText,
   onUseManaged,
   onValidateConfigs,
@@ -5241,7 +5234,6 @@ function SettingsView({
   onImportAdvancedXray: (file: File | undefined) => void;
   onRestoreAdvancedXray: (useGenerated: boolean) => void;
   onSetAdvancedXrayEnabled: (enabled: boolean) => void;
-  onSetAdvancedXrayConfirmed: (confirmed: boolean) => void;
   onUpdateAdvancedXrayText: (text: string) => void;
   onUseManaged: (kind: ManagedBinaryKind) => void;
   onValidateConfigs: () => void;
@@ -6041,17 +6033,9 @@ function SettingsView({
                       <p className="field-hint" data-xray-advanced-security-mode>
                         {ui.advancedXraySecurityMode}
                       </p>
-                      <label className="mini-check xray-advanced-confirmation">
-                        <input
-                          checked={xrayAdvancedEditor.confirmed}
-                          data-xray-advanced-confirmation
-                          type="checkbox"
-                          onChange={(event) =>
-                            onSetAdvancedXrayConfirmed(event.currentTarget.checked)
-                          }
-                        />
+                      <p className="field-hint" data-xray-native-confirmation>
                         {ui.advancedXrayConfirm}
-                      </label>
+                      </p>
                     </>
                   ) : null}
                   {canonicalXrayReadError ? (

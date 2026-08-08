@@ -5,6 +5,7 @@ import {
   commitValidatedXrayConfig,
   getXrayGenerationStatus,
   readCanonicalXrayConfig,
+  requestAdvancedXrayAuthorization,
   tachyonCorePreflightCheckMessage,
   tachyonCorePreflightFallbackMessage,
   tachyonCorePreflightReadinessMessage,
@@ -40,12 +41,11 @@ describe("commitValidatedXrayConfig", () => {
     invokeMock.mockResolvedValueOnce(paths);
     const contents = '{"inbounds":[],"outbounds":[]}';
 
-    await expect(commitValidatedXrayConfig(contents, "managed")).resolves.toEqual(paths);
+    await expect(commitValidatedXrayConfig(contents)).resolves.toEqual(paths);
 
     expect(invokeMock).toHaveBeenCalledWith("commit_validated_xray_config", {
       contents,
-      configMode: "managed",
-      advancedConfirmed: false,
+      authorizationTicket: null,
     });
     expect(invokeMock).toHaveBeenCalledTimes(1);
   });
@@ -54,7 +54,7 @@ describe("commitValidatedXrayConfig", () => {
     root.isTauri = true;
     invokeMock.mockRejectedValueOnce(new Error("Xray semantic validation failed"));
 
-    await expect(commitValidatedXrayConfig('{"outbounds":[]}', "managed")).rejects.toThrow(
+    await expect(commitValidatedXrayConfig('{"outbounds":[]}')).rejects.toThrow(
       "Xray semantic validation failed",
     );
     expect(invokeMock).toHaveBeenCalledTimes(1);
@@ -64,23 +64,29 @@ describe("commitValidatedXrayConfig", () => {
   });
 
   it("keeps preview mode side-effect free", async () => {
-    await expect(commitValidatedXrayConfig('{"outbounds":[]}', "managed")).resolves.toMatchObject({
+    await expect(commitValidatedXrayConfig('{"outbounds":[]}')).resolves.toMatchObject({
       xrayConfigPath: "Preview mode / xray-client.json",
     });
 
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it("marks only explicitly confirmed local advanced JSON as advanced", async () => {
+  it("passes only an opaque native authorization ticket for advanced JSON", async () => {
     root.isTauri = true;
+    invokeMock.mockResolvedValueOnce("opaque-native-ticket");
     invokeMock.mockResolvedValueOnce({ xrayConfigPath: "advanced.json" });
 
-    await commitValidatedXrayConfig('{"futureLocalControl":{"enabled":true}}', "advanced", true);
+    const contents = '{"futureLocalControl":{"enabled":true}}';
+    const ticket = await requestAdvancedXrayAuthorization(contents, "en");
+    await commitValidatedXrayConfig(contents, ticket ?? undefined);
 
-    expect(invokeMock).toHaveBeenCalledWith("commit_validated_xray_config", {
-      contents: '{"futureLocalControl":{"enabled":true}}',
-      configMode: "advanced",
-      advancedConfirmed: true,
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "request_advanced_xray_authorization", {
+      contents,
+      language: "en",
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "commit_validated_xray_config", {
+      contents,
+      authorizationTicket: "opaque-native-ticket",
     });
   });
 });
@@ -294,7 +300,7 @@ describe("tachyonCore preflight helpers", () => {
     expect(tachyonCorePreflightStartBlockReason(result)).toContain("Xray local proxy can still run independently");
   });
 
-  it("falls back to validate-only mode for old Core without blocking startup", () => {
+  it("requires upgrading an old Core even when legacy validation succeeds", () => {
     const result: TachyonCorePreflightResult = {
       checks: [],
       command: "tachyon-core preflight --config client.json --json",
@@ -310,9 +316,13 @@ describe("tachyonCore preflight helpers", () => {
       supported: false,
     };
 
-    expect(tachyonCorePreflightFallbackMessage(result)).toBe("Core version lacks preflight; validate only");
-    expect(tachyonCorePreflightReadinessMessage(result)).toBe("Core version lacks preflight; validate only");
-    expect(tachyonCorePreflightStartBlockReason(result)).toBeNull();
+    expect(tachyonCorePreflightFallbackMessage(result)).toBe(
+      "Core version lacks required preflight and must be upgraded",
+    );
+    expect(tachyonCorePreflightReadinessMessage(result)).toBe(
+      "Core version lacks required preflight and must be upgraded",
+    );
+    expect(tachyonCorePreflightStartBlockReason(result)).toContain("must be upgraded");
   });
 
   it("blocks targeted startup errors even if overall is not normalized to error", () => {
@@ -400,9 +410,7 @@ describe("tachyonCore preflight helpers", () => {
     expect(tachyonCorePreflightReadinessMessage(result)).toContain(
       "Selective game routes: not ready",
     );
-    expect(tachyonCorePreflightStartBlockReason(result)).toContain(
-      "game acceleration cannot start",
-    );
+    expect(tachyonCorePreflightStartBlockReason(result)).toContain("must be upgraded");
   });
 
   it("keeps non-empty English Core diagnostics out of zh-CN primary summaries", () => {

@@ -13,29 +13,14 @@ export async function getConfigPaths(): Promise<ConfigDraftPaths> {
   return invokeDesktop<ConfigDraftPaths>("config_paths");
 }
 
-export async function saveConfigDrafts(
-  coreJson: string,
-  xrayJson: string,
+export async function commitValidatedTachyonCoreConfig(
+  contents: string,
 ): Promise<ConfigDraftPaths> {
   if (!isTauriRuntime()) {
     return previewConfigPaths();
   }
-  return invokeDesktop<ConfigDraftPaths>("save_config_drafts", {
-    coreJson,
-    xrayJson,
-  });
-}
-
-export async function saveConfigDraft(
-  kind: "core" | "xray",
-  json: string,
-): Promise<ConfigDraftPaths> {
-  if (!isTauriRuntime()) {
-    return previewConfigPaths();
-  }
-  return invokeDesktop<ConfigDraftPaths>("save_config_draft", {
-    kind,
-    json,
+  return invokeDesktop<ConfigDraftPaths>("commit_validated_tachyon_core_config", {
+    contents,
   });
 }
 

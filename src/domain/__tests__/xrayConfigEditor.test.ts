@@ -14,7 +14,7 @@ const stylesSource = readFileSync(
 describe("advanced Xray JSON UI wiring", () => {
   it("exposes edit, import, export, and both restore paths", () => {
     expect(appSource).toContain("data-xray-advanced-toggle");
-    expect(appSource).toContain("data-xray-advanced-confirmation");
+    expect(appSource).toContain("data-xray-native-confirmation");
     expect(appSource).toContain('data-xray-json-import');
     expect(appSource).toContain(
       'data-xray-advanced-editor={xrayAdvancedEditor.mode === "raw" ? "enabled" : "disabled"}',
@@ -46,10 +46,13 @@ describe("advanced Xray JSON UI wiring", () => {
     )?.[0];
 
     expect(commit).toContain("parseXrayConfigText(drafts.xray, language)");
+    expect(commit).toContain("requestAdvancedXrayAuthorization");
     expect(commit).toContain("advancedXrayConfirmationRequired");
     expect(commit).toContain("const paths = await commitValidatedXrayConfig(");
     expect(commit).toContain('const advanced = xrayAdvancedEditor.mode === "raw"');
-    expect(commit).toContain('advanced ? "advanced" : "managed"');
+    expect(commit).toContain("authorizationTicket");
+    expect(commit).not.toContain("advancedConfirmed");
+    expect(commit).not.toContain("configMode");
     expect(commit).toContain("setCanonicalXrayText(drafts.xray)");
     expect(commit).toContain("setConfigPaths(paths)");
     expect(commit).not.toContain('saveConfigDraft("xray"');
@@ -81,7 +84,7 @@ describe("advanced Xray JSON UI wiring", () => {
 
     expect(state).toContain("enabled: boolean");
     expect(state).toContain("text: string");
-    expect(state).toContain("confirmed: boolean");
+    expect(state).not.toContain("confirmed: boolean");
     expect(state).not.toContain("lastValid");
     expect(loader).not.toContain("lastValid");
     expect(appSource).toContain("secureVaultSections.xrayAdvancedEditor");

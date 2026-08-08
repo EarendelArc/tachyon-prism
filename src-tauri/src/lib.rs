@@ -4,6 +4,7 @@ use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
@@ -15,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use ureq::http::{Method, Request, Uri};
 
 #[cfg(unix)]
@@ -363,6 +365,7 @@ const WINTUN_SHA256: &str = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c7
 const PREFLIGHT_OUTPUT_LIMIT_BYTES: usize = 8 * 1024;
 // The canonical Xray config read and commit limits are encoded UTF-8 bytes, not characters.
 const CANONICAL_XRAY_CONFIG_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+const CANONICAL_TACHYON_CONFIG_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 const XRAY_DIAGNOSTIC_LIMIT_BYTES: usize = 8 * 1024;
 const PROCESS_LOG_TAIL_BYTES: usize = 32 * 1024;
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -428,11 +431,11 @@ struct SteamScanResult {
 
 struct RuntimeState {
     xray: Mutex<XrayCoordinator>,
+    advanced_xray_authorizations: Mutex<AdvancedXrayAuthorizations>,
     window_restore_bounds: Mutex<Option<WindowBounds>>,
 }
 
-#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum XrayConfigTrustMode {
     Managed,
     Advanced,
@@ -442,6 +445,37 @@ enum XrayConfigTrustMode {
 struct XrayConfigAuthorization {
     digest: [u8; 32],
     mode: XrayConfigTrustMode,
+}
+
+const ADVANCED_XRAY_AUTHORIZATION_TTL: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum XrayAuthorizationOperation {
+    CommitAdvancedConfig,
+    #[cfg(test)]
+    ValidateAdvancedConfig,
+}
+
+struct AdvancedXrayAuthorizationTicket {
+    config_digest: [u8; 32],
+    expires_at: Instant,
+    operation: XrayAuthorizationOperation,
+    session_id: [u8; 32],
+    window_label: String,
+}
+
+struct AdvancedXrayAuthorizations {
+    session_id: [u8; 32],
+    tickets: HashMap<String, AdvancedXrayAuthorizationTicket>,
+}
+
+impl Default for AdvancedXrayAuthorizations {
+    fn default() -> Self {
+        Self {
+            session_id: rand::random(),
+            tickets: HashMap::new(),
+        }
+    }
 }
 
 // Lock order is always XrayCoordinator first, then SystemProxyRuntime's internal lock.
@@ -702,6 +736,7 @@ impl Default for RuntimeState {
     fn default() -> Self {
         Self {
             xray: Mutex::new(XrayCoordinator::default()),
+            advanced_xray_authorizations: Mutex::new(AdvancedXrayAuthorizations::default()),
             window_restore_bounds: Mutex::new(None),
         }
     }
@@ -1705,46 +1740,29 @@ fn read_optional_utf8_file_bounded(
 }
 
 #[tauri::command]
-fn save_config_drafts(
+fn commit_validated_tachyon_core_config(
     app: tauri::AppHandle,
-    core_json: String,
-    xray_json: String,
+    contents: String,
 ) -> Result<ConfigDraftPaths, String> {
-    ensure_json_object("Core config", &core_json)?;
-    ensure_json_object("Xray config", &xray_json)?;
-
-    let paths = draft_paths(&app)?;
-    let config_dir = PathBuf::from(&paths.config_dir);
-    fs::create_dir_all(&config_dir).map_err(|err| format!("create config directory: {err}"))?;
-
-    write_atomic(Path::new(&paths.core_config_path), &core_json)?;
-    write_atomic(Path::new(&paths.xray_config_path), &xray_json)?;
-
-    Ok(paths)
-}
-
-#[tauri::command]
-fn save_config_draft(
-    app: tauri::AppHandle,
-    kind: String,
-    json: String,
-) -> Result<ConfigDraftPaths, String> {
-    let paths = draft_paths(&app)?;
-    let config_dir = PathBuf::from(&paths.config_dir);
-    fs::create_dir_all(&config_dir).map_err(|err| format!("create config directory: {err}"))?;
-
-    match kind.trim().to_ascii_lowercase().as_str() {
-        "core" | "tachyoncore" | "tachyon-core" => {
-            ensure_json_object("Core config", &json)?;
-            write_atomic(Path::new(&paths.core_config_path), &json)?;
-        }
-        "xray" | "xray-core" => {
-            ensure_json_object("Xray config", &json)?;
-            write_atomic(Path::new(&paths.xray_config_path), &json)?;
-        }
-        other => return Err(format!("unknown config draft kind: {other}")),
+    ensure_json_object("Tachyon Core config", &contents)?;
+    if contents.len() > CANONICAL_TACHYON_CONFIG_LIMIT_BYTES {
+        return Err("Tachyon Core config exceeds the managed size limit".to_string());
     }
-
+    let paths = draft_paths(&app)?;
+    let settings = load_runtime_settings(&app)?;
+    let binary = PathBuf::from(clean_path_input(&settings.tachyon_core_binary_path));
+    let canonical = PathBuf::from(&paths.core_config_path);
+    let candidate = SyncedTempFile::create(&canonical, &contents)?;
+    let preflight = match preflight_tachyon_core_config_file(&binary, &candidate.path) {
+        Ok(preflight) => preflight,
+        Err(error) => return Err(candidate.cleanup_after_failure(error)),
+    };
+    if let Err(error) = ensure_tachyon_core_preflight_allows_start(&preflight) {
+        return Err(candidate.cleanup_after_failure(error));
+    }
+    if let Err(error) = PlatformAtomicFileReplacer.replace(&candidate.path, &canonical) {
+        return Err(candidate.cleanup_after_failure(error));
+    }
     Ok(paths)
 }
 
@@ -2147,23 +2165,87 @@ fn validate_xray_config(
 }
 
 #[tauri::command]
-fn commit_validated_xray_config(
-    app: tauri::AppHandle,
+fn request_advanced_xray_authorization(
+    window: tauri::WebviewWindow,
     state: tauri::State<RuntimeState>,
     contents: String,
-    config_mode: XrayConfigTrustMode,
-    advanced_confirmed: bool,
+    language: String,
+) -> Result<Option<String>, String> {
+    ensure_json_object("Advanced Xray config", &contents)?;
+    if contents.len() > CANONICAL_XRAY_CONFIG_LIMIT_BYTES {
+        return Err("advanced Xray config exceeds the managed size limit".to_string());
+    }
+    let chinese = language.trim().to_ascii_lowercase().starts_with("zh");
+    let (title, message, approve, cancel) = if chinese {
+        (
+            "确认高级 Xray 配置",
+            "此本地完整 JSON 可以控制 Xray 的监听、日志、API、反向代理和路由。仅在你已检查当前内容并信任其来源时继续。",
+            "确认并授权",
+            "取消",
+        )
+    } else {
+        (
+            "Confirm advanced Xray config",
+            "This local complete JSON can control Xray listeners, logs, API, reverse proxy, and routing. Continue only after reviewing the current content and trusting its source.",
+            "Confirm and authorize",
+            "Cancel",
+        )
+    };
+    let approved = window
+        .dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            approve.to_string(),
+            cancel.to_string(),
+        ))
+        .blocking_show();
+    if !approved {
+        return Ok(None);
+    }
+    let digest = sha256_bytes(contents.as_bytes());
+    let mut authorizations = state
+        .advanced_xray_authorizations
+        .lock()
+        .map_err(|_| "lock advanced Xray authorization state failed".to_string())?;
+    Ok(Some(issue_advanced_xray_authorization(
+        &mut authorizations,
+        digest,
+        window.label(),
+        Instant::now(),
+    )))
+}
+
+#[tauri::command]
+fn commit_validated_xray_config(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: tauri::State<RuntimeState>,
+    contents: String,
+    authorization_ticket: Option<String>,
 ) -> Result<ConfigDraftPaths, String> {
     let settings = load_runtime_settings(&app)?;
     let paths = draft_paths(&app)?;
     let binary = PathBuf::from(clean_path_input(&settings.xray_binary_path));
     let canonical = PathBuf::from(&paths.xray_config_path);
-    let authorization = authorize_xray_config(
-        contents.as_bytes(),
-        config_mode,
-        advanced_confirmed,
-        &settings,
-    )?;
+    let config_mode = if let Some(ticket) = authorization_ticket {
+        let mut authorizations = state
+            .advanced_xray_authorizations
+            .lock()
+            .map_err(|_| "lock advanced Xray authorization state failed".to_string())?;
+        consume_advanced_xray_authorization(
+            &mut authorizations,
+            &ticket,
+            sha256_bytes(contents.as_bytes()),
+            window.label(),
+            Instant::now(),
+        )?;
+        XrayConfigTrustMode::Advanced
+    } else {
+        XrayConfigTrustMode::Managed
+    };
+    let authorization = authorize_xray_config(contents.as_bytes(), config_mode, &settings)?;
     let mut coordinator = state
         .xray
         .lock()
@@ -2590,8 +2672,13 @@ fn preflight_tachyon_core_config_file(
 fn ensure_tachyon_core_preflight_allows_start(
     result: &TachyonCorePreflightResult,
 ) -> Result<(), String> {
-    if result.ok {
+    if result.supported && result.ok {
         Ok(())
+    } else if !result.supported {
+        Err(
+            "Tachyon Core startup requires a newer Core with supported preflight; upgrade Core"
+                .to_string(),
+        )
     } else {
         Err("Tachyon Core preflight blocked startup".to_string())
     }
@@ -7690,20 +7777,66 @@ fn wait_for_readiness(
 fn authorize_xray_config(
     config: &[u8],
     mode: XrayConfigTrustMode,
-    advanced_confirmed: bool,
     settings: &RuntimeSettings,
 ) -> Result<XrayConfigAuthorization, String> {
-    if mode == XrayConfigTrustMode::Advanced && !advanced_confirmed {
-        return Err("advanced Xray config requires explicit local confirmation".to_string());
-    }
     let value: Value = serde_json::from_slice(config)
         .map_err(|_| "Xray config authorization requires a JSON object".to_string())?;
     validate_xray_config_value(&value, mode, settings)?;
-    use sha2::{Digest, Sha256};
     Ok(XrayConfigAuthorization {
-        digest: Sha256::digest(config).into(),
+        digest: sha256_bytes(config),
         mode,
     })
+}
+
+fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).into()
+}
+
+fn issue_advanced_xray_authorization(
+    state: &mut AdvancedXrayAuthorizations,
+    config_digest: [u8; 32],
+    window_label: &str,
+    now: Instant,
+) -> String {
+    state.tickets.retain(|_, ticket| ticket.expires_at > now);
+    let token = rand::random::<[u8; 32]>()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    state.tickets.insert(
+        token.clone(),
+        AdvancedXrayAuthorizationTicket {
+            config_digest,
+            expires_at: now + ADVANCED_XRAY_AUTHORIZATION_TTL,
+            operation: XrayAuthorizationOperation::CommitAdvancedConfig,
+            session_id: state.session_id,
+            window_label: window_label.to_string(),
+        },
+    );
+    token
+}
+
+fn consume_advanced_xray_authorization(
+    state: &mut AdvancedXrayAuthorizations,
+    token: &str,
+    config_digest: [u8; 32],
+    window_label: &str,
+    now: Instant,
+) -> Result<(), String> {
+    let ticket = state
+        .tickets
+        .remove(token)
+        .ok_or_else(|| "advanced Xray authorization is missing or already consumed".to_string())?;
+    if ticket.expires_at <= now
+        || ticket.operation != XrayAuthorizationOperation::CommitAdvancedConfig
+        || ticket.session_id != state.session_id
+        || ticket.window_label != window_label
+        || ticket.config_digest != config_digest
+    {
+        return Err("advanced Xray authorization is invalid or expired".to_string());
+    }
+    Ok(())
 }
 
 fn validate_xray_apply_plan(
@@ -9126,7 +9259,7 @@ mod tests {
     }
 
     #[test]
-    fn advanced_xray_authorization_requires_confirmation_and_preserves_local_json() {
+    fn advanced_xray_authorization_ticket_is_single_use_bound_and_short_lived() {
         const SECRET: &str = "fixture-local-advanced-password";
         let settings = managed_xray_test_settings();
         let config = serde_json::to_vec(&serde_json::json!({
@@ -9134,15 +9267,77 @@ mod tests {
             "reverse": { "bridges": [{ "tag": "locally-authored" }] }
         }))
         .expect("serialize advanced fixture");
+        let digest = sha256_bytes(&config);
+        let now = Instant::now();
+        let mut authorizations = AdvancedXrayAuthorizations::default();
 
+        let accepted = issue_advanced_xray_authorization(&mut authorizations, digest, "main", now);
         assert!(
-            authorize_xray_config(&config, XrayConfigTrustMode::Advanced, false, &settings)
-                .is_err(),
-            "unconfirmed advanced config was authorized"
+            consume_advanced_xray_authorization(
+                &mut authorizations,
+                &accepted,
+                digest,
+                "main",
+                now,
+            )
+            .is_ok(),
+            "fresh native authorization was rejected"
         );
         assert!(
-            authorize_xray_config(&config, XrayConfigTrustMode::Advanced, true, &settings).is_ok(),
-            "confirmed local advanced config was rejected"
+            consume_advanced_xray_authorization(
+                &mut authorizations,
+                &accepted,
+                digest,
+                "main",
+                now,
+            )
+            .is_err(),
+            "advanced authorization replay succeeded"
+        );
+
+        for rejection in ["content", "window", "expiry", "session", "operation"] {
+            let ticket =
+                issue_advanced_xray_authorization(&mut authorizations, digest, "main", now);
+            let mut supplied_digest = digest;
+            let mut supplied_window = "main";
+            let mut supplied_now = now;
+            match rejection {
+                "content" => supplied_digest[0] ^= 1,
+                "window" => supplied_window = "secondary",
+                "expiry" => supplied_now = now + ADVANCED_XRAY_AUTHORIZATION_TTL,
+                "session" => authorizations.session_id[0] ^= 1,
+                "operation" => {
+                    authorizations
+                        .tickets
+                        .get_mut(&ticket)
+                        .expect("issued ticket")
+                        .operation = XrayAuthorizationOperation::ValidateAdvancedConfig;
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                consume_advanced_xray_authorization(
+                    &mut authorizations,
+                    &ticket,
+                    supplied_digest,
+                    supplied_window,
+                    supplied_now,
+                )
+                .is_err(),
+                "invalid advanced authorization was accepted"
+            );
+            assert!(
+                !authorizations.tickets.contains_key(&ticket),
+                "rejected authorization was not consumed"
+            );
+            if rejection == "session" {
+                authorizations.session_id[0] ^= 1;
+            }
+        }
+
+        assert!(
+            authorize_xray_config(&config, XrayConfigTrustMode::Advanced, &settings).is_ok(),
+            "authorized local advanced config was rejected"
         );
     }
 
@@ -12968,7 +13163,7 @@ stat: <
     }
 
     #[test]
-    fn legacy_core_preflight_keeps_empty_game_routes_in_validate_only_mode() {
+    fn legacy_core_preflight_with_empty_routes_is_still_blocked_from_startup() {
         let output = test_output(2, b"", b"error: unrecognized subcommand 'preflight'\n");
         let fallback = tachyon_core_preflight_result(
             "tachyon-core preflight --config client.json --json".to_string(),
@@ -12981,6 +13176,41 @@ stat: <
         assert!(result.ok);
         assert_eq!(result.overall, "unsupported");
         assert!(result.checks.is_empty());
+        let error = ensure_tachyon_core_preflight_allows_start(&result);
+        assert!(error.is_err(), "unsupported Core preflight allowed startup");
+    }
+
+    #[test]
+    fn production_start_gate_requires_supported_and_successful_preflight() {
+        let mut result = TachyonCorePreflightResult {
+            supported: true,
+            ok: true,
+            overall: "ok".to_string(),
+            command: "tachyon-core preflight --config client.json --json".to_string(),
+            exit_code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            checks: Vec::new(),
+            structured_report: Value::Null,
+            error: None,
+        };
+        assert!(
+            ensure_tachyon_core_preflight_allows_start(&result).is_ok(),
+            "supported successful preflight was rejected"
+        );
+        result.ok = false;
+        assert!(
+            ensure_tachyon_core_preflight_allows_start(&result).is_err(),
+            "failed preflight allowed startup"
+        );
+        result.ok = true;
+        result.supported = false;
+        assert!(
+            ensure_tachyon_core_preflight_allows_start(&result).is_err(),
+            "unsupported preflight allowed startup"
+        );
     }
 
     #[test]
@@ -13121,6 +13351,7 @@ stat: <
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(RuntimeState::default())
         .manage(system_proxy::SystemProxyRuntime::default())
         .setup(|app| {
@@ -13159,8 +13390,7 @@ pub fn run() {
             scan_steam_library,
             config_paths,
             read_canonical_xray_config,
-            save_config_drafts,
-            save_config_draft,
+            commit_validated_tachyon_core_config,
             runtime_paths,
             runtime_settings,
             save_runtime_settings,
@@ -13187,6 +13417,7 @@ pub fn run() {
             test_xray_proxy,
             test_xray_local_proxies,
             validate_xray_config,
+            request_advanced_xray_authorization,
             commit_validated_xray_config,
             validate_tachyon_core_config,
             tachyon_core_preflight,

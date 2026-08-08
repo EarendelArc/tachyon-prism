@@ -122,6 +122,8 @@ pub struct ConfigLease {
     root_binding: Option<ConfigRootBinding>,
     #[cfg(unix)]
     config_file: File,
+    #[cfg(target_os = "windows")]
+    config_file: Option<File>,
     #[cfg(test)]
     race_hook: GenerationRaceHook,
 }
@@ -239,7 +241,17 @@ impl ConfigLease {
                 ));
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(target_os = "windows")]
+        {
+            let file = self.config_file.as_ref().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "generation config lock is missing",
+                )
+            })?;
+            verify_windows_generation_config(file, &self.path)?;
+        }
+        #[cfg(all(not(unix), not(target_os = "windows")))]
         {
             if !self.path.is_file() {
                 return Err(std::io::Error::new(
@@ -282,14 +294,18 @@ impl Drop for ConfigLease {
             operation();
         }
         #[cfg(not(unix))]
-        release_config_lease_path(
-            &self.path,
-            &self.orphan_journal,
-            &self.orphan_recovery_failure,
-            &self.recovery_failure,
-            self.root_binding.as_ref(),
-            remove_config_file,
-        );
+        {
+            #[cfg(target_os = "windows")]
+            drop(self.config_file.take());
+            release_config_lease_path(
+                &self.path,
+                &self.orphan_journal,
+                &self.orphan_recovery_failure,
+                &self.recovery_failure,
+                self.root_binding.as_ref(),
+                remove_config_file,
+            );
+        }
     }
 }
 
@@ -1453,6 +1469,90 @@ struct WindowsFileIdentity {
 }
 
 #[cfg(target_os = "windows")]
+fn windows_regular_file_identity(file: &File) -> std::io::Result<WindowsFileIdentity> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+    let mut info = BY_HANDLE_FILE_INFORMATION {
+        dwFileAttributes: 0,
+        ftCreationTime: Default::default(),
+        ftLastAccessTime: Default::default(),
+        ftLastWriteTime: Default::default(),
+        dwVolumeSerialNumber: 0,
+        nFileSizeHigh: 0,
+        nFileSizeLow: 0,
+        nNumberOfLinks: 0,
+        nFileIndexHigh: 0,
+        nFileIndexLow: 0,
+    };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
+        || info.nNumberOfLinks != 1
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "generation config is not a single-link regular file",
+        ));
+    }
+    Ok(WindowsFileIdentity {
+        volume_serial: info.dwVolumeSerialNumber,
+        index_high: info.nFileIndexHigh,
+        index_low: info.nFileIndexLow,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn open_windows_generation_config_read_lock(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+        FILE_SHARE_READ, OPEN_EXISTING,
+    };
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_GENERIC_READ,
+            FILE_SHARE_READ,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let file = unsafe { File::from_raw_handle(handle) };
+    windows_regular_file_identity(&file)?;
+    Ok(file)
+}
+
+#[cfg(target_os = "windows")]
+fn verify_windows_generation_config(file: &File, path: &Path) -> std::io::Result<()> {
+    let retained = windows_regular_file_identity(file)?;
+    let linked = open_windows_generation_config_read_lock(path)?;
+    let current = windows_regular_file_identity(&linked)?;
+    if retained != current {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "generation config entry no longer matches its retained handle",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn verify_windows_file_identity(
     file: &File,
     expected: WindowsFileIdentity,
@@ -1976,6 +2076,9 @@ impl GenerationStore {
         self.guarded_root_io("generation-config-write-failed", || {
             write_atomic(&path, config).map_err(std::io::Error::other)
         })?;
+        #[cfg(target_os = "windows")]
+        let config_file = open_windows_generation_config_read_lock(&path)
+            .map_err(|_| "generation-config-lock-failed".to_string())?;
         let instance_lease = self
             .instance_lease
             .as_ref()
@@ -1993,6 +2096,8 @@ impl GenerationStore {
                     .try_clone()
                     .map_err(|_| "generation-root-fd-clone-failed".to_string())?,
             }),
+            #[cfg(target_os = "windows")]
+            config_file: Some(config_file),
             #[cfg(test)]
             race_hook: self.race_hook.clone(),
         };
@@ -2631,6 +2736,61 @@ mod tests {
         assert_eq!(
             store.stage(&plan).unwrap_err(),
             "generation-instance-lease-token-mismatch"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_generation_lease_allows_read_but_blocks_write_rename_and_delete() {
+        use std::fs::OpenOptions;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE_FLAG_INHERIT};
+
+        let parent = tempfile::tempdir().expect("create temporary generation parent");
+        let store = GenerationStore::new(parent.path().join("generations"));
+        let mut runtime = GenerationRuntime::default();
+        select(&mut runtime, "A", 1);
+        let plan = runtime.begin_apply().expect("begin test apply");
+        let expected_digest = sha256_bytes(plan.config());
+        let lease = store.stage(&plan).expect("stage generation");
+        let path = lease.path().to_path_buf();
+        let moved = parent.path().join("moved-generation.json");
+        let lock = lease.config_file.as_ref().expect("retained Windows lock");
+        let mut flags = 0_u32;
+
+        assert!(
+            unsafe { GetHandleInformation(lock.as_raw_handle(), &mut flags) } != 0,
+            "query retained generation handle flags"
+        );
+        assert!(
+            flags & HANDLE_FLAG_INHERIT == 0,
+            "generation lock handle must not be inherited"
+        );
+        assert!(
+            sha256_bytes(&fs::read(&path).expect("Xray-compatible shared read")) == expected_digest,
+            "shared reader observed different generation bytes"
+        );
+        assert!(
+            OpenOptions::new().write(true).open(&path).is_err(),
+            "write access succeeded while generation was leased"
+        );
+        assert!(
+            fs::rename(&path, &moved).is_err(),
+            "rename succeeded while generation was leased"
+        );
+        assert!(
+            fs::remove_file(&path).is_err(),
+            "delete succeeded while generation was leased"
+        );
+        assert!(
+            lease.verify_child_source().is_ok(),
+            "retained handle identity verification failed"
+        );
+
+        drop(lease);
+        assert!(
+            !path.exists(),
+            "generation lease cleanup did not remove config"
         );
     }
 

@@ -553,6 +553,21 @@ mod tests {
         (directory, path, MemoryKeyStore::default())
     }
 
+    fn assert_authentication_failure(result: Result<SecureVaultLoadResult, String>) {
+        match result {
+            Err(error) if error == "secure-vault-authentication-failed" => {}
+            _ => panic!("vault operation did not fail authentication"),
+        }
+    }
+
+    fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+        payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("")
+    }
+
     #[test]
     fn round_trips_encrypted_sections_without_plaintext_on_disk() {
         let (_directory, path, keys) = fixture();
@@ -682,28 +697,44 @@ mod tests {
 
     #[test]
     fn rejects_tampering_and_wrong_keys() {
+        const SECRET: &str = "fixture-vault-psk-must-not-appear-in-panic";
         let (_directory, path, keys) = fixture();
         save_section_at(
             &path,
             &keys,
             SECTION_RUNTIME_TGP_PSK,
-            Value::String("psk".into()),
+            Value::String(SECRET.into()),
         )
         .unwrap();
 
         let wrong = MemoryKeyStore::with_key(vec![9; MASTER_KEY_BYTES]);
-        assert_eq!(
-            load_at(&path, &wrong).unwrap_err(),
-            "secure-vault-authentication-failed"
-        );
+        assert_authentication_failure(load_at(&path, &wrong));
+        let original_envelope = fs::read_to_string(&path).unwrap();
 
-        let mut envelope: VaultEnvelope =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        envelope.ciphertext.replace_range(0..1, "A");
-        fs::write(&path, serde_json::to_string(&envelope).unwrap()).unwrap();
-        assert_eq!(
-            load_at(&path, &keys).unwrap_err(),
-            "secure-vault-authentication-failed"
+        for iteration in 0..64_usize {
+            let mut envelope: VaultEnvelope = serde_json::from_str(&original_envelope).unwrap();
+            let mut ciphertext = STANDARD_NO_PAD.decode(&envelope.ciphertext).unwrap();
+            let index = iteration % ciphertext.len();
+            ciphertext[index] ^= 1_u8 << (iteration % 8);
+            envelope.ciphertext = STANDARD_NO_PAD.encode(ciphertext);
+            fs::write(&path, serde_json::to_string(&envelope).unwrap()).unwrap();
+            assert_authentication_failure(load_at(&path, &keys));
+        }
+
+        let panic = std::panic::catch_unwind(|| {
+            assert_authentication_failure(Ok(SecureVaultLoadResult {
+                version: VAULT_VERSION,
+                revision: 1,
+                payload: SecureVaultPayload {
+                    runtime_tgp_auth_psk: Some(Value::String(SECRET.into())),
+                    ..SecureVaultPayload::default()
+                },
+            }));
+        })
+        .expect_err("failure fixture must panic");
+        assert!(
+            !panic_message(panic.as_ref()).contains(SECRET),
+            "vault assertion panic leaked fixture secret"
         );
     }
 
