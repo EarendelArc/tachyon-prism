@@ -222,6 +222,7 @@ interface XrayProbeStatus {
 }
 
 interface XrayAdvancedEditorState {
+  confirmed: boolean;
   enabled: boolean;
   mode: XrayConfigMode;
   text: string;
@@ -441,6 +442,9 @@ const zh = {
   advancedXrayConfig: "高级 Xray JSON",
   advancedXrayDescription: "直接编辑完整配置；未知字段与未来协议保持原样。保存和启动前会运行 Xray 配置测试。",
   advancedXrayEnable: "使用高级完整配置",
+  advancedXrayConfirm: "我确认此完整 JSON 来自本地可信编辑，并理解它可控制 Xray 的监听、日志、API 与路由。",
+  advancedXrayConfirmationRequired: "请先确认高级完整 JSON 的安全提示；内容改变后需要重新确认。",
+  advancedXraySecurityMode: "本地高级模式：完整配置仅在明确确认后提交。远程订阅永远不能进入此模式。",
   xrayManagedConfigMode: "节点托管模式",
   xrayRawConfigMode: "原始配置模式",
   xrayRawModeDescription: "原始配置保持自身路由语义；当前节点选择不会控制其默认出口。",
@@ -884,6 +888,9 @@ const en: typeof zh = {
   advancedXrayConfig: "Advanced Xray JSON",
   advancedXrayDescription: "Edit the complete config directly. Unknown fields and future protocols remain untouched. Xray config-test runs before save and start.",
   advancedXrayEnable: "Use advanced complete config",
+  advancedXrayConfirm: "I confirm this complete JSON is locally trusted and understand that it can control Xray listeners, logs, API, and routing.",
+  advancedXrayConfirmationRequired: "Confirm the advanced JSON safety notice first. Any content change requires confirmation again.",
+  advancedXraySecurityMode: "Local advanced mode: the complete config is committed only after explicit confirmation. Remote subscriptions can never enter this mode.",
   xrayManagedConfigMode: "Node-managed mode",
   xrayRawConfigMode: "Raw config mode",
   xrayRawModeDescription: "Raw config keeps its own routing semantics; the selected node does not control its default outbound.",
@@ -1360,7 +1367,7 @@ function saveRoutingMode(mode: XrayRoutingMode): void {
 
 function xrayAdvancedEditorFromStored(value: unknown): XrayAdvancedEditorState {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return { enabled: false, mode: "managed", text: "" };
+    return { confirmed: false, enabled: false, mode: "managed", text: "" };
   }
   const stored = value as Partial<XrayAdvancedEditorState>;
   const mode: XrayConfigMode =
@@ -1370,6 +1377,7 @@ function xrayAdvancedEditorFromStored(value: unknown): XrayAdvancedEditorState {
         ? "raw"
         : "managed";
   return {
+    confirmed: false,
     enabled: mode === "raw",
     mode,
     text: typeof stored.text === "string" ? stored.text : "",
@@ -1787,7 +1795,7 @@ export function App() {
   );
   const [routingMode, setRoutingMode] = useState<XrayRoutingMode>(loadRoutingMode);
   const [xrayAdvancedEditor, setXrayAdvancedEditor] =
-    useState<XrayAdvancedEditorState>({ enabled: false, mode: "managed", text: "" });
+    useState<XrayAdvancedEditorState>({ confirmed: false, enabled: false, mode: "managed", text: "" });
   const [secureStorageReady, setSecureStorageReady] = useState(false);
   const [canonicalXrayText, setCanonicalXrayText] = useState("");
   const [canonicalXrayLoadState, setCanonicalXrayLoadState] =
@@ -2612,6 +2620,7 @@ export function App() {
   function setAdvancedXrayEnabled(enabled: boolean) {
     setXrayAdvancedEditor((current) => ({
       ...current,
+      confirmed: false,
       enabled,
       mode: enabled ? "raw" : "managed",
       text: initializeAdvancedXrayDraftText({
@@ -2625,7 +2634,17 @@ export function App() {
   }
 
   function updateAdvancedXrayText(text: string) {
-    setXrayAdvancedEditor((current) => ({ ...current, enabled: true, mode: "raw", text }));
+    setXrayAdvancedEditor((current) => ({
+      ...current,
+      confirmed: false,
+      enabled: true,
+      mode: "raw",
+      text,
+    }));
+  }
+
+  function setAdvancedXrayConfirmed(confirmed: boolean) {
+    setXrayAdvancedEditor((current) => ({ ...current, confirmed }));
   }
 
   async function importAdvancedXray(file: File | undefined) {
@@ -2635,7 +2654,13 @@ export function App() {
     try {
       const text = await file.text();
       parseXrayConfigText(text, language);
-      setXrayAdvancedEditor((current) => ({ ...current, enabled: true, mode: "raw", text }));
+      setXrayAdvancedEditor((current) => ({
+        ...current,
+        confirmed: false,
+        enabled: true,
+        mode: "raw",
+        text,
+      }));
       setMessage(ui.advancedXrayImported);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : ui.advancedXrayImportFailed);
@@ -2657,7 +2682,13 @@ export function App() {
     if (!text) {
       return;
     }
-    setXrayAdvancedEditor((current) => ({ ...current, enabled: true, mode: "raw", text }));
+    setXrayAdvancedEditor((current) => ({
+      ...current,
+      confirmed: false,
+      enabled: true,
+      mode: "raw",
+      text,
+    }));
     setMessage(useGenerated ? ui.advancedXrayRestoreGenerated : ui.advancedXrayRestored);
   }
 
@@ -2827,7 +2858,15 @@ export function App() {
       throw new Error(drafts.xrayError || ui.xrayConfigDraftUnavailable);
     }
     parseXrayConfigText(drafts.xray, language);
-    const paths = await commitValidatedXrayConfig(drafts.xray);
+    const advanced = xrayAdvancedEditor.mode === "raw";
+    if (advanced && !xrayAdvancedEditor.confirmed) {
+      throw new Error(ui.advancedXrayConfirmationRequired);
+    }
+    const paths = await commitValidatedXrayConfig(
+      drafts.xray,
+      advanced ? "advanced" : "managed",
+      advanced && xrayAdvancedEditor.confirmed,
+    );
     setCanonicalXrayText(drafts.xray);
     setConfigPaths(paths);
     setValidationResults((current) => ({
@@ -4043,6 +4082,7 @@ export function App() {
             onImportAdvancedXray={(file) => void importAdvancedXray(file)}
             onRestoreAdvancedXray={restoreAdvancedXray}
             onSetAdvancedXrayEnabled={setAdvancedXrayEnabled}
+            onSetAdvancedXrayConfirmed={setAdvancedXrayConfirmed}
             onUpdateAdvancedXrayText={updateAdvancedXrayText}
             onUseManaged={(kind) => void useManagedBinary(kind)}
             onValidateConfigs={() => void validateAllConfigs()}
@@ -5122,6 +5162,7 @@ function SettingsView({
   onImportAdvancedXray,
   onRestoreAdvancedXray,
   onSetAdvancedXrayEnabled,
+  onSetAdvancedXrayConfirmed,
   onUpdateAdvancedXrayText,
   onUseManaged,
   onValidateConfigs,
@@ -5200,6 +5241,7 @@ function SettingsView({
   onImportAdvancedXray: (file: File | undefined) => void;
   onRestoreAdvancedXray: (useGenerated: boolean) => void;
   onSetAdvancedXrayEnabled: (enabled: boolean) => void;
+  onSetAdvancedXrayConfirmed: (confirmed: boolean) => void;
   onUpdateAdvancedXrayText: (text: string) => void;
   onUseManaged: (kind: ManagedBinaryKind) => void;
   onValidateConfigs: () => void;
@@ -5992,9 +6034,25 @@ function SettingsView({
                       : ui.xrayManagedConfigMode}
                   </p>
                   {xrayAdvancedEditor.mode === "raw" ? (
-                    <p className="field-hint" data-xray-raw-mode-notice>
-                      {ui.xrayRawModeDescription}
-                    </p>
+                    <>
+                      <p className="field-hint" data-xray-raw-mode-notice>
+                        {ui.xrayRawModeDescription}
+                      </p>
+                      <p className="field-hint" data-xray-advanced-security-mode>
+                        {ui.advancedXraySecurityMode}
+                      </p>
+                      <label className="mini-check xray-advanced-confirmation">
+                        <input
+                          checked={xrayAdvancedEditor.confirmed}
+                          data-xray-advanced-confirmation
+                          type="checkbox"
+                          onChange={(event) =>
+                            onSetAdvancedXrayConfirmed(event.currentTarget.checked)
+                          }
+                        />
+                        {ui.advancedXrayConfirm}
+                      </label>
+                    </>
                   ) : null}
                   {canonicalXrayReadError ? (
                     <p className="xray-canonical-error" role="alert">

@@ -5,7 +5,7 @@
 ## Prerequisites
 
 - Windows 10/11, macOS 13+, or Linux
-- A proxy subscription, individual share links, or full Xray outbound/config JSON
+- A proxy subscription or individual share links; optionally, a locally trusted full Xray config
 - Linux requires a running freedesktop.org Secret Service provider, such as
   GNOME Keyring or a KWallet installation that exposes the Secret Service API.
 
@@ -26,6 +26,12 @@ persisted as plaintext.
 1. Open Prism and go to the **Subscriptions** view.
 2. Enter a subscription name and URL, then click **Update**, or paste a subscription payload and click **Import**.
 3. Select a node from the list. The selected node determines the Xray outbound; Tachyon game acceleration uses the separate Tachyon server profile.
+
+Remote subscriptions provide nodes only. If a subscription response contains a
+complete Xray config, Prism extracts recognized outbounds and discards its
+top-level controls. To use a locally authored complete config, open **Settings >
+Core > Advanced Xray JSON**, enable advanced mode, and confirm the safety notice.
+Changing or importing content requires confirmation again.
 
 ## 3. Scan Steam (optional)
 

@@ -16,6 +16,28 @@ Prism rejects loopback, unspecified, private, shared, link-local, multicast, doc
 
 Private or local subscription endpoints are not enabled in this release. A future implementation must expose a clearly labelled, persisted opt-in that defaults to off; it must not relax metadata, link-local, multicast, documentation, or reserved-address protections.
 
+## Subscription configuration trust boundary
+
+Remote subscription payloads are untrusted node sources, not Xray control-plane
+configuration. When a payload contains a complete Xray object, Prism retains
+only recognized outbound objects. It discards every remote top-level control,
+including inbounds, API, reverse, log paths, policy, stats, transport,
+observatory, and unknown fields. Stored snapshots are normalized again when
+loaded so legacy data cannot restore those controls.
+
+Complete Xray JSON is supported only by the local advanced editor. Enabling the
+editor is not sufficient: every content change clears its confirmation, and the
+user must explicitly confirm the warning before commit. The Rust command checks
+this mode and confirmation independently of the renderer.
+
+Before validation or process start, Rust validates the final generation
+`ApplyPlan`. A managed plan may contain only Prism-owned numeric loopback
+SOCKS/HTTP listeners, the optional Prism StatsService listener and controls,
+recognized outbounds, and Prism routing. Extra or duplicate listeners,
+non-loopback binds, API/reverse controls, dangerous log paths, and unknown
+top-level controls fail closed. The Tachyon Core start command likewise runs
+Core preflight internally, including when invoked directly.
+
 ## Renderer policy
 
 The Tauri renderer uses an explicit Content Security Policy. Scripts load only from the packaged application. Network connections are limited to Tauri IPC and loopback runtime endpoints used by Tachyon telemetry. Arbitrary remote HTTP(S), `unsafe-eval`, frames, objects, and forms are blocked. Remote downloads are performed by validated Rust commands rather than renderer `fetch`.

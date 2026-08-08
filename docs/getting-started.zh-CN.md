@@ -5,7 +5,7 @@
 ## 前置条件
 
 - Windows 10/11、macOS 13+ 或 Linux
-- 一个代理订阅、单独分享链接，或完整 Xray outbound/config JSON
+- 一个代理订阅或单独分享链接；也可准备一份本地可信的完整 Xray 配置
 - Linux 需要正在运行的 freedesktop.org Secret Service 提供程序，例如 GNOME Keyring，
   或提供 Secret Service API 的 KWallet 环境。
 
@@ -23,6 +23,8 @@ Prism 会按设计 fail-closed：订阅及其他敏感设置不会降级为明�
 1. 打开 Prism，进入 **订阅** 页面。
 2. 填写订阅名称和订阅地址后点击 **更新**，也可以粘贴订阅内容后点击 **导入**。
 3. 在节点列表中选择一个节点。选中节点会决定 Xray outbound；Tachyon 游戏加速配置仍由 Tachyon 服务器档案独立管理。
+
+远程订阅只提供节点。即使订阅响应包含完整 Xray 配置，Prism 也只抽取已识别 outbound，并丢弃其顶层控制字段。需要使用本地编写的完整配置时，请进入 **设置 > 核心 > 高级 Xray JSON**，启用高级模式并确认安全提示；内容变化或重新导入后必须再次确认。
 
 ## 3. 扫描 Steam（可选）
 

@@ -634,6 +634,32 @@ impl ApplyPlan {
     }
 }
 
+#[cfg(test)]
+pub fn apply_plan_for_test(config: Vec<u8>) -> ApplyPlan {
+    ApplyPlan {
+        transaction_id: 1,
+        desired: GenerationView {
+            generation_id: GenerationId::new("test", 1),
+            config_sha256: "test-digest".to_string(),
+            node_id: "test-node".to_string(),
+            routing_revision: "test-revision".to_string(),
+            pid: None,
+            managed_listener_addresses: vec![
+                "127.0.0.1:10808".to_string(),
+                "127.0.0.1:10809".to_string(),
+            ],
+            egress_probe: EgressProbeSettings::default(),
+            egress_verified: false,
+            readiness: ReadinessLevel::Desired,
+        },
+        config,
+        previous_active: None,
+        previous_handle: None,
+        previous_proxy: None,
+        proxy_snapshot: None,
+    }
+}
+
 pub struct GenerationRuntime {
     clock: GenerationClock,
     store: GenerationStore,

@@ -40,9 +40,13 @@ describe("commitValidatedXrayConfig", () => {
     invokeMock.mockResolvedValueOnce(paths);
     const contents = '{"inbounds":[],"outbounds":[]}';
 
-    await expect(commitValidatedXrayConfig(contents)).resolves.toEqual(paths);
+    await expect(commitValidatedXrayConfig(contents, "managed")).resolves.toEqual(paths);
 
-    expect(invokeMock).toHaveBeenCalledWith("commit_validated_xray_config", { contents });
+    expect(invokeMock).toHaveBeenCalledWith("commit_validated_xray_config", {
+      contents,
+      configMode: "managed",
+      advancedConfirmed: false,
+    });
     expect(invokeMock).toHaveBeenCalledTimes(1);
   });
 
@@ -50,7 +54,7 @@ describe("commitValidatedXrayConfig", () => {
     root.isTauri = true;
     invokeMock.mockRejectedValueOnce(new Error("Xray semantic validation failed"));
 
-    await expect(commitValidatedXrayConfig('{"outbounds":[]}')).rejects.toThrow(
+    await expect(commitValidatedXrayConfig('{"outbounds":[]}', "managed")).rejects.toThrow(
       "Xray semantic validation failed",
     );
     expect(invokeMock).toHaveBeenCalledTimes(1);
@@ -60,11 +64,24 @@ describe("commitValidatedXrayConfig", () => {
   });
 
   it("keeps preview mode side-effect free", async () => {
-    await expect(commitValidatedXrayConfig('{"outbounds":[]}')).resolves.toMatchObject({
+    await expect(commitValidatedXrayConfig('{"outbounds":[]}', "managed")).resolves.toMatchObject({
       xrayConfigPath: "Preview mode / xray-client.json",
     });
 
     expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("marks only explicitly confirmed local advanced JSON as advanced", async () => {
+    root.isTauri = true;
+    invokeMock.mockResolvedValueOnce({ xrayConfigPath: "advanced.json" });
+
+    await commitValidatedXrayConfig('{"futureLocalControl":{"enabled":true}}', "advanced", true);
+
+    expect(invokeMock).toHaveBeenCalledWith("commit_validated_xray_config", {
+      contents: '{"futureLocalControl":{"enabled":true}}',
+      configMode: "advanced",
+      advancedConfirmed: true,
+    });
   });
 });
 

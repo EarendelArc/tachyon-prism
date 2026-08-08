@@ -85,14 +85,20 @@ Supported input formats in the current parser:
 | `hysteria://...` / `hysteria2://...` / `hy2://...` | Imported with common Clash/Mihomo TLS, auth, ALPN, and UDP idle fields preserved. |
 | `tuic://...` | Imported from URI and Clash/Mihomo proxy input as a selectable Xray-compatible node. |
 | Basic `wireguard://...` | Imported when key material is present, preserving common peer and interface fields. |
-| Full Xray outbound JSON object | Stored losslessly and used directly for generated Xray config drafts. |
-| Full Xray config JSON with `outbounds` | Extracts and preserves available outbound objects. |
+| Xray outbound JSON object | Normalized as a remote outbound and used by the managed config generator. |
+| Full Xray config JSON with `outbounds` | Extracts recognized outbound objects only; top-level controls are discarded. |
 | Plain or base64 newline payloads | Decoded into supported share links; skipped/invalid entries are reported in import diagnostics. |
 
-The full Xray JSON path is intentionally lossless: Prism stores the outbound
-object as-is and extracts only the node summary needed for display. This is the
-path used for complete Xray feature coverage, including transport settings,
-TLS, REALITY, mux, proxy settings, and future fields.
+Remote input is never treated as a complete runtime config. Prism preserves the
+recognized outbound object, including transport, TLS, REALITY, mux, and proxy
+settings, but discards remote `inbounds`, `api`, `reverse`, log paths, policy,
+stats, observatory, transport controls, and unknown top-level fields. Unknown
+remote outbound protocols are not promoted into a managed runtime plan.
+
+Complete official Xray JSON remains available through the local **Advanced
+Xray JSON** editor. This is a separate trust mode: the user must enable it and
+explicitly confirm the safety notice after every content change. Remote
+subscriptions cannot select this mode.
 
 Complete Xray outbound drafts are preserved per node. Tachyon server profiles
 remain separate from Xray subscription nodes and provide the TGP relay endpoint
@@ -123,9 +129,10 @@ stores canonical network CIDRs, and rejects equivalent duplicate networks. If
 the persisted list contains a malformed or non-string item, the whole list is
 loaded as empty so a damaged setting cannot silently add routes.
 
-For complete Xray feature support, Prism prefers the preserved outbound object
-from the subscription or full Xray JSON input instead of rebuilding fields from
-scratch.
+Managed mode prefers the preserved, recognized outbound object instead of
+rebuilding its protocol fields from scratch. Advanced local mode preserves an
+arbitrary valid Xray JSON object without applying managed node or routing
+selection.
 
 The Save action writes the generated files into the Tauri app config directory
 and shows the exact paths in the Config panel. Core still remains pure and only

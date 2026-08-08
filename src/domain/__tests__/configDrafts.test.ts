@@ -180,46 +180,22 @@ describe("buildXrayClientConfigDraft", () => {
     });
   });
 
-  it("uses a full imported Xray config as the lossless source for any selected node", () => {
+  it("uses only remote outbounds while regenerating every managed control", () => {
     const nodes = parseSubscription(xrayFullConfigJsonFixture);
     const snapshot = createSubscriptionSnapshot("https://example.com/full-xray", nodes);
     const selected = selectSubscriptionNode(snapshot, nodes[1].id);
     const node = selected.nodes.find((item) => item.id === selected.selectedNodeId)!;
     const config = buildXrayClientConfigDraft(node, { routingMode: "global" });
-    const source = JSON.parse(xrayFullConfigJsonFixture) as Record<string, unknown>;
-    const sourceRouting = source.routing as Record<string, unknown>;
-    const sourceRules = sourceRouting.rules as Array<Record<string, unknown>>;
     const generatedInbounds = config.inbounds as Array<Record<string, unknown>>;
     const generatedOutbounds = config.outbounds as Array<Record<string, unknown>>;
 
     expect(nodes).toHaveLength(2);
     expect(node.xrayConfigId).toMatch(/^xray-config-/);
     expect(node).not.toHaveProperty("xrayConfig");
-    expect(config.log).toEqual(source.log);
-    expect(config.dns).toEqual(source.dns);
-    expect(config.policy).toEqual(source.policy);
-    expect(config.stats).toEqual(source.stats);
-    expect(config.api).toEqual(source.api);
-    expect(config.fakedns).toEqual(source.fakedns);
-    expect(config.observatory).toEqual(source.observatory);
-    expect(config.burstObservatory).toEqual(source.burstObservatory);
-    expect(config.userTopLevelField).toEqual(source.userTopLevelField);
-    expect(config.inbounds).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          tag: "tachyon-socks",
-          userInboundField: "keep-inbound",
-        }),
-        expect.objectContaining({
-          tag: "tachyon-socks-2",
-          protocol: "socks",
-        }),
-        expect.objectContaining({
-          tag: "tachyon-http",
-          protocol: "http",
-        }),
-      ]),
-    );
+    expect(Object.keys(config).sort()).toEqual(["inbounds", "log", "outbounds", "routing"]);
+    expect(config.log).toEqual({ loglevel: "warning" });
+    expect(generatedInbounds).toHaveLength(2);
+    expect(generatedInbounds.map((inbound) => inbound.protocol)).toEqual(["socks", "http"]);
     expect(config.outbounds).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -245,13 +221,8 @@ describe("buildXrayClientConfigDraft", () => {
     );
     const generatedRouting = config.routing as Record<string, unknown>;
     const rules = generatedRouting.rules as Array<Record<string, unknown>>;
-    expect(generatedRouting).toMatchObject({
-      domainStrategy: "IPOnDemand",
-      domainMatcher: "hybrid",
-      userRoutingField: { retained: true },
-    });
+    expect(Object.keys(generatedRouting).sort()).toEqual(["domainStrategy", "rules"]);
     expect(rules[0]).toEqual({ type: "field", outboundTag: "tachyon-proxy" });
-    expect(rules.slice(1)).toEqual(sourceRules);
     const inboundTags = new Set(generatedInbounds.map((item) => item.tag));
     const outboundTags = new Set(generatedOutbounds.map((item) => item.tag));
     for (const rule of rules) {
@@ -264,7 +235,7 @@ describe("buildXrayClientConfigDraft", () => {
     }
   });
 
-  it("merges Prism stats wiring into imported api, policy, stats, and routing", () => {
+  it("generates Prism-owned stats wiring without importing remote controls", () => {
     const [node] = parseSubscription(xrayFullConfigJsonFixture);
     const config = buildXrayClientConfigDraft(node, { enableStats: true });
     const api = config.api as Record<string, unknown>;
@@ -273,37 +244,29 @@ describe("buildXrayClientConfigDraft", () => {
     const routing = config.routing as Record<string, unknown>;
     const rules = routing.rules as Array<Record<string, unknown>>;
 
-    expect(api).toMatchObject({
-      tag: "user-api",
-      services: ["HandlerService", "StatsService"],
-      userApiField: { retained: true },
+    expect(api).toEqual({
+      tag: "tachyon-xray-api",
+      services: ["StatsService"],
     });
-    expect(policy).toMatchObject({
-      levels: {
-        "0": {
-          handshake: 7,
-          userUplink: true,
-        },
-      },
-      userPolicyField: "keep-policy",
-    });
-    expect(system).toMatchObject({
-      statsUserUplink: true,
+    expect(Object.keys(policy)).toEqual(["system"]);
+    expect(system).toEqual({
       statsInboundDownlink: true,
+      statsInboundUplink: true,
+      statsOutboundDownlink: true,
       statsOutboundUplink: true,
     });
-    expect(config.stats).toEqual({ userStatsField: ["keep", "stats"] });
+    expect(config.stats).toEqual({});
     expect(rules).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           inboundTag: ["tachyon-xray-api-in"],
-          outboundTag: "user-api",
+          outboundTag: "tachyon-xray-api",
         }),
       ]),
     );
     expect(
       (config.outbounds as Array<Record<string, unknown>>).some(
-        (outbound) => outbound.tag === "user-api",
+        (outbound) => outbound.tag === "tachyon-xray-api",
       ),
     ).toBe(false);
   });
@@ -464,31 +427,30 @@ describe("buildXrayClientConfigDraft", () => {
     );
   });
 
-  it("rewrites the complete managed outbound reference graph without losing metadata", () => {
+  it("rewrites only outbound-local managed references without importing control graphs", () => {
     const [selected] = parseSubscription(xrayManagedReferenceGraphJsonFixture);
     const config = buildXrayClientConfigDraft(selected, { routingMode: "rule" });
     const outbounds = config.outbounds as Array<Record<string, unknown>>;
     const routing = config.routing as Record<string, unknown>;
     const rules = routing.rules as Array<Record<string, unknown>>;
-    const balancer = (routing.balancers as Array<Record<string, unknown>>)[0];
     const selectedOutbound = outbounds.find((outbound) => outbound.tag === "tachyon-proxy");
     const chainOutbound = outbounds.find((outbound) => outbound.tag === "chain-hop")!;
     const dialOutbound = outbounds.find((outbound) => outbound.tag === "dial-hop")!;
-    const importedRule = rules.find((rule) =>
-      Array.isArray(rule.domain) && rule.domain.includes("full:managed-reference.example"),
-    );
 
     expect(selectedOutbound).toMatchObject({
       protocol: "vmess",
       userSelectedField: { retained: true },
     });
-    expect(importedRule?.outboundTag).toBe("tachyon-proxy");
-    expect(balancer).toMatchObject({
-      selector: ["tachyon-proxy"],
-      fallbackTag: "tachyon-proxy",
-    });
-    expect(config.observatory).toMatchObject({ subjectSelector: ["tachyon-proxy"] });
-    expect(config.burstObservatory).toMatchObject({ subjectSelector: ["tachyon-proxy"] });
+    expect(Object.keys(routing).sort()).toEqual(["domainStrategy", "rules"]);
+    expect(
+      rules.some(
+        (rule) =>
+          Array.isArray(rule.domain) &&
+          rule.domain.includes("full:managed-reference.example"),
+      ),
+    ).toBe(false);
+    expect(config).not.toHaveProperty("observatory");
+    expect(config).not.toHaveProperty("burstObservatory");
     expect(chainOutbound.proxySettings).toMatchObject({ tag: "tachyon-proxy" });
     expect(
       ((dialOutbound.streamSettings as Record<string, unknown>).sockopt as Record<
@@ -503,7 +465,7 @@ describe("buildXrayClientConfigDraft", () => {
     );
   });
 
-  it("preserves reverse portal and runtime handler references in Raw and Managed modes", () => {
+  it("preserves reverse locally in Raw mode but excludes it from remote Managed mode", () => {
     const source = JSON.parse(xrayReversePortalJsonFixture) as Record<string, unknown>;
     const raw = parseXrayConfigText(xrayReversePortalJsonFixture);
     const rawDraft = buildXrayClientConfigDraft(undefined, {
@@ -527,9 +489,11 @@ describe("buildXrayClientConfigDraft", () => {
       )
       .map((rule) => rule.outboundTag);
 
-    expect(rawDraft).toEqual(source);
-    expect(managed.reverse).toEqual(source.reverse);
-    expect(importedTargets).toEqual(["reverse-portal", "runtime-registered-handler"]);
+    expect(rawDraft).not.toBe(source);
+    expect(rawDraft).toHaveProperty("reverse");
+    expect(rawDraft).toHaveProperty("routing");
+    expect(managed).not.toHaveProperty("reverse");
+    expect(importedTargets).toHaveLength(0);
     expect(managed.outbounds).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ tag: "reverse-portal" }),
@@ -541,7 +505,7 @@ describe("buildXrayClientConfigDraft", () => {
     );
   });
 
-  it("fails closed when a managed rename cannot preserve prefix selector semantics", () => {
+  it("ignores remote selector controls while preserving supported outbounds", () => {
     const [selected] = parseSubscription(
       JSON.stringify({
         outbounds: [
@@ -566,9 +530,12 @@ describe("buildXrayClientConfigDraft", () => {
       }),
     );
 
-    expect(() => buildXrayClientConfigDraft(selected)).toThrow(
-      /cannot safely rewrite managed Xray outbound references; use Raw config mode.*selector/,
-    );
+    const config = buildXrayClientConfigDraft(selected);
+    const routing = config.routing as Record<string, unknown>;
+
+    expect(config).not.toHaveProperty("observatory");
+    expect(routing).not.toHaveProperty("balancers");
+    expect((config.outbounds as unknown[])).toHaveLength(4);
   });
 
   it("preserves a raw complete config without applying node or routing selections", () => {

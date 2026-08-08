@@ -16,6 +16,14 @@ Tachyon Core 永远不持有操作系统代理；它只传输已选择的游戏 
 
 此版本不开放本地或私网订阅。未来若实现，必须提供清晰标注、默认关闭且可持久化的显式开关；该开关不得放宽云元数据、链路本地、多播、文档或保留地址保护。
 
+## 订阅配置的信任边界
+
+远程订阅载荷是不可信节点来源，不是 Xray 控制面配置。载荷即使包含完整 Xray 对象，Prism 也只保留已识别 outbound，并丢弃全部远程顶层控制字段，包括 inbounds、API、reverse、日志路径、policy、stats、transport、observatory 及未知字段。读取已保存快照时会再次标准化，避免旧数据恢复这些控制项。
+
+完整 Xray JSON 只允许通过本地高级编辑器使用。仅启用编辑器并不足够：内容每次变化都会清除确认状态，用户必须再次明确确认安全提示后才能提交。Rust 命令会独立检查模式和确认标记，不信任渲染器单方面判定。
+
+验证或启动进程之前，Rust 会检查最终 generation `ApplyPlan`。托管计划只允许 Prism 管理的数字回环 SOCKS/HTTP listener、可选 Prism StatsService listener 与控制项、已识别 outbound 和 Prism 路由。额外或重复 listener、非回环监听、API/reverse 控制、危险日志路径及未知顶层控制都会 fail-closed。Tachyon Core 启动命令内部同样强制执行 Core preflight，直接调用也无法绕过。
+
 ## 渲染器策略
 
 Tauri 渲染器使用明确的内容安全策略。脚本只能从应用安装包加载；网络连接仅允许 Tauri IPC 与 Tachyon 遥测所需的回环运行时端点。任意远程 HTTP(S)、`unsafe-eval`、框架、对象和表单均被禁止。远程下载通过经过验证的 Rust 命令完成，而不是由渲染器直接 `fetch`。

@@ -598,9 +598,10 @@ describe("parseSubscription", () => {
     expect(nodes[2]).toMatchObject({ address: "1.1.1.1", port: 53 });
   });
 
-  it("attaches the complete source config to every selectable Xray JSON outbound", () => {
+  it("attaches only normalized outbounds from a complete remote Xray config", () => {
     const nodes = parseSubscription(xrayFullConfigJsonFixture);
     const source = JSON.parse(xrayFullConfigJsonFixture) as Record<string, unknown>;
+    const sourceOutbounds = source.outbounds as unknown[];
 
     expect(nodes).toHaveLength(2);
     expect(nodes[0].xrayConfigId).toBe(nodes[1].xrayConfigId);
@@ -609,8 +610,14 @@ describe("parseSubscription", () => {
     expect(nodes[1]).not.toHaveProperty("xrayConfig");
     expect(nodes[0]).not.toHaveProperty("outbound");
     expect(nodes[1]).not.toHaveProperty("outbound");
-    expect(xrayConfigTemplateForNode(nodes[0])).toEqual(source);
-    expect(xrayConfigTemplateForNode(nodes[1])).toEqual(source);
+    const template = xrayConfigTemplateForNode(nodes[0]);
+    expect(Object.keys(template ?? {})).toEqual(["outbounds"]);
+    expect((template?.outbounds as unknown[] | undefined)?.length).toBe(sourceOutbounds.length);
+    const secondTemplate = xrayConfigTemplateForNode(nodes[1]);
+    expect(Object.keys(secondTemplate ?? {})).toEqual(["outbounds"]);
+    expect((secondTemplate?.outbounds as unknown[] | undefined)?.length).toBe(
+      sourceOutbounds.length,
+    );
     expect(buildXrayOutboundDraft(nodes[0])).toMatchObject({
       tag: "Xray Full Trojan TLS",
       userOutboundField: { retained: true },
@@ -639,7 +646,7 @@ describe("parseSubscription", () => {
     });
   });
 
-  it("retains future Xray protocols and their unknown fields through template references", () => {
+  it("rejects unknown remote outbound protocols instead of promoting them to runtime", () => {
     const payload = JSON.stringify({
       outbounds: [
         {
@@ -651,24 +658,9 @@ describe("parseSubscription", () => {
       ],
       futureTopLevelField: { kept: true },
     });
-    const [node] = parseSubscription(payload);
+    const nodes = parseSubscription(payload);
 
-    expect(node).toMatchObject({
-      protocol: "unknown",
-      xrayOutboundIndex: 0,
-      xrayCompatibility: { status: "supported" },
-    });
-    expect(node).not.toHaveProperty("outbound");
-    expect(buildXrayOutboundDraft(node)).toEqual(
-      expect.objectContaining({
-        protocol: "future-xray-protocol",
-        settings: { credential: "future-secret", futureOption: { enabled: true } },
-        futureOutboundField: ["kept"],
-      }),
-    );
-    expect(xrayConfigTemplateForNode(node)).toMatchObject({
-      futureTopLevelField: { kept: true },
-    });
+    expect(nodes).toHaveLength(0);
   });
 
   it("keeps multiple full Xray templates once each at the subscription profile boundary", () => {
@@ -695,9 +687,9 @@ describe("parseSubscription", () => {
     expect(nodes[0].xrayConfigId).toBe(nodes[1].xrayConfigId);
     expect(nodes[2].xrayConfigId).not.toBe(nodes[0].xrayConfigId);
     expect(Object.keys(profile?.xrayConfigTemplates ?? {})).toHaveLength(2);
-    expect(xrayConfigTemplateForNode(snapshot.nodes[2])).toMatchObject({
-      secondUnknownTopLevel: { retained: true },
-    });
+    expect(Object.keys(xrayConfigTemplateForNode(snapshot.nodes[2]) ?? {})).toEqual([
+      "outbounds",
+    ]);
     expect(snapshot.nodes.every((node) => !("xrayConfig" in node))).toBe(true);
   });
 
@@ -1167,7 +1159,7 @@ describe("subscription vault serialization", () => {
     });
   });
 
-  it("preserves the complete imported Xray config through snapshot storage", () => {
+  it("persists only normalized remote outbounds through snapshot storage", () => {
     const nodes = parseSubscription(xrayFullConfigJsonFixture);
     const snapshot = createSubscriptionSnapshot("https://example.com/full-xray", nodes);
     const source = JSON.parse(xrayFullConfigJsonFixture) as Record<string, unknown>;
@@ -1189,7 +1181,12 @@ describe("subscription vault serialization", () => {
         "size",
         1,
       );
-      expect(Object.values(persistedTemplates)).toEqual([source]);
+      expect(Object.values(persistedTemplates)).toHaveLength(1);
+      expect(
+        Object.values(persistedTemplates).every(
+          (template) => Object.keys(template as Record<string, unknown>).join(",") === "outbounds",
+        ),
+      ).toBe(true);
       expect((JSON.stringify(persisted).match(/xray-trojan-secret/g) ?? [])).toHaveLength(1);
 
       const loaded = subscriptionSnapshotFromStored(persisted);
@@ -1197,19 +1194,10 @@ describe("subscription vault serialization", () => {
       expect(loaded.nodes[0].xrayConfigId).toBe(loaded.nodes[1].xrayConfigId);
       expect(loaded.nodes[0]).not.toHaveProperty("xrayConfig");
       expect(activeSubscription(loaded)?.xrayConfigTemplates).toEqual(persistedTemplates);
-      expect(loadedTemplate).toEqual(source);
-      expect(loadedTemplate).toMatchObject({
-        routing: expect.objectContaining({ userRoutingField: { retained: true } }),
-        policy: expect.objectContaining({ userPolicyField: "keep-policy" }),
-        stats: { userStatsField: ["keep", "stats"] },
-        api: expect.objectContaining({ userApiField: { retained: true } }),
-        fakedns: [{ ipPool: "198.18.0.0/15", poolSize: 1024 }],
-        observatory: expect.objectContaining({ enableConcurrency: true }),
-        burstObservatory: expect.objectContaining({
-          pingConfig: expect.objectContaining({ sampling: 3 }),
-        }),
-        userTopLevelField: { nested: ["preserve", { exactly: true }] },
-      });
+      expect(Object.keys(loadedTemplate ?? {})).toEqual(["outbounds"]);
+      expect((loadedTemplate?.outbounds as unknown[] | undefined)?.length).toBe(
+        (source.outbounds as unknown[]).length,
+      );
   });
 
   it("migrates node-level imported config copies into one profile template", () => {
@@ -1240,7 +1228,56 @@ describe("subscription vault serialization", () => {
       expect(loaded.nodes.every((node) => !("outbound" in node))).toBe(true);
       expect(loaded.nodes[0].xrayConfigId).toBe(loaded.nodes[1].xrayConfigId);
       expect(loaded.nodes.map((node) => node.xrayOutboundIndex)).toEqual([0, 1]);
-      expect(xrayConfigTemplateForNode(loaded.nodes[1])).toEqual(source);
+      expect(Object.keys(xrayConfigTemplateForNode(loaded.nodes[1]) ?? {})).toEqual([
+        "outbounds",
+      ]);
+  });
+
+  it("strips privileged and unknown controls from malicious remote Xray JSON", () => {
+    const payload = JSON.stringify({
+      inbounds: [{ tag: "hostile", listen: "0.0.0.0", port: 1080, protocol: "socks" }],
+      api: { tag: "hostile-api", services: ["HandlerService"] },
+      reverse: { bridges: [{ tag: "hostile-bridge", domain: "secret.invalid" }] },
+      log: { access: "C:\\hostile-access.log", error: "/tmp/hostile-error.log" },
+      stats: {},
+      policy: { system: { statsUserUplink: true } },
+      transport: { tcpSettings: { acceptProxyProtocol: true } },
+      observatory: { subjectSelector: ["hostile"] },
+      unknownTopLevel: { execute: true },
+      outbounds: [
+        {
+          tag: "safe-node",
+          protocol: "vless",
+          settings: {
+            vnext: [
+              {
+                address: "edge.example.com",
+                port: 443,
+                users: [{ id: "fixture-sensitive-uuid", encryption: "none" }],
+              },
+            ],
+          },
+        },
+      ],
+    });
+    const nodes = parseSubscription(payload);
+    const template = xrayConfigTemplateForNode(nodes[0]);
+
+    expect(nodes).toHaveLength(1);
+    expect(Object.keys(template ?? {})).toEqual(["outbounds"]);
+    for (const forbidden of [
+      "inbounds",
+      "api",
+      "reverse",
+      "log",
+      "stats",
+      "policy",
+      "transport",
+      "observatory",
+      "unknownTopLevel",
+    ]) {
+      expect(template).not.toHaveProperty(forbidden);
+    }
   });
 });
 

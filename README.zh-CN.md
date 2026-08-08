@@ -55,11 +55,13 @@ Prism 在本地解析订阅内容，并把选中节点保存在桌面控制面�
 | `hysteria://...` / `hysteria2://...` / `hy2://...` | 导入并保留常见 Clash/Mihomo TLS、auth、ALPN 和 UDP idle 字段。 |
 | `tuic://...` | 支持从 URI 和 Clash/Mihomo proxy 输入导入为可选择的 Xray 兼容节点。 |
 | 基础 `wireguard://...` | 存在密钥材料时导入，并保留常见 peer 和 interface 字段。 |
-| 完整 Xray outbound JSON 对象 | 尽量无损保存，并直接用于生成 Xray 配置草稿。 |
-| 带 `outbounds` 的完整 Xray config JSON | 抽取并保留可用 outbound 对象。 |
+| Xray outbound JSON 对象 | 标准化为远程 outbound，并交给托管配置生成器。 |
+| 带 `outbounds` 的完整 Xray config JSON | 只抽取已识别 outbound；丢弃所有顶层控制配置。 |
 | 普通或 Base64 多行 payload | 解码为支持的分享链接；跳过/无效条目会显示在导入诊断中。 |
 
-完整 Xray JSON 路径会尽量无损：Prism 原样保存 outbound 对象，只抽取界面展示所需的节点摘要。这条路径用于覆盖完整 Xray 能力，包括 transport settings、TLS、REALITY、mux、proxy settings 和未来新增字段。
+远程输入永远不会被视为完整运行配置。Prism 会保留已识别 outbound 中的 transport、TLS、REALITY、mux 与 proxy settings，但会丢弃远程 `inbounds`、`api`、`reverse`、日志路径、policy、stats、observatory、transport 控制和未知顶层字段；未知远程 outbound 协议也不会进入托管运行计划。
+
+完整官方 Xray JSON 仍可通过本地 **高级 Xray JSON** 编辑器使用。这是一条独立信任路径：用户必须主动启用，并在每次内容变化后重新确认安全提示。远程订阅不能进入此模式。
 
 每个节点都会保留完整 Xray outbound 草稿。Tachyon 服务器档案与 Xray 订阅节点相互独立，并为可选 UDP 游戏加速提供所需的 TGP relay 端点。
 
@@ -72,7 +74,7 @@ Config 面板会根据当前选中的 Xray 节点和 Tachyon 服务器档案生�
 
 设置 > 规则会明确分开游戏服务器网段、手动程序规则和 Steam 游戏规则。游戏服务器网段列表为空表示 Prism 不接管任何目的网段。程序和 Steam 规则只在流量被捕获后负责分类，不会自行添加系统路由；CIDR 路由按目的地址生效，因此会影响访问该网段的所有程序。Prism 会清除 IPv4/IPv6 host bits、保存 canonical 网络 CIDR，并拒绝语义等价的重复网段；如果持久化列表包含损坏项或非字符串项，则整体按空列表 fail-closed，避免损坏设置静默增加路由。
 
-为了完整支持 Xray 能力，Prism 优先使用订阅或完整 Xray JSON 输入里保留下来的 outbound 对象，而不是重新猜测所有字段。
+托管模式优先使用订阅中已识别且保留下来的 outbound 对象，不重新猜测其协议字段。本地高级模式则原样保留任意有效 Xray JSON，不应用托管节点或路由选择。
 
 Save 操作会把生成文件写入 Tauri 应用配置目录，并在 Config 面板显示确切路径。Core 仍然保持纯粹，只需要生成的 `client.json`；Xray 由 Prism 启动和配置。游戏配置由 Prism 管理，但会嵌入生成的 Core JSON，因此单个 Core 配置即可表达预期的 UDP 加速策略。启动器设置同样由 Prism 管理并嵌入生成的 Core JSON，这样 Steam 子进程检测与可选下载加速可以在 GUI 中调整，而不把订阅或界面职责放进 Core。
 

@@ -431,6 +431,19 @@ struct RuntimeState {
     window_restore_bounds: Mutex<Option<WindowBounds>>,
 }
 
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum XrayConfigTrustMode {
+    Managed,
+    Advanced,
+}
+
+#[derive(Clone)]
+struct XrayConfigAuthorization {
+    digest: [u8; 32],
+    mode: XrayConfigTrustMode,
+}
+
 // Lock order is always XrayCoordinator first, then SystemProxyRuntime's internal lock.
 // No caller may retain either lock while acquiring XrayCoordinator again.
 struct GenerationWatchdog {
@@ -443,6 +456,7 @@ struct XrayCoordinator {
     processes: RuntimeProcesses,
     generations: xray_generation::GenerationRuntime,
     proxy_watchdog: Option<GenerationWatchdog>,
+    xray_config_authorization: Option<XrayConfigAuthorization>,
 }
 
 #[derive(Clone, Copy)]
@@ -736,14 +750,18 @@ struct ProductionXrayBackend<'a> {
     process: &'a mut ManagedProcess,
     watchdog: &'a mut Option<GenerationWatchdog>,
     binary: PathBuf,
+    config_mode: XrayConfigTrustMode,
+    settings: RuntimeSettings,
 }
 
 impl xray_generation::ApplyBackend for ProductionXrayBackend<'_> {
     fn validate_config(
         &mut self,
-        _plan: &xray_generation::ApplyPlan,
+        plan: &xray_generation::ApplyPlan,
         config: &xray_generation::ConfigLease,
     ) -> Result<(), xray_generation::BackendFailure> {
+        validate_xray_apply_plan(plan, self.config_mode, &self.settings)
+            .map_err(|_| xray_generation::BackendFailure::Failed)?;
         let validation = validate_xray_config_lease(&self.binary, config)
             .map_err(|_| xray_generation::BackendFailure::Failed)?;
         if validation.ok {
@@ -1070,9 +1088,18 @@ impl XrayCoordinator {
         let config_value: Value = serde_json::from_str(config_text)
             .map_err(|_| "Xray desired config is not valid JSON".to_string())?;
         use sha2::{Digest, Sha256};
+        let digest_bytes: [u8; 32] = Sha256::digest(&config).into();
+        let authorization = self
+            .xray_config_authorization
+            .clone()
+            .filter(|authorization| authorization.digest == digest_bytes)
+            .ok_or_else(|| {
+                "Xray config was not committed through the trusted validation boundary".to_string()
+            })?;
         let settings = load_runtime_settings(app)?;
+        validate_xray_config_value(&config_value, authorization.mode, &settings)?;
         let managed_listeners = xray_managed_listener_addresses(&config_value, &settings)?;
-        let digest = Sha256::digest(&config)
+        let digest = digest_bytes
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
@@ -1097,6 +1124,8 @@ impl XrayCoordinator {
             process: &mut processes.xray,
             watchdog,
             binary,
+            config_mode: authorization.mode,
+            settings,
         };
         generations
             .execute_latest(&mut backend)
@@ -1126,6 +1155,11 @@ impl XrayCoordinator {
                 .clone()
                 .unwrap_or_else(|| settings.xray_binary_path.clone()),
         );
+        let config_mode = self
+            .xray_config_authorization
+            .as_ref()
+            .map(|authorization| authorization.mode)
+            .unwrap_or(XrayConfigTrustMode::Managed);
         let (processes, generations, watchdog) = (
             &mut self.processes,
             &mut self.generations,
@@ -1137,6 +1171,8 @@ impl XrayCoordinator {
             process: &mut processes.xray,
             watchdog,
             binary,
+            config_mode,
+            settings,
         };
         generations
             .stop_active(&mut backend)
@@ -1157,6 +1193,10 @@ impl XrayCoordinator {
         if current.xray.state == "running" || current.tachyon_core.state == "running" {
             return Err("start_all requires both managed cores to be stopped".to_string());
         }
+        let tachyon_binary = PathBuf::from(clean_path_input(&tachyon_core_binary_path));
+        let tachyon_config = PathBuf::from(clean_path_input(&tachyon_core_config_path));
+        let preflight = preflight_tachyon_core_config_file(&tachyon_binary, &tachyon_config)?;
+        ensure_tachyon_core_preflight_allows_start(&preflight)?;
         self.apply_xray(app, proxy, xray_binary_path, xray_config_path)?;
         let settings = load_runtime_settings(app)?;
         let tachyon_start = self
@@ -1165,8 +1205,8 @@ impl XrayCoordinator {
             .start(
                 "tachyon-core",
                 ManagedBinaryKind::TachyonCore,
-                tachyon_core_binary_path,
-                tachyon_core_config_path,
+                path_string(&tachyon_binary),
+                path_string(&tachyon_config),
                 &["run", "--config"],
             )
             .and_then(|_| {
@@ -1265,6 +1305,11 @@ impl XrayCoordinator {
                 .clone()
                 .unwrap_or_else(|| settings.xray_binary_path.clone()),
         );
+        let config_mode = self
+            .xray_config_authorization
+            .as_ref()
+            .map(|authorization| authorization.mode)
+            .unwrap_or(XrayConfigTrustMode::Managed);
         let (processes, generations, watchdog) = (
             &mut self.processes,
             &mut self.generations,
@@ -1276,6 +1321,8 @@ impl XrayCoordinator {
             process: &mut processes.xray,
             watchdog,
             binary,
+            config_mode,
+            settings,
         };
         if enabled {
             let result = generations
@@ -1306,6 +1353,11 @@ impl XrayCoordinator {
                 .clone()
                 .unwrap_or_else(|| settings.xray_binary_path.clone()),
         );
+        let config_mode = self
+            .xray_config_authorization
+            .as_ref()
+            .map(|authorization| authorization.mode)
+            .unwrap_or(XrayConfigTrustMode::Managed);
         let (processes, generations, watchdog) = (
             &mut self.processes,
             &mut self.generations,
@@ -1317,6 +1369,8 @@ impl XrayCoordinator {
             process: &mut processes.xray,
             watchdog,
             binary,
+            config_mode,
+            settings,
         };
         generations
             .revalidate_active(&mut backend)
@@ -2095,12 +2149,25 @@ fn validate_xray_config(
 #[tauri::command]
 fn commit_validated_xray_config(
     app: tauri::AppHandle,
+    state: tauri::State<RuntimeState>,
     contents: String,
+    config_mode: XrayConfigTrustMode,
+    advanced_confirmed: bool,
 ) -> Result<ConfigDraftPaths, String> {
     let settings = load_runtime_settings(&app)?;
     let paths = draft_paths(&app)?;
     let binary = PathBuf::from(clean_path_input(&settings.xray_binary_path));
     let canonical = PathBuf::from(&paths.xray_config_path);
+    let authorization = authorize_xray_config(
+        contents.as_bytes(),
+        config_mode,
+        advanced_confirmed,
+        &settings,
+    )?;
+    let mut coordinator = state
+        .xray
+        .lock()
+        .map_err(|_| "lock Xray validation state failed".to_string())?;
 
     commit_validated_xray_config_file(
         &canonical,
@@ -2108,6 +2175,7 @@ fn commit_validated_xray_config(
         |candidate| validate_xray_config_file(&binary, candidate),
         &PlatformAtomicFileReplacer,
     )?;
+    coordinator.xray_config_authorization = Some(authorization);
     Ok(paths)
 }
 
@@ -2291,6 +2359,10 @@ fn start_tachyon_core(
     binary_path: String,
     config_path: String,
 ) -> Result<ProcessStatus, String> {
+    let binary = PathBuf::from(clean_path_input(&binary_path));
+    let config = PathBuf::from(clean_path_input(&config_path));
+    let preflight = preflight_tachyon_core_config_file(&binary, &config)?;
+    ensure_tachyon_core_preflight_allows_start(&preflight)?;
     let mut processes = state
         .xray
         .lock()
@@ -2298,8 +2370,8 @@ fn start_tachyon_core(
     processes.processes.tachyon_core.start(
         "tachyon-core",
         ManagedBinaryKind::TachyonCore,
-        binary_path,
-        config_path.clone(),
+        path_string(&binary),
+        path_string(&config),
         &["run", "--config"],
     )
 }
@@ -2513,6 +2585,16 @@ fn preflight_tachyon_core_config_file(
     }
     let has_game_routes = prism_config_has_non_empty_game_routes(config)?;
     Ok(fail_closed_legacy_selective_routes(result, has_game_routes))
+}
+
+fn ensure_tachyon_core_preflight_allows_start(
+    result: &TachyonCorePreflightResult,
+) -> Result<(), String> {
+    if result.ok {
+        Ok(())
+    } else {
+        Err("Tachyon Core preflight blocked startup".to_string())
+    }
 }
 
 fn prism_config_has_non_empty_game_routes(config: &Path) -> Result<bool, String> {
@@ -7605,6 +7687,361 @@ fn wait_for_readiness(
     }
 }
 
+fn authorize_xray_config(
+    config: &[u8],
+    mode: XrayConfigTrustMode,
+    advanced_confirmed: bool,
+    settings: &RuntimeSettings,
+) -> Result<XrayConfigAuthorization, String> {
+    if mode == XrayConfigTrustMode::Advanced && !advanced_confirmed {
+        return Err("advanced Xray config requires explicit local confirmation".to_string());
+    }
+    let value: Value = serde_json::from_slice(config)
+        .map_err(|_| "Xray config authorization requires a JSON object".to_string())?;
+    validate_xray_config_value(&value, mode, settings)?;
+    use sha2::{Digest, Sha256};
+    Ok(XrayConfigAuthorization {
+        digest: Sha256::digest(config).into(),
+        mode,
+    })
+}
+
+fn validate_xray_apply_plan(
+    plan: &xray_generation::ApplyPlan,
+    mode: XrayConfigTrustMode,
+    settings: &RuntimeSettings,
+) -> Result<(), String> {
+    let value: Value = serde_json::from_slice(plan.config())
+        .map_err(|_| "Xray apply plan is not a JSON object".to_string())?;
+    validate_xray_config_value(&value, mode, settings)
+}
+
+fn validate_xray_config_value(
+    config: &Value,
+    mode: XrayConfigTrustMode,
+    settings: &RuntimeSettings,
+) -> Result<(), String> {
+    let object = config
+        .as_object()
+        .ok_or_else(|| "Xray config must be a JSON object".to_string())?;
+    if mode == XrayConfigTrustMode::Advanced {
+        return Ok(());
+    }
+    validate_prism_managed_xray_config(object, settings)
+}
+
+fn validate_prism_managed_xray_config(
+    config: &serde_json::Map<String, Value>,
+    settings: &RuntimeSettings,
+) -> Result<(), String> {
+    use std::collections::HashSet;
+
+    const BASE_FIELDS: &[&str] = &["inbounds", "log", "outbounds", "routing"];
+    const STATS_FIELDS: &[&str] = &["api", "policy", "stats"];
+    if config.keys().any(|key| {
+        !BASE_FIELDS.contains(&key.as_str())
+            && !(settings.xray_stats_enabled && STATS_FIELDS.contains(&key.as_str()))
+    }) {
+        return Err("managed Xray plan contains an untrusted top-level field".to_string());
+    }
+
+    let log = config
+        .get("log")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "managed Xray plan requires Prism log settings".to_string())?;
+    if log.keys().any(|key| key != "loglevel") || !log.get("loglevel").is_some_and(Value::is_string)
+    {
+        return Err("managed Xray plan contains unsafe log settings".to_string());
+    }
+
+    let inbounds = config
+        .get("inbounds")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "managed Xray plan requires an inbound array".to_string())?;
+    let expected_inbound_count = if settings.xray_stats_enabled { 3 } else { 2 };
+    if inbounds.len() != expected_inbound_count {
+        return Err("managed Xray plan contains an unexpected inbound".to_string());
+    }
+    let mut inbound_tags = HashSet::new();
+    let mut socks_count = 0_usize;
+    let mut http_count = 0_usize;
+    let mut api_count = 0_usize;
+    for inbound in inbounds {
+        let inbound = inbound
+            .as_object()
+            .ok_or_else(|| "managed Xray plan contains an invalid inbound".to_string())?;
+        let tag = inbound
+            .get("tag")
+            .and_then(Value::as_str)
+            .filter(|tag| !tag.is_empty())
+            .ok_or_else(|| "managed Xray plan inbound is missing its tag".to_string())?;
+        if !inbound_tags.insert(tag.to_string()) {
+            return Err("managed Xray plan contains a duplicate inbound tag".to_string());
+        }
+        let protocol = inbound
+            .get("protocol")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "managed Xray plan inbound is missing its protocol".to_string())?;
+        let listen = inbound
+            .get("listen")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "managed Xray plan inbound is missing its listen address".to_string())?;
+        let listen_ip = parse_managed_listener_ip(listen)?;
+        let port = inbound
+            .get("port")
+            .and_then(Value::as_u64)
+            .and_then(|port| u16::try_from(port).ok())
+            .filter(|port| *port != 0)
+            .ok_or_else(|| "managed Xray plan inbound has an invalid port".to_string())?;
+        match protocol {
+            "socks"
+                if listen_ip == parse_managed_listener_ip(&settings.xray_socks_listen)?
+                    && port == settings.xray_socks_port =>
+            {
+                socks_count += 1;
+            }
+            "http"
+                if listen_ip == parse_managed_listener_ip(&settings.xray_http_listen)?
+                    && port == settings.xray_http_port =>
+            {
+                http_count += 1;
+            }
+            "tunnel"
+                if settings.xray_stats_enabled
+                    && listen_ip == parse_managed_listener_ip(&settings.xray_stats_listen)?
+                    && port == settings.xray_stats_port =>
+            {
+                let rewrite = inbound
+                    .get("settings")
+                    .and_then(Value::as_object)
+                    .and_then(|settings| settings.get("rewriteAddress"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        "managed Xray API inbound is missing its rewrite address".to_string()
+                    })?;
+                parse_managed_listener_ip(rewrite)?;
+                api_count += 1;
+            }
+            _ => return Err("managed Xray plan contains an unexpected inbound".to_string()),
+        }
+    }
+    if socks_count != 1 || http_count != 1 || api_count != usize::from(settings.xray_stats_enabled)
+    {
+        return Err("managed Xray listeners do not match Prism settings".to_string());
+    }
+
+    let outbounds = config
+        .get("outbounds")
+        .and_then(Value::as_array)
+        .filter(|outbounds| !outbounds.is_empty())
+        .ok_or_else(|| "managed Xray plan requires an outbound array".to_string())?;
+    let supported_protocols = [
+        "blackhole",
+        "dns",
+        "freedom",
+        "http",
+        "loopback",
+        "shadowsocks",
+        "socks",
+        "trojan",
+        "vless",
+        "vmess",
+        "hysteria",
+        "wireguard",
+    ];
+    let mut outbound_tags = HashSet::new();
+    let mut has_direct = false;
+    let mut has_block = false;
+    for outbound in outbounds {
+        let outbound = outbound
+            .as_object()
+            .ok_or_else(|| "managed Xray plan contains an invalid outbound".to_string())?;
+        let protocol = outbound
+            .get("protocol")
+            .and_then(Value::as_str)
+            .filter(|protocol| supported_protocols.contains(protocol))
+            .ok_or_else(|| "managed Xray plan contains an unsupported outbound".to_string())?;
+        has_direct |= protocol == "freedom";
+        has_block |= protocol == "blackhole";
+        let tag = outbound
+            .get("tag")
+            .and_then(Value::as_str)
+            .filter(|tag| !tag.is_empty())
+            .ok_or_else(|| "managed Xray plan outbound is missing its tag".to_string())?;
+        if !outbound_tags.insert(tag.to_string()) {
+            return Err("managed Xray plan contains a duplicate outbound tag".to_string());
+        }
+    }
+    if !has_direct || !has_block {
+        return Err("managed Xray plan is missing Prism safety outbounds".to_string());
+    }
+    for outbound in outbounds {
+        let outbound = outbound.as_object().expect("validated outbound object");
+        let proxy_tag = outbound
+            .get("proxySettings")
+            .and_then(Value::as_object)
+            .and_then(|settings| settings.get("tag"))
+            .and_then(Value::as_str);
+        let dialer_tag = outbound
+            .get("streamSettings")
+            .and_then(Value::as_object)
+            .and_then(|settings| settings.get("sockopt"))
+            .and_then(Value::as_object)
+            .and_then(|sockopt| sockopt.get("dialerProxy"))
+            .and_then(Value::as_str);
+        if [proxy_tag, dialer_tag]
+            .into_iter()
+            .flatten()
+            .any(|tag| !outbound_tags.contains(tag))
+        {
+            return Err("managed Xray outbound references an unknown tag".to_string());
+        }
+    }
+
+    let mut routing_targets = outbound_tags.clone();
+    validate_prism_managed_stats(config, settings, &mut routing_targets)?;
+    validate_prism_managed_routing(config, &inbound_tags, &routing_targets)
+}
+
+fn validate_prism_managed_stats(
+    config: &serde_json::Map<String, Value>,
+    settings: &RuntimeSettings,
+    routing_targets: &mut std::collections::HashSet<String>,
+) -> Result<(), String> {
+    if !settings.xray_stats_enabled {
+        if ["api", "policy", "stats"]
+            .into_iter()
+            .any(|field| config.contains_key(field))
+        {
+            return Err("managed Xray plan contains an unexpected API control".to_string());
+        }
+        return Ok(());
+    }
+    let api = config
+        .get("api")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "managed Xray plan is missing the Prism API control".to_string())?;
+    if api.keys().any(|key| key != "tag" && key != "services") {
+        return Err("managed Xray plan contains an unexpected API control".to_string());
+    }
+    let api_tag = api
+        .get("tag")
+        .and_then(Value::as_str)
+        .filter(|tag| !tag.is_empty())
+        .ok_or_else(|| "managed Xray API control is missing its tag".to_string())?;
+    let services = api
+        .get("services")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "managed Xray API control has invalid services".to_string())?;
+    if services.len() != 1 || services[0].as_str() != Some("StatsService") {
+        return Err("managed Xray API control has unexpected services".to_string());
+    }
+    routing_targets.insert(api_tag.to_string());
+
+    let policy = config
+        .get("policy")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "managed Xray plan is missing the Prism stats policy".to_string())?;
+    if policy.len() != 1 || !policy.contains_key("system") {
+        return Err("managed Xray plan contains an unexpected stats policy".to_string());
+    }
+    let system = policy
+        .get("system")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "managed Xray plan has an invalid stats policy".to_string())?;
+    let expected = [
+        "statsInboundDownlink",
+        "statsInboundUplink",
+        "statsOutboundDownlink",
+        "statsOutboundUplink",
+    ];
+    if system.len() != expected.len()
+        || expected
+            .into_iter()
+            .any(|key| system.get(key).and_then(Value::as_bool) != Some(true))
+    {
+        return Err("managed Xray plan contains an unexpected stats policy".to_string());
+    }
+    if !config
+        .get("stats")
+        .and_then(Value::as_object)
+        .is_some_and(serde_json::Map::is_empty)
+    {
+        return Err("managed Xray plan contains unexpected stats settings".to_string());
+    }
+    Ok(())
+}
+
+fn validate_prism_managed_routing(
+    config: &serde_json::Map<String, Value>,
+    inbound_tags: &std::collections::HashSet<String>,
+    outbound_tags: &std::collections::HashSet<String>,
+) -> Result<(), String> {
+    let routing = config
+        .get("routing")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "managed Xray plan requires Prism routing".to_string())?;
+    if routing
+        .keys()
+        .any(|key| !["domainStrategy", "rules"].contains(&key.as_str()))
+    {
+        return Err("managed Xray plan contains untrusted routing controls".to_string());
+    }
+    let rules = routing
+        .get("rules")
+        .and_then(Value::as_array)
+        .filter(|rules| !rules.is_empty())
+        .ok_or_else(|| "managed Xray plan requires routing rules".to_string())?;
+    for rule in rules {
+        let rule = rule
+            .as_object()
+            .ok_or_else(|| "managed Xray plan contains an invalid routing rule".to_string())?;
+        if rule.keys().any(|key| {
+            ![
+                "type",
+                "inboundTag",
+                "outboundTag",
+                "ip",
+                "domain",
+                "protocol",
+            ]
+            .contains(&key.as_str())
+        }) || rule.get("type").and_then(Value::as_str) != Some("field")
+        {
+            return Err("managed Xray plan contains untrusted routing controls".to_string());
+        }
+        let outbound = rule
+            .get("outboundTag")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "managed Xray routing rule is missing its target".to_string())?;
+        if !outbound_tags.contains(outbound) {
+            return Err("managed Xray routing references an unknown target".to_string());
+        }
+        if let Some(tags) = rule.get("inboundTag") {
+            let tags = tags
+                .as_array()
+                .ok_or_else(|| "managed Xray routing has invalid inbound tags".to_string())?;
+            if tags
+                .iter()
+                .any(|tag| tag.as_str().is_none_or(|tag| !inbound_tags.contains(tag)))
+            {
+                return Err("managed Xray routing references an unknown inbound".to_string());
+            }
+        }
+        for field in ["ip", "domain", "protocol"] {
+            if let Some(values) = rule.get(field) {
+                if !values
+                    .as_array()
+                    .is_some_and(|values| values.iter().all(Value::is_string))
+                {
+                    return Err("managed Xray routing contains an invalid matcher".to_string());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn xray_managed_listener_addresses(
     config: &Value,
     settings: &RuntimeSettings,
@@ -8555,6 +8992,159 @@ mod tests {
     use rustls::{ServerConfig, ServerConnection};
     use std::io::copy;
     use std::net::TcpListener;
+
+    fn managed_xray_test_settings() -> RuntimeSettings {
+        RuntimeSettings {
+            xray_socks_listen: "127.0.0.1".to_string(),
+            xray_socks_port: 10808,
+            xray_http_listen: "127.0.0.1".to_string(),
+            xray_http_port: 10809,
+            xray_stats_enabled: false,
+            ..RuntimeSettings::default()
+        }
+    }
+
+    fn managed_xray_test_config() -> Value {
+        serde_json::json!({
+            "log": { "loglevel": "warning" },
+            "inbounds": [
+                {
+                    "tag": "tachyon-socks",
+                    "listen": "127.0.0.1",
+                    "port": 10808,
+                    "protocol": "socks",
+                    "settings": { "auth": "noauth", "udp": true }
+                },
+                {
+                    "tag": "tachyon-http",
+                    "listen": "127.0.0.1",
+                    "port": 10809,
+                    "protocol": "http",
+                    "settings": { "allowTransparent": false }
+                }
+            ],
+            "outbounds": [
+                {
+                    "tag": "tachyon-proxy",
+                    "protocol": "vless",
+                    "settings": { "fixture": "fixture-sensitive-uuid-and-password" }
+                },
+                { "tag": "tachyon-direct", "protocol": "freedom" },
+                { "tag": "tachyon-block", "protocol": "blackhole" }
+            ],
+            "routing": {
+                "domainStrategy": "IPIfNonMatch",
+                "rules": [{ "type": "field", "outboundTag": "tachyon-proxy" }]
+            }
+        })
+    }
+
+    #[test]
+    fn managed_xray_apply_plan_accepts_only_prism_owned_controls() {
+        let settings = managed_xray_test_settings();
+        let bytes = serde_json::to_vec(&managed_xray_test_config()).expect("serialize test config");
+        let plan = xray_generation::apply_plan_for_test(bytes);
+
+        assert!(
+            validate_xray_apply_plan(&plan, XrayConfigTrustMode::Managed, &settings).is_ok(),
+            "valid Prism-managed apply plan was rejected"
+        );
+    }
+
+    #[test]
+    fn managed_xray_apply_plan_rejects_remote_privileged_controls_without_secret_leaks() {
+        const SECRET: &str = "fixture-sensitive-uuid-and-password";
+        let settings = managed_xray_test_settings();
+        let base = managed_xray_test_config();
+        let mut cases = Vec::new();
+
+        let mut public_inbound = base.clone();
+        public_inbound["inbounds"]
+            .as_array_mut()
+            .expect("inbounds")
+            .push(serde_json::json!({
+                "tag": "hostile-public",
+                "listen": "0.0.0.0",
+                "port": 1080,
+                "protocol": "socks"
+            }));
+        cases.push(public_inbound);
+
+        let mut duplicate_listener = base.clone();
+        let duplicate = duplicate_listener["inbounds"][0].clone();
+        duplicate_listener["inbounds"]
+            .as_array_mut()
+            .expect("inbounds")
+            .push(duplicate);
+        cases.push(duplicate_listener);
+
+        for (field, value) in [
+            (
+                "api",
+                serde_json::json!({ "tag": "hostile-api", "services": ["HandlerService"] }),
+            ),
+            (
+                "reverse",
+                serde_json::json!({ "bridges": [{ "tag": "hostile" }] }),
+            ),
+            (
+                "transport",
+                serde_json::json!({ "tcpSettings": { "acceptProxyProtocol": true } }),
+            ),
+            (
+                "observatory",
+                serde_json::json!({ "subjectSelector": ["hostile"] }),
+            ),
+            ("unknownTopLevel", serde_json::json!({ "execute": true })),
+        ] {
+            let mut candidate = base.clone();
+            candidate[field] = value;
+            cases.push(candidate);
+        }
+
+        let mut dangerous_log = base;
+        dangerous_log["log"] = serde_json::json!({
+            "loglevel": "warning",
+            "access": "C:\\hostile-access.log",
+            "error": "/tmp/hostile-error.log"
+        });
+        cases.push(dangerous_log);
+
+        for candidate in cases {
+            let bytes = serde_json::to_vec(&candidate).expect("serialize malicious fixture");
+            let plan = xray_generation::apply_plan_for_test(bytes);
+            let error =
+                match validate_xray_apply_plan(&plan, XrayConfigTrustMode::Managed, &settings) {
+                    Ok(()) => panic!("malicious managed apply plan was accepted"),
+                    Err(error) => error,
+                };
+            assert!(
+                !error.contains(SECRET),
+                "managed policy error leaked fixture secret"
+            );
+        }
+    }
+
+    #[test]
+    fn advanced_xray_authorization_requires_confirmation_and_preserves_local_json() {
+        const SECRET: &str = "fixture-local-advanced-password";
+        let settings = managed_xray_test_settings();
+        let config = serde_json::to_vec(&serde_json::json!({
+            "futureOfficialControl": { "credential": SECRET },
+            "reverse": { "bridges": [{ "tag": "locally-authored" }] }
+        }))
+        .expect("serialize advanced fixture");
+
+        assert!(
+            authorize_xray_config(&config, XrayConfigTrustMode::Advanced, false, &settings)
+                .is_err(),
+            "unconfirmed advanced config was authorized"
+        );
+        assert!(
+            authorize_xray_config(&config, XrayConfigTrustMode::Advanced, true, &settings).is_ok(),
+            "confirmed local advanced config was rejected"
+        );
+    }
 
     fn test_tls_material() -> (Arc<ServerConfig>, RootCertStore) {
         let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])

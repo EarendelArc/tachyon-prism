@@ -193,7 +193,10 @@ export function buildXrayClientConfigDraft(
     throw new Error("Managed Xray config mode requires a selected node");
   }
   const xrayOutbound = buildXrayOutboundDraft(node);
-  let importedConfig = cloneRecord(xrayConfigTemplateForNode(node) ?? {});
+  const importedTemplate = xrayConfigTemplateForNode(node);
+  let importedConfig: Record<string, unknown> = importedTemplate
+    ? { outbounds: recordArray(importedTemplate.outbounds) }
+    : {};
   if (Object.keys(importedConfig).length > 0) {
     validateXrayReferenceShapes(importedConfig, "en");
   }

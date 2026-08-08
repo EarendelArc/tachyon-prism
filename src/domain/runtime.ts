@@ -506,7 +506,11 @@ export async function validateXrayConfig(
   });
 }
 
-export async function commitValidatedXrayConfig(contents: string): Promise<ConfigDraftPaths> {
+export async function commitValidatedXrayConfig(
+  contents: string,
+  configMode: "managed" | "advanced",
+  advancedConfirmed = false,
+): Promise<ConfigDraftPaths> {
   if (!isTauriRuntime()) {
     return {
       configDir: "Preview mode",
@@ -514,7 +518,11 @@ export async function commitValidatedXrayConfig(contents: string): Promise<Confi
       xrayConfigPath: "Preview mode / xray-client.json",
     };
   }
-  return invokeDesktop<ConfigDraftPaths>("commit_validated_xray_config", { contents });
+  return invokeDesktop<ConfigDraftPaths>("commit_validated_xray_config", {
+    contents,
+    configMode,
+    advancedConfirmed,
+  });
 }
 
 export async function readCanonicalXrayConfig(): Promise<CanonicalXrayConfigText> {

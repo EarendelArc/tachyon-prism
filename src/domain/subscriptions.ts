@@ -93,14 +93,7 @@ export interface ProxyNode {
 
 export interface XrayImportedConfig {
   [key: string]: unknown;
-  api?: Record<string, unknown>;
-  burstObservatory?: Record<string, unknown>;
-  dns?: Record<string, unknown>;
-  fakedns?: unknown;
-  observatory?: Record<string, unknown>;
-  policy?: Record<string, unknown>;
-  routing?: Record<string, unknown>;
-  stats?: Record<string, unknown>;
+  outbounds?: XrayOutboundObject[];
 }
 
 export interface SubscriptionParseReport {
@@ -1291,11 +1284,7 @@ function nodeFromOutbound(
   xrayOutboundIndex?: number,
 ): ProxyNode | null {
   const protocol = normalizeProtocol(stringValue(value.protocol));
-  if (
-    protocol === "unknown" &&
-    stringValue(value.protocol) !== "unknown" &&
-    !xrayConfig
-  ) {
+  if (protocol === "unknown") {
     return null;
   }
 
@@ -2761,17 +2750,16 @@ function normalizeXrayConfigTemplates(
 }
 
 function xrayImportedConfigFromJSON(value: Record<string, unknown>): XrayImportedConfig | undefined {
-  return Array.isArray(value.outbounds) && value.outbounds.some(
-    (outbound) => isRecord(outbound) && typeof outbound.protocol === "string",
-  )
-    ? (cloneRecord(value) as XrayImportedConfig)
-    : undefined;
+  return normalizeXrayImportedConfig(value);
 }
 
 function normalizeXrayImportedConfig(value: unknown): XrayImportedConfig | undefined {
-  if (!isRecord(value)) {
+  if (!isRecord(value) || !Array.isArray(value.outbounds)) {
     return undefined;
   }
-
-  return cloneRecord(value) as XrayImportedConfig;
+  const outbounds = value.outbounds
+    .filter(isRecord)
+    .filter((outbound) => normalizeProtocol(stringValue(outbound.protocol)) !== "unknown")
+    .map((outbound) => cloneRecord(outbound) as XrayOutboundObject);
+  return outbounds.length > 0 ? { outbounds } : undefined;
 }
