@@ -291,11 +291,14 @@ mod tests {
         assert_eq!(opened.st_ino, linked.st_ino);
         let mut contents = Vec::new();
         (&file).read_to_end(&mut contents).unwrap();
-        assert_eq!(contents, b"config");
+        assert!(
+            contents == b"config",
+            "published descriptor contents changed"
+        );
         drop(file);
-        assert_eq!(
-            std::fs::read(temporary.path().join("generation.json")).unwrap(),
-            b"config"
+        assert!(
+            std::fs::read(temporary.path().join("generation.json")).unwrap() == b"config",
+            "published directory entry contents changed"
         );
     }
 
@@ -319,6 +322,9 @@ mod tests {
                 }
             });
         assert!(result.is_err());
-        assert_eq!(std::fs::read(path).unwrap(), b"replacement");
+        assert!(
+            std::fs::read(path).unwrap() == b"replacement",
+            "post-publication replacement was removed or changed"
+        );
     }
 }

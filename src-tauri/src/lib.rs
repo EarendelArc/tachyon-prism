@@ -8787,7 +8787,10 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
             "log-pre-shared-value",
             "bob:escaped-password",
         ] {
-            assert!(!sanitized.text.contains(secret), "leaked secret: {secret}");
+            assert!(
+                !sanitized.text.contains(secret),
+                "diagnostic redaction failed"
+            );
         }
         assert!(sanitized.text.contains("<redacted>"));
         assert!(sanitized.text.contains("example.test"));
@@ -8832,8 +8835,7 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         for secret in secrets {
             assert!(
                 !sanitized.text.contains(&secret),
-                "leaked assignment secret: {secret}; sanitized={}",
-                sanitized.text
+                "assignment diagnostic redaction failed"
             );
         }
         assert_eq!(sanitized.text.matches("<redacted>").count(), keys.len());
@@ -8853,7 +8855,10 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
             "escaped-private-value",
             "escaped-token-value",
         ] {
-            assert!(!sanitized.text.contains(secret), "leaked secret: {secret}");
+            assert!(
+                !sanitized.text.contains(secret),
+                "escaped diagnostic redaction failed"
+            );
         }
         assert!(sanitized.text.contains(r#"\"<redacted>\""#));
         assert!(sanitized.text.contains("visible-value"));
@@ -9326,7 +9331,10 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
 
         assert!(error.contains("2097152-byte UTF-8 limit"));
         assert!(!validator_called);
-        assert_eq!(fs::read_to_string(&canonical).unwrap(), "old config");
+        assert!(
+            fs::read_to_string(&canonical).unwrap() == "old config",
+            "existing Xray config changed after oversized commit"
+        );
         assert!(atomic_candidates(&directory, "xray-client.json").is_empty());
         let _ = fs::remove_dir_all(directory);
     }
@@ -9365,9 +9373,9 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         )
         .expect("valid first config must be installed");
 
-        assert_eq!(
-            fs::read_to_string(&canonical).unwrap(),
-            "first valid config"
+        assert!(
+            fs::read_to_string(&canonical).unwrap() == "first valid config",
+            "first valid Xray config was not installed"
         );
         assert!(atomic_candidates(&directory, "xray-client.json").is_empty());
         let _ = fs::remove_dir_all(directory);
@@ -9389,9 +9397,9 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         #[cfg(target_os = "windows")]
         assert_private_windows_file_dacl(&canonical);
 
-        assert_eq!(
-            fs::read_to_string(&canonical).unwrap(),
-            r#"{"psk":"must-not-appear-in-errors"}"#
+        assert!(
+            fs::read_to_string(&canonical).unwrap() == r#"{"psk":"must-not-appear-in-errors"}"#,
+            "private runtime config contents changed"
         );
         let _ = fs::remove_dir_all(directory);
     }
@@ -9525,7 +9533,10 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         )
         .expect_err("invalid replacement must fail");
 
-        assert_eq!(fs::read_to_string(&canonical).unwrap(), "old config");
+        assert!(
+            fs::read_to_string(&canonical).unwrap() == "old config",
+            "invalid commit changed the existing Xray config"
+        );
         assert!(atomic_candidates(&directory, "xray-client.json").is_empty());
         let _ = fs::remove_dir_all(directory);
     }
@@ -9546,7 +9557,10 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         .expect_err("replacement failure must fail the commit");
 
         assert!(error.contains("injected atomic replacement failure"));
-        assert_eq!(fs::read_to_string(&canonical).unwrap(), "old config");
+        assert!(
+            fs::read_to_string(&canonical).unwrap() == "old config",
+            "replacement failure changed the existing Xray config"
+        );
         assert!(atomic_candidates(&directory, "xray-client.json").is_empty());
         let _ = fs::remove_dir_all(directory);
     }
@@ -9562,7 +9576,10 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
             &canonical,
             "new config",
             |candidate| {
-                assert_eq!(fs::read_to_string(candidate).unwrap(), "new config");
+                assert!(
+                    fs::read_to_string(candidate).unwrap() == "new config",
+                    "Xray validator received different config contents"
+                );
                 Ok(xray_validation(true))
             },
             &PlatformAtomicFileReplacer,
@@ -9570,7 +9587,10 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         .expect("valid candidate must replace the canonical config");
 
         assert!(validation.ok);
-        assert_eq!(fs::read_to_string(&canonical).unwrap(), "new config");
+        assert!(
+            fs::read_to_string(&canonical).unwrap() == "new config",
+            "validated Xray config was not committed"
+        );
         assert!(atomic_candidates(&directory, "xray-client.json").is_empty());
         let _ = fs::remove_dir_all(directory);
     }
@@ -11730,9 +11750,9 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
 
     #[test]
     fn normalize_tgp_auth_psk_trims_and_validates_length() {
-        assert_eq!(
-            normalize_tgp_auth_psk(" 0123456789abcdef ".to_string()).unwrap(),
-            "0123456789abcdef"
+        assert!(
+            normalize_tgp_auth_psk(" 0123456789abcdef ".to_string()).unwrap() == "0123456789abcdef",
+            "normalized TGP PSK changed"
         );
         assert_eq!(normalize_tgp_auth_psk("   ".to_string()).unwrap(), "");
         assert!(normalize_tgp_auth_psk("too-short".to_string())

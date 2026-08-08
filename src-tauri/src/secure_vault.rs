@@ -566,9 +566,9 @@ mod tests {
         .unwrap();
 
         let loaded = load_at(&path, &keys).unwrap();
-        assert_eq!(
-            loaded.payload.subscriptions,
-            Some(serde_json::json!({ "sourceUrl": secret }))
+        assert!(
+            loaded.payload.subscriptions == Some(serde_json::json!({ "sourceUrl": secret })),
+            "vault subscription payload did not round trip"
         );
         let disk = fs::read_to_string(path).unwrap();
         assert!(!disk.contains(secret));
@@ -606,9 +606,18 @@ mod tests {
         let second_key = second.2.key.lock().unwrap().clone().unwrap();
         assert_eq!(first_key.len(), MASTER_KEY_BYTES);
         assert_eq!(second_key.len(), MASTER_KEY_BYTES);
-        assert_ne!(first_key, second_key);
-        assert_ne!(first_key, vec![0; MASTER_KEY_BYTES]);
-        assert_ne!(second_key, vec![0; MASTER_KEY_BYTES]);
+        assert!(
+            first_key != second_key,
+            "vault master keys must be distinct"
+        );
+        assert!(
+            first_key != vec![0; MASTER_KEY_BYTES],
+            "vault master key must not be all zeroes"
+        );
+        assert!(
+            second_key != vec![0; MASTER_KEY_BYTES],
+            "vault master key must not be all zeroes"
+        );
     }
 
     #[test]
@@ -632,7 +641,7 @@ mod tests {
         .unwrap();
         let second: VaultEnvelope =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_ne!(first.nonce, second.nonce);
+        assert!(first.nonce != second.nonce, "vault nonces must be unique");
         assert_eq!(
             STANDARD_NO_PAD.decode(first.nonce).unwrap().len(),
             NONCE_BYTES
@@ -711,9 +720,9 @@ mod tests {
         fs::write(path.with_extension("tmp"), "truncated candidate").unwrap();
 
         let loaded = load_at(&path, &keys).unwrap();
-        assert_eq!(
-            loaded.payload.runtime_tgp_auth_psk,
-            Some(Value::String("verified".into()))
+        assert!(
+            loaded.payload.runtime_tgp_auth_psk == Some(Value::String("verified".into())),
+            "verified vault payload was not retained"
         );
     }
 
@@ -733,7 +742,10 @@ mod tests {
         let second = migrate_at(&path, &keys, legacy).unwrap();
         assert!(second.migrated_sections.is_empty());
         assert_eq!(first.revision, second.revision);
-        assert_eq!(first.payload, second.payload);
+        assert!(
+            first.payload == second.payload,
+            "vault migration payload changed during idempotent replay"
+        );
     }
 
     #[test]
@@ -809,15 +821,18 @@ mod tests {
             clear_at(&path, &keys).unwrap_err(),
             "secure-vault-keyring-unavailable"
         );
-        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(
+            fs::read(&path).unwrap() == before,
+            "vault ciphertext changed after key deletion failure"
+        );
         assert!(clear_state_path(&path).exists());
         assert!(keys.key.lock().unwrap().is_some());
 
         keys.fail_clear.store(false, Ordering::SeqCst);
         let loaded = load_at(&path, &keys).unwrap();
-        assert_eq!(
-            loaded.payload.runtime_tgp_auth_psk,
-            Some(Value::String("must-survive".into()))
+        assert!(
+            loaded.payload.runtime_tgp_auth_psk == Some(Value::String("must-survive".into())),
+            "vault payload was not recoverable after key deletion failure"
         );
         assert!(!clear_state_path(&path).exists());
     }
@@ -844,7 +859,10 @@ mod tests {
             "secure-vault-clear-pending"
         );
         assert!(keys.key.lock().unwrap().is_none());
-        assert_eq!(fs::read(&path).unwrap(), old_ciphertext);
+        assert!(
+            fs::read(&path).unwrap() == old_ciphertext,
+            "vault ciphertext changed after deletion failure"
+        );
         assert!(clear_state_path(&path).exists());
 
         save_section_at(
@@ -855,7 +873,10 @@ mod tests {
         )
         .unwrap();
         let new_key = keys.key.lock().unwrap().clone().unwrap();
-        assert_ne!(new_key, old_key);
+        assert!(
+            new_key != old_key,
+            "vault key was reused after key-destroyed recovery"
+        );
         assert!(!clear_state_path(&path).exists());
 
         let restored = directory.path().join("restored-old-vault.json");
@@ -864,12 +885,13 @@ mod tests {
             decrypt_document(&restored, &new_key).unwrap_err(),
             "secure-vault-authentication-failed"
         );
-        assert_eq!(
+        assert!(
             decrypt_document(&restored, &old_key)
                 .unwrap()
                 .sections
-                .get(SECTION_RUNTIME_TGP_PSK),
-            Some(&Value::String("old-secret".into()))
+                .get(SECTION_RUNTIME_TGP_PSK)
+                == Some(&Value::String("old-secret".into())),
+            "restored vault payload did not match the original"
         );
     }
 

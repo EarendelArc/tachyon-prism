@@ -2219,6 +2219,47 @@ mod tests {
     use super::*;
     use std::process::Command;
 
+    const SENSITIVE_BYTES_MISMATCH: &str = "sensitive configuration bytes differ";
+
+    fn assert_sensitive_bytes_equal(actual: &[u8], expected: &[u8]) {
+        assert!(actual == expected, "{SENSITIVE_BYTES_MISMATCH}");
+    }
+
+    fn panic_payload_text(payload: &(dyn std::any::Any + Send)) -> &str {
+        if let Some(message) = payload.downcast_ref::<&str>() {
+            message
+        } else if let Some(message) = payload.downcast_ref::<String>() {
+            message.as_str()
+        } else {
+            "non-string panic payload"
+        }
+    }
+
+    #[test]
+    fn sensitive_byte_mismatch_panic_never_formats_fixture_values() {
+        let fixture =
+            br#"{"secret":"fixture-secret","password":"fixture-password","uuid":"fixture-uuid"}"#;
+        let panic =
+            std::panic::catch_unwind(|| assert_sensitive_bytes_equal(b"different", fixture))
+                .expect_err("intentional mismatch must panic");
+        let message = panic_payload_text(panic.as_ref());
+        assert!(
+            message == SENSITIVE_BYTES_MISMATCH,
+            "sensitive comparison must use its fixed panic message"
+        );
+        for forbidden in [
+            "fixture-secret",
+            "fixture-password",
+            "fixture-uuid",
+            std::str::from_utf8(fixture).unwrap(),
+        ] {
+            assert!(
+                !message.contains(forbidden),
+                "sensitive comparison panic exposed fixture data"
+            );
+        }
+    }
+
     struct FakeBackend {
         events: Vec<String>,
         live: Vec<String>,
@@ -2312,7 +2353,10 @@ mod tests {
             &mut self,
             snapshot: &ProxySnapshotHandle,
         ) -> Result<ProxyReadback, BackendFailure> {
-            assert_eq!(snapshot.token, "snapshot-1");
+            assert!(
+                snapshot.token == "snapshot-1",
+                "proxy snapshot token changed"
+            );
             self.events.push("restoreProxy".to_string());
             Ok(self.restore_readback.clone())
         }
@@ -2677,7 +2721,7 @@ mod tests {
         let expected = plan.config().to_vec();
         let lease = store.stage(&plan).unwrap();
         assert!(untouched.load(std::sync::atomic::Ordering::Acquire));
-        assert_eq!(fs::read(lease.path()).unwrap(), expected);
+        assert_sensitive_bytes_equal(&fs::read(lease.path()).unwrap(), &expected);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2715,7 +2759,7 @@ mod tests {
         let expected = plan.config().to_vec();
         let current = store.stage(&plan).unwrap();
         assert!(untouched.load(std::sync::atomic::Ordering::Acquire));
-        assert_eq!(fs::read(current.path()).unwrap(), expected);
+        assert_sensitive_bytes_equal(&fs::read(current.path()).unwrap(), &expected);
         let remaining_old = fs::read_dir(&root)
             .unwrap()
             .filter_map(Result::ok)
@@ -2776,7 +2820,7 @@ mod tests {
         let mut child = lease.spawn_command(&mut command).unwrap();
         assert!(child.wait().unwrap().success());
         assert!(untouched.load(std::sync::atomic::Ordering::Acquire));
-        assert_eq!(fs::read(output).unwrap(), expected);
+        assert_sensitive_bytes_equal(&fs::read(output).unwrap(), &expected);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2804,11 +2848,7 @@ mod tests {
                 .stderr(Stdio::null());
             let mut child = lease.spawn_command(&mut command).unwrap();
             assert!(child.wait().unwrap().success(), "{phase} child failed");
-            assert_eq!(
-                fs::read(output).unwrap(),
-                expected,
-                "{phase} read a stale offset"
-            );
+            assert_sensitive_bytes_equal(&fs::read(output).unwrap(), &expected);
         }
     }
 
@@ -2869,12 +2909,18 @@ mod tests {
             store.stage(&plan).unwrap_err(),
             "generation-config-write-failed"
         );
-        assert_eq!(fs::read(&target).unwrap(), b"target-secret");
+        assert!(
+            fs::read(&target).unwrap() == b"target-secret",
+            "hardlink target contents changed"
+        );
         assert_eq!(
             store.sweep_orphans().unwrap_err(),
             "generation-dir-read-failed"
         );
-        assert_eq!(fs::read(&target).unwrap(), b"target-secret");
+        assert!(
+            fs::read(&target).unwrap() == b"target-secret",
+            "hardlink target contents changed during sweep"
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2944,7 +2990,10 @@ mod tests {
             .err()
             .expect("symlinked lease file must be rejected");
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
-        assert_eq!(fs::read(&target).unwrap(), b"do-not-overwrite");
+        assert!(
+            fs::read(&target).unwrap() == b"do-not-overwrite",
+            "generation target contents changed"
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -3123,9 +3172,9 @@ mod tests {
         select_with_probe(&mut runtime, "B", 2, probe_b);
         runtime.revalidate_active(&mut backend).unwrap();
         assert_eq!(backend.last_probe, Some(probe_a));
-        assert_eq!(
-            runtime.status().active.unwrap().generation_id,
-            active.generation_id
+        assert!(
+            runtime.status().active.unwrap().generation_id == active.generation_id,
+            "active generation identifier changed during revalidation"
         );
         assert_eq!(runtime.status().desired.unwrap().node_id, "B");
         assert_eq!(runtime.status().phase, GenerationPhase::PendingApply);
@@ -3139,7 +3188,10 @@ mod tests {
         let second_id = restarted
             .restore_desired_after_restart(b"{}", "B".to_string(), "2".to_string(), vec![])
             .unwrap();
-        assert_ne!(first_id, second_id);
+        assert!(
+            first_id != second_id,
+            "generation identifiers must differ across epochs"
+        );
         assert!(restarted.status().active.is_none());
         assert!(serde_json::to_string(&second_id).unwrap().starts_with('"'));
     }
@@ -3181,7 +3233,10 @@ mod tests {
         let mut first = GenerationClock::open(path.clone()).unwrap();
         let first_id = first.next().unwrap();
         let second = GenerationClock::open(path.clone()).unwrap();
-        assert_ne!(first.boot_epoch, second.boot_epoch);
+        assert!(
+            first.boot_epoch != second.boot_epoch,
+            "generation boot epochs must differ"
+        );
         assert!(path.is_file());
         assert!(!path.with_extension("json.tmp").exists());
         assert!(first_id.as_str().ends_with("0000000000000001"));
@@ -3426,7 +3481,10 @@ mod tests {
         let status = runtime.execute_latest(&mut backend).unwrap();
         let active = status.active.unwrap();
         let proxy = status.proxy_generation.unwrap();
-        assert_eq!(proxy.generation_id, active.generation_id);
+        assert!(
+            proxy.generation_id == active.generation_id,
+            "proxy and active generation identifiers differ"
+        );
         assert_eq!(Some(proxy.pid), active.pid);
         assert!(status.proxy_ready);
     }
