@@ -7954,7 +7954,7 @@ fn owned_tcp_listener_table(pid: u32) -> Result<Vec<OwnedTcpListener>, String> {
         if !matches!(TcpSIState::from(tcp.tcpsi_state), TcpSIState::Listen) {
             continue;
         }
-        if let Some(address) = macos_tcp_listener_address(&tcp) {
+        if let Some(address) = macos_tcp_listener_address(&tcp, socket.psi.soi_family) {
             listeners.push(OwnedTcpListener { address, pid });
         }
     }
@@ -7962,18 +7962,47 @@ fn owned_tcp_listener_table(pid: u32) -> Result<Vec<OwnedTcpListener>, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_tcp_listener_address(tcp: &libproc::libproc::net_info::TcpSockInfo) -> Option<SocketAddr> {
+fn macos_tcp_listener_address(
+    tcp: &libproc::libproc::net_info::TcpSockInfo,
+    family: i32,
+) -> Option<SocketAddr> {
     let port = macos_tcp_listener_port(tcp.tcpsi_ini.insi_lport)?;
     if port == 0 {
         return None;
     }
-    if tcp.tcpsi_ini.insi_vflag == 0 {
-        let raw = unsafe { tcp.tcpsi_ini.insi_laddr.ina_46.i46a_addr4.s_addr };
-        let address = IpAddr::V4(Ipv4Addr::from(raw.swap_bytes()));
-        return Some(SocketAddr::new(address, port));
+    let ipv4 = unsafe {
+        tcp.tcpsi_ini
+            .insi_laddr
+            .ina_46
+            .i46a_addr4
+            .s_addr
+            .to_ne_bytes()
+    };
+    let ipv6 = unsafe { tcp.tcpsi_ini.insi_laddr.ina_6.s6_addr };
+    macos_tcp_listener_ip(family, tcp.tcpsi_ini.insi_vflag, ipv4, ipv6)
+        .map(|address| SocketAddr::new(address, port))
+}
+
+#[cfg(any(target_os = "macos", test))]
+const MACOS_AF_INET: i32 = 2;
+#[cfg(any(target_os = "macos", test))]
+const MACOS_AF_INET6: i32 = 30;
+#[cfg(any(target_os = "macos", test))]
+const MACOS_INI_IPV4: u8 = 0x1;
+#[cfg(any(target_os = "macos", test))]
+const MACOS_INI_IPV6: u8 = 0x2;
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_tcp_listener_ip(family: i32, vflag: u8, ipv4: [u8; 4], ipv6: [u8; 16]) -> Option<IpAddr> {
+    match family {
+        MACOS_AF_INET if vflag & MACOS_INI_IPV4 != 0 && vflag & MACOS_INI_IPV6 == 0 => {
+            Some(IpAddr::V4(Ipv4Addr::from(ipv4)))
+        }
+        MACOS_AF_INET6 if vflag & MACOS_INI_IPV6 != 0 && vflag & MACOS_INI_IPV4 == 0 => {
+            Some(IpAddr::V6(Ipv6Addr::from(ipv6)))
+        }
+        _ => None,
     }
-    let bytes = unsafe { tcp.tcpsi_ini.insi_laddr.ina_6.s6_addr };
-    Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::from(bytes)), port))
 }
 
 #[allow(dead_code)]
@@ -11336,6 +11365,32 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         assert_eq!(macos_tcp_listener_port(-1), None);
         assert_eq!(macos_tcp_listener_port(i32::from(u16::MAX) + 1), None);
         assert_eq!(macos_tcp_listener_port(i32::MAX), None);
+    }
+
+    #[test]
+    fn macos_listener_address_uses_family_and_ini_flags() {
+        let ipv4 = [127, 0, 0, 1];
+        let ipv6 = Ipv6Addr::LOCALHOST.octets();
+        assert_eq!(
+            macos_tcp_listener_ip(MACOS_AF_INET, MACOS_INI_IPV4, ipv4, ipv6),
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
+        assert_eq!(
+            macos_tcp_listener_ip(MACOS_AF_INET6, MACOS_INI_IPV6, ipv4, ipv6),
+            Some(IpAddr::V6(Ipv6Addr::LOCALHOST))
+        );
+        for invalid in [
+            (MACOS_AF_INET, 0),
+            (MACOS_AF_INET, MACOS_INI_IPV6),
+            (MACOS_AF_INET6, MACOS_INI_IPV4),
+            (MACOS_AF_INET6, MACOS_INI_IPV4 | MACOS_INI_IPV6),
+            (0, MACOS_INI_IPV4),
+        ] {
+            assert_eq!(
+                macos_tcp_listener_ip(invalid.0, invalid.1, ipv4, ipv6),
+                None
+            );
+        }
     }
 
     #[test]
