@@ -303,11 +303,12 @@ mod tests {
     fn write_new_rejects_post_publish_swap_without_deleting_replacement() {
         let (temporary, directory) = root();
         let path = temporary.path().join("generation.json");
+        let root_path = temporary.path().to_path_buf();
         let result =
             write_new_with_publish_hook(&directory, OsStr::new("generation.json"), b"config", {
                 let path = path.clone();
                 move || {
-                    let saved = temporary.path().join("published-original");
+                    let saved = root_path.join("published-original");
                     std::fs::rename(&path, saved).unwrap();
                     std::fs::write(&path, b"replacement").unwrap();
                     std::fs::set_permissions(

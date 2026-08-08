@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -217,6 +218,20 @@ class SmokeEvidenceManifestTests(unittest.TestCase):
             self.assertEqual(size, len(b"darwin-system-var-alias\n"))
             self.assertEqual(digest, hashlib.sha256(evidence.read_bytes()).hexdigest())
 
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin symlink flags are macOS-only")
+    def test_darwin_var_alias_rejects_real_artifact_symlink(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            root = Path(temporary)
+            target = root / "RESULT.json"
+            target.write_bytes(b"darwin-artifact\n")
+            linked = root / "linked-result.json"
+            os.symlink(target.name, linked)
+            metadata = os.lstat(linked)
+            self.assertTrue(hasattr(metadata, "st_flags"))
+            self.assertTrue(stat.S_ISLNK(metadata.st_mode))
+            with self.assertRaisesRegex(ValueError, "symlink or reparse point"):
+                secure_file_measure(linked)
+
     @unittest.skipUnless(os.name == "nt", "Windows junction behavior is Windows-only")
     def test_entry_rejects_windows_junction_parent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -239,6 +254,7 @@ class SmokeEvidenceManifestTests(unittest.TestCase):
             finally:
                 os.rmdir(junction)
 
+    @unittest.skipUnless(os.name == "nt", "Windows reparse attributes are Windows-only")
     def test_reparse_attribute_is_rejected_even_without_symlink_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "RESULT.json"

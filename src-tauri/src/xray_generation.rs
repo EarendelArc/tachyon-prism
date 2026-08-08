@@ -2673,9 +2673,11 @@ mod tests {
         let untouched = install_root_swap_hook(&store, &root, &moved, None);
         let mut runtime = GenerationRuntime::default();
         select(&mut runtime, "A", 1);
-        let lease = store.stage(&runtime.begin_apply().unwrap()).unwrap();
+        let plan = runtime.begin_apply().unwrap();
+        let expected = plan.config().to_vec();
+        let lease = store.stage(&plan).unwrap();
         assert!(untouched.load(std::sync::atomic::Ordering::Acquire));
-        assert_eq!(fs::read(lease.path()).unwrap(), b"config");
+        assert_eq!(fs::read(lease.path()).unwrap(), expected);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2709,9 +2711,11 @@ mod tests {
         let untouched = install_root_swap_hook(&store, &root, &moved, None);
         let mut runtime = GenerationRuntime::default();
         select(&mut runtime, "A", 1);
-        let current = store.stage(&runtime.begin_apply().unwrap()).unwrap();
+        let plan = runtime.begin_apply().unwrap();
+        let expected = plan.config().to_vec();
+        let current = store.stage(&plan).unwrap();
         assert!(untouched.load(std::sync::atomic::Ordering::Acquire));
-        assert_eq!(fs::read(current.path()).unwrap(), b"config");
+        assert_eq!(fs::read(current.path()).unwrap(), expected);
         let remaining_old = fs::read_dir(&root)
             .unwrap()
             .filter_map(Result::ok)
@@ -2757,7 +2761,9 @@ mod tests {
         let store = GenerationStore::new(root.clone());
         let mut runtime = GenerationRuntime::default();
         select(&mut runtime, "A", 1);
-        let lease = store.stage(&runtime.begin_apply().unwrap()).unwrap();
+        let plan = runtime.begin_apply().unwrap();
+        let expected = plan.config().to_vec();
+        let lease = store.stage(&plan).unwrap();
         let untouched = install_root_swap_hook(&store, &root, &moved, Some(output.clone()));
         let mut command = Command::new("sh");
         command
@@ -2770,7 +2776,7 @@ mod tests {
         let mut child = lease.spawn_command(&mut command).unwrap();
         assert!(child.wait().unwrap().success());
         assert!(untouched.load(std::sync::atomic::Ordering::Acquire));
-        assert_eq!(fs::read(output).unwrap(), b"config");
+        assert_eq!(fs::read(output).unwrap(), expected);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2782,7 +2788,9 @@ mod tests {
         let store = GenerationStore::new(parent.path().join("generations"));
         let mut runtime = GenerationRuntime::default();
         select(&mut runtime, "A", 1);
-        let lease = store.stage(&runtime.begin_apply().unwrap()).unwrap();
+        let plan = runtime.begin_apply().unwrap();
+        let expected = plan.config().to_vec();
+        let lease = store.stage(&plan).unwrap();
 
         for phase in ["validate", "start"] {
             let output = parent.path().join(format!("{phase}-config.json"));
@@ -2798,7 +2806,7 @@ mod tests {
             assert!(child.wait().unwrap().success(), "{phase} child failed");
             assert_eq!(
                 fs::read(output).unwrap(),
-                b"config",
+                expected,
                 "{phase} read a stale offset"
             );
         }
@@ -3480,7 +3488,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let first = GenerationStore::new(root.path().to_path_buf());
         let orphan = root.path().join("generation-live-owner.json");
-        fs::write(&orphan, "{}").unwrap();
+        write_atomic(&orphan, "{}").unwrap();
 
         let second = GenerationStore::new(root.path().to_path_buf());
         assert_eq!(
