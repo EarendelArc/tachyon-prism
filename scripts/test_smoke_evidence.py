@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -206,6 +207,15 @@ class SmokeEvidenceManifestTests(unittest.TestCase):
                 secure_file_measure(file_link)
             with self.assertRaisesRegex(ValueError, "symlink or reparse point"):
                 secure_file_measure(parent_link / target.name)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin /var fixture is macOS-only")
+    def test_measure_accepts_darwin_system_var_alias(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as temporary:
+            evidence = Path(temporary) / "RESULT.json"
+            evidence.write_bytes(b"darwin-system-var-alias\n")
+            digest, size = secure_file_measure(evidence)
+            self.assertEqual(size, len(b"darwin-system-var-alias\n"))
+            self.assertEqual(digest, hashlib.sha256(evidence.read_bytes()).hexdigest())
 
     @unittest.skipUnless(os.name == "nt", "Windows junction behavior is Windows-only")
     def test_entry_rejects_windows_junction_parent(self) -> None:

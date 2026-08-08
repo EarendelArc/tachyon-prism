@@ -329,8 +329,47 @@ def assert_content_fits_viewport(cdp: CDP) -> None:
         })()
         """,
     )
-    if int(overflow["scroll"]) > int(overflow["client"]) + 2:
+    if int(overflow["scroll"]) > int(overflow["client"]):
         raise AssertionError(f"content vertical overflow detected: {overflow}")
+
+
+def assert_no_shell_overflow(cdp: CDP, page: str) -> None:
+    overflow = cdp.evaluate(
+        """
+        (() => {
+          const html = document.documentElement;
+          const body = document.body;
+          const shell = document.querySelector('.prism-shell');
+          const shellRect = shell?.getBoundingClientRect();
+          return {
+            bodyClientHeight: body.clientHeight,
+            bodyClientWidth: body.clientWidth,
+            bodyScrollHeight: body.scrollHeight,
+            bodyScrollWidth: body.scrollWidth,
+            htmlClientHeight: html.clientHeight,
+            htmlClientWidth: html.clientWidth,
+            htmlScrollHeight: html.scrollHeight,
+            htmlScrollWidth: html.scrollWidth,
+            shellBottom: shellRect ? Math.round(shellRect.bottom) : -1,
+            shellRight: shellRect ? Math.round(shellRect.right) : -1,
+            windowHeight: window.innerHeight,
+            windowWidth: window.innerWidth
+          };
+        })()
+        """,
+    )
+    width = int(overflow["windowWidth"])
+    height = int(overflow["windowHeight"])
+    escaped = (
+        int(overflow["bodyScrollWidth"]) > int(overflow["bodyClientWidth"])
+        or int(overflow["htmlScrollWidth"]) > int(overflow["htmlClientWidth"])
+        or int(overflow["bodyScrollHeight"]) > height
+        or int(overflow["htmlScrollHeight"]) > height
+        or int(overflow["shellRight"]) > width
+        or int(overflow["shellBottom"]) > height
+    )
+    if escaped:
+        raise AssertionError(f"{page} escaped the desktop shell: {overflow}")
 
 
 def assert_content_scroll_is_contained(cdp: CDP) -> None:
@@ -1390,6 +1429,9 @@ def assert_key_pages_at_viewports(cdp: CDP, output_dir: Path) -> None:
                 text = select_settings_section(cdp, 1)
             assert_no_runtime_error(text)
             assert_no_horizontal_overflow(cdp)
+            assert_no_shell_overflow(cdp, page)
+            if page == "overview":
+                assert_content_fits_viewport(cdp)
             assert_viewport(cdp, width, height)
             cdp.screenshot(output_dir / f"{page}-{width}x{height}.png")
 
@@ -1417,6 +1459,9 @@ def capture_fixed_window_pages(cdp: CDP, output_dir: Path, language: str) -> Non
         assert_contains(text, page_marker)
         assert_no_runtime_error(text)
         assert_no_horizontal_overflow(cdp)
+        assert_no_shell_overflow(cdp, page)
+        if page == "overview":
+            assert_content_fits_viewport(cdp)
         assert_content_scroll_is_contained(cdp)
         assert_fixed_window_labels_fit(cdp, page)
         assert_desktop_viewport(cdp)
@@ -1454,6 +1499,9 @@ def smoke_key_pages_at_viewport(cdp: CDP, width: int, height: int, output_dir: P
         text = navigate_hash(cdp, view)
         assert_no_runtime_error(text)
         assert_no_horizontal_overflow(cdp)
+        assert_no_shell_overflow(cdp, view)
+        if view == "overview":
+            assert_content_fits_viewport(cdp)
         assert_viewport(cdp, width, height)
         cdp.screenshot(output_dir / f"{view}-{width}x{height}.png")
 
@@ -1851,6 +1899,7 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
         assert_contains(text, "Tachyon Prism", "系统代理", "实时流量")
         assert_no_runtime_error(text)
         assert_no_horizontal_overflow(cdp)
+        assert_no_shell_overflow(cdp, "overview")
         assert_content_fits_viewport(cdp)
         assert_desktop_viewport(cdp)
         assert_custom_window_chrome(cdp)

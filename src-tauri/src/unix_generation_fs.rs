@@ -8,14 +8,9 @@ use std::io::{self, Seek, SeekFrom, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(test)]
-use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(test)]
-static AFTER_PUBLISH_HOOK: OnceLock<Mutex<Option<Box<dyn FnOnce() + Send>>>> = OnceLock::new();
 
 #[derive(Debug)]
 pub(crate) struct Entry {
@@ -43,6 +38,15 @@ pub(crate) fn validate_component(name: &OsStr) -> io::Result<()> {
 }
 
 pub(crate) fn write_new(root: &File, name: &OsStr, contents: &[u8]) -> io::Result<File> {
+    write_new_with_publish_hook(root, name, contents, || {})
+}
+
+fn write_new_with_publish_hook(
+    root: &File,
+    name: &OsStr,
+    contents: &[u8],
+    after_publish: impl FnOnce(),
+) -> io::Result<File> {
     validate_root(root)?;
     validate_component(name)?;
     let temporary = temporary_name();
@@ -56,8 +60,7 @@ pub(crate) fn write_new(root: &File, name: &OsStr, contents: &[u8]) -> io::Resul
             .map_err(io::Error::from)?;
         published_stat = Some(original);
         fsync(root).map_err(io::Error::from)?;
-        #[cfg(test)]
-        invoke_after_publish_hook();
+        after_publish();
         let published = statat(root, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
         validate_stat(&published)?;
         if published.st_dev != original.st_dev || published.st_ino != original.st_ino {
@@ -82,24 +85,6 @@ pub(crate) fn write_new(root: &File, name: &OsStr, contents: &[u8]) -> io::Resul
         }
     }
     result
-}
-
-#[cfg(test)]
-pub(crate) fn set_after_publish_hook(hook: impl FnOnce() + Send + 'static) {
-    let slot = AFTER_PUBLISH_HOOK.get_or_init(|| Mutex::new(None));
-    *slot.lock().unwrap() = Some(Box::new(hook));
-}
-
-#[cfg(test)]
-fn invoke_after_publish_hook() {
-    let hook = AFTER_PUBLISH_HOOK
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap()
-        .take();
-    if let Some(hook) = hook {
-        hook();
-    }
 }
 
 pub(crate) fn replace(root: &File, name: &OsStr, contents: &[u8]) -> io::Result<()> {
@@ -245,10 +230,11 @@ fn temporary_name() -> OsString {
 mod tests {
     use super::*;
     use std::io::Read;
-    use std::os::unix::fs::{symlink, MetadataExt};
+    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 
     fn root() -> (tempfile::TempDir, File) {
         let temporary = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temporary.path(), PermissionsExt::from_mode(0o700)).unwrap();
         let file = File::open(temporary.path()).unwrap();
         (temporary, file)
     }
@@ -317,20 +303,21 @@ mod tests {
     fn write_new_rejects_post_publish_swap_without_deleting_replacement() {
         let (temporary, directory) = root();
         let path = temporary.path().join("generation.json");
-        set_after_publish_hook({
-            let path = path.clone();
-            move || {
-                let saved = temporary.path().join("published-original");
-                std::fs::rename(&path, saved).unwrap();
-                std::fs::write(&path, b"replacement").unwrap();
-                std::fs::set_permissions(
-                    &path,
-                    std::os::unix::fs::PermissionsExt::from_mode(0o600),
-                )
-                .unwrap();
-            }
-        });
-        assert!(write_new(&directory, OsStr::new("generation.json"), b"config").is_err());
+        let result =
+            write_new_with_publish_hook(&directory, OsStr::new("generation.json"), b"config", {
+                let path = path.clone();
+                move || {
+                    let saved = temporary.path().join("published-original");
+                    std::fs::rename(&path, saved).unwrap();
+                    std::fs::write(&path, b"replacement").unwrap();
+                    std::fs::set_permissions(
+                        &path,
+                        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+                    )
+                    .unwrap();
+                }
+            });
+        assert!(result.is_err());
         assert_eq!(std::fs::read(path).unwrap(), b"replacement");
     }
 }

@@ -2467,7 +2467,11 @@ p,
 
 @media (max-height: 620px) and (min-width: 761px) {
   .prism-content {
-    padding-top: 3px;
+    padding-top: 0;
+  }
+
+  .overview-page {
+    gap: 0;
   }
 
   .overview-metrics {
@@ -2475,8 +2479,8 @@ p,
   }
 
   .metric-card {
-    min-height: 44px;
-    padding: 6px 9px;
+    min-height: 42px;
+    padding: 5px 9px;
   }
 
   .metric-card h2 {
@@ -2484,12 +2488,12 @@ p,
   }
 
   .runtime-presence {
-    margin-bottom: 2px;
-    padding: 5px 8px;
+    margin-bottom: 0;
+    padding: 3px 8px;
   }
 
   .overview-grid {
-    gap: 5px;
+    gap: 4px;
   }
 
   .traffic-section,
@@ -2501,7 +2505,12 @@ p,
   .traffic-section h2,
   .overview-side h2 {
     font-size: 14px;
+    line-height: 1;
     margin: 0;
+  }
+
+  .proxy-probe-panel {
+    padding: 4px 8px;
   }
 
   .traffic-card {
@@ -2533,8 +2542,8 @@ p,
 
   .current-node-card,
   .mode-option {
-    min-height: 32px;
-    padding: 4px 8px;
+    min-height: 30px;
+    padding: 3px 8px;
   }
 
   .current-node-card small,

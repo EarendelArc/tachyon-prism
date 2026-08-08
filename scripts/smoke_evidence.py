@@ -6,6 +6,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -38,7 +39,25 @@ def current_git_commit(root: Path) -> str:
 
 
 def _absolute_lexical(path: Path) -> Path:
-    return Path(os.path.abspath(os.fspath(path)))
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    if sys.platform != "darwin" or absolute.anchor != "/" or absolute.parts[1:2] != ("var",):
+        return absolute
+
+    alias = Path("/var")
+    canonical = Path("/private/var")
+    alias_metadata = os.lstat(alias)
+    if not stat.S_ISLNK(alias_metadata.st_mode):
+        return absolute
+    alias_target = Path(os.readlink(alias))
+    if not alias_target.is_absolute():
+        alias_target = alias.parent / alias_target
+    if Path(os.path.abspath(os.fspath(alias_target))) != canonical:
+        return absolute
+    for trusted_component in (Path("/private"), canonical):
+        metadata = os.lstat(trusted_component)
+        if _is_symlink_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+            return absolute
+    return canonical.joinpath(*absolute.parts[2:])
 
 
 def _is_symlink_or_reparse(metadata: os.stat_result) -> bool:
