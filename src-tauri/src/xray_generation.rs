@@ -186,9 +186,10 @@ impl ConfigLease {
     pub(crate) fn spawn_command(&self, command: &mut Command) -> std::io::Result<Child> {
         self.prepare_child_command(command)?;
         #[cfg(test)]
-        let mut child = with_generation_race(&self.race_hook, || command.spawn())?;
+        let mut child =
+            with_generation_race(&self.race_hook, || crate::process_spawn::spawn(command))?;
         #[cfg(not(test))]
-        let mut child = command.spawn()?;
+        let mut child = crate::process_spawn::spawn(command)?;
         if let Err(error) = self.verify_child_source() {
             let _ = child.kill();
             let _ = child.wait();
@@ -2681,14 +2682,14 @@ mod tests {
     }
 
     fn run_instance_lease_child(root: &Path, result: &Path) -> std::process::Output {
-        Command::new(std::env::current_exe().unwrap())
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
             .arg("--exact")
             .arg("xray_generation::tests::instance_lease_child_helper")
             .arg("--nocapture")
             .env("TACHYON_INSTANCE_LEASE_CHILD_ROOT", root)
-            .env("TACHYON_INSTANCE_LEASE_CHILD_RESULT", result)
-            .output()
-            .unwrap()
+            .env("TACHYON_INSTANCE_LEASE_CHILD_RESULT", result);
+        crate::process_spawn::output(&mut command).unwrap()
     }
 
     #[test]
@@ -3118,13 +3119,13 @@ mod tests {
         let root = parent.path().join("generations");
         let first = GenerationStore::new(root.clone());
         assert!(first.instance_lease.is_some());
-        let mut child = Command::new("sh")
+        let mut command = Command::new("sh");
+        command
             .args(["-c", "sleep 5"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        let mut child = crate::process_spawn::spawn(&mut command).unwrap();
 
         drop(first);
         let second = GenerationStore::new(root);

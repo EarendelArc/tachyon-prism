@@ -23,6 +23,7 @@ use ureq::http::{Method, Request, Uri};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 mod core_ipc;
+mod process_spawn;
 mod secure_vault;
 mod system_proxy;
 #[cfg(unix)]
@@ -4549,11 +4550,9 @@ fn run_command(program: &str, args: &[&str]) -> Result<String, String> {
 
 fn command_output_with_timeout(mut command: Command, timeout: Duration) -> Result<Output, String> {
     hide_command_window(&mut command);
-    let child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("spawn command: {err}"))?;
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child =
+        process_spawn::spawn(&mut command).map_err(|err| format!("spawn command: {err}"))?;
     child_output_with_timeout(child, timeout)
 }
 
@@ -8833,7 +8832,7 @@ impl ManagedProcess {
             hide_command_window(&mut command);
             let mut child = match secure_config {
                 Some(config) => config.spawn_command(&mut command),
-                None => command.spawn(),
+                None => process_spawn::spawn(&mut command),
             }
             .map_err(|err| format!("start {label}: {err}"))?;
             let stdout = child
@@ -10933,16 +10932,16 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         drop(reservation);
 
         let spawn_fixture = |ready: &Path| {
-            Command::new(std::env::current_exe().expect("current test binary"))
+            let mut command = Command::new(std::env::current_exe().expect("current test binary"));
+            command
                 .args([
                     "--exact",
                     "tests::watchdog_tcp_listener_fixture_child",
                     "--nocapture",
                 ])
                 .env("TACHYON_WATCHDOG_FIXTURE_PORT", port.to_string())
-                .env("TACHYON_WATCHDOG_FIXTURE_READY", ready)
-                .spawn()
-                .expect("spawn real TCP fixture")
+                .env("TACHYON_WATCHDOG_FIXTURE_READY", ready);
+            process_spawn::spawn(&mut command).expect("spawn real TCP fixture")
         };
         let wait_ready = |ready: &Path| -> u32 {
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -12318,12 +12317,14 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
     #[test]
     fn managed_process_keeps_child_after_try_wait_failure_for_retry() {
         let child = if cfg!(target_os = "windows") {
-            Command::new(std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into()))
-                .args(["/C", "ping -n 20 127.0.0.1 > nul"])
-                .spawn()
-                .unwrap()
+            let mut command =
+                Command::new(std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into()));
+            command.args(["/C", "ping -n 20 127.0.0.1 > nul"]);
+            process_spawn::spawn(&mut command).unwrap()
         } else {
-            Command::new("sh").args(["-c", "sleep 20"]).spawn().unwrap()
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 20"]);
+            process_spawn::spawn(&mut command).unwrap()
         };
         let mut process = ManagedProcess {
             child: Some(ManagedChild::Standard(child)),

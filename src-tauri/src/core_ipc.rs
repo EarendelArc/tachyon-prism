@@ -22,6 +22,17 @@ const UNIX_WATCHDOG_FD: i32 = 199;
 #[cfg(unix)]
 const WATCHDOG_NORMAL_EXIT: u8 = b'N';
 
+#[cfg(unix)]
+#[derive(Clone, Copy, Default)]
+enum CloexecPipeFault {
+    #[default]
+    None,
+    #[cfg(all(test, target_os = "macos"))]
+    FirstFcntl,
+    #[cfg(all(test, target_os = "macos"))]
+    SecondFcntl,
+}
+
 #[derive(Default)]
 struct SpawnOptions {
     child_env: Vec<(OsString, OsString)>,
@@ -43,6 +54,56 @@ struct UnixProcessIdentity {
     pid: i32,
     pgid: i32,
     started: u128,
+}
+
+#[cfg(unix)]
+fn create_cloexec_pipe(fault: CloexecPipeFault) -> io::Result<[std::os::fd::OwnedFd; 2]> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    let mut fds = [-1; 2];
+    #[cfg(target_os = "linux")]
+    {
+        let _ = fault;
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        return Ok(unsafe { [OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])] });
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+
+        let _guard = crate::process_spawn::fd_spawn_guard()?;
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let owned = unsafe { [OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])] };
+        for (index, fd) in owned.iter().enumerate() {
+            #[cfg(test)]
+            if matches!(
+                (fault, index),
+                (CloexecPipeFault::FirstFcntl, 0) | (CloexecPipeFault::SecondFcntl, 1)
+            ) {
+                return Err(io::Error::other("injected Darwin fcntl failure"));
+            }
+            let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+            if flags < 0
+                || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, flags | libc::FD_CLOEXEC) }
+                    < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        return Ok(owned);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = fault;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "secure CLOEXEC pipes are unsupported on this Unix platform",
+        ))
+    }
 }
 
 pub(crate) struct SpawnedCore {
@@ -241,7 +302,7 @@ struct PlatformSpawn {
 mod platform {
     use super::*;
     use std::io::Write;
-    use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+    use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
     use std::os::unix::process::CommandExt;
     use std::process::{Child, Command, Stdio};
 
@@ -317,12 +378,13 @@ mod platform {
     }
 
     pub(super) fn create_token_pipe() -> io::Result<(File, TokenPipe)> {
-        let mut fds = [-1; 2];
-        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let reader = unsafe { File::from_raw_fd(fds[0]) };
-        Ok((reader, TokenPipe { write_fd: fds[1] }))
+        let [reader, writer] = create_cloexec_pipe(CloexecPipeFault::None)?;
+        Ok((
+            File::from(reader),
+            TokenPipe {
+                write_fd: writer.into_raw_fd(),
+            },
+        ))
     }
 
     pub(super) fn spawn_core(
@@ -373,7 +435,7 @@ mod platform {
                 Ok(())
             });
         }
-        let mut child = command.spawn()?;
+        let mut child = crate::process_spawn::spawn(&mut command)?;
         unsafe { libc::close(pipe.write_fd) };
         pipe.write_fd = -1;
         let stdout = child
@@ -429,12 +491,9 @@ mod platform {
         if matches!(failure, Some(UnixWatchdogFailure::Pipe)) {
             return Err(io::Error::other("injected watchdog pipe failure"));
         }
-        let mut fds = [-1; 2];
-        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let reader = unsafe { File::from_raw_fd(fds[0]) };
-        let control = unsafe { File::from_raw_fd(fds[1]) };
+        let [reader, control] = create_cloexec_pipe(CloexecPipeFault::None)?;
+        let reader = File::from(reader);
+        let control = File::from(control);
         #[cfg(test)]
         if matches!(failure, Some(UnixWatchdogFailure::CurrentExe)) {
             return Err(io::Error::other("injected watchdog executable failure"));
@@ -491,7 +550,7 @@ mod platform {
         if matches!(failure, Some(UnixWatchdogFailure::Spawn)) {
             return Err(io::Error::other("injected watchdog spawn failure"));
         }
-        let child = command.spawn()?;
+        let child = crate::process_spawn::spawn(&mut command)?;
         drop(reader);
         Ok((child, control))
     }
@@ -1003,6 +1062,8 @@ mod tests {
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 2)
             .expect("fixture requires inherited token handle");
+        #[cfg(unix)]
+        assert_eq!(raw_handle as i32, UNIX_TOKEN_FD, "token FD must be exact");
         let mut pipe = fixture_pipe_from_raw(raw_handle);
         match mode.as_str() {
             "early-exit" => return,
@@ -1106,14 +1167,13 @@ mod tests {
     fn ordinary_xray_style_child_does_not_receive_core_handoff() {
         let mut core =
             spawn_fixture("valid-sleep", Duration::from_secs(5)).expect("secure handoff fixture");
-        let output = Command::new(std::env::current_exe().expect("test executable"))
-            .args([
-                "--exact",
-                "core_ipc::tests::uninherited_token_fixture_child",
-                "--nocapture",
-            ])
-            .output()
-            .expect("ordinary child fixture");
+        let mut command = Command::new(std::env::current_exe().expect("test executable"));
+        command.args([
+            "--exact",
+            "core_ipc::tests::uninherited_token_fixture_child",
+            "--nocapture",
+        ]);
+        let output = crate::process_spawn::output(&mut command).expect("ordinary child fixture");
         assert!(
             output.status.success(),
             "ordinary child must not inherit Core IPC state"
@@ -1146,6 +1206,7 @@ mod tests {
             .ok()
             .and_then(|value| value.parse::<i32>().ok())
             .expect("watchdog liveness descriptor");
+        assert_eq!(liveness_fd, UNIX_WATCHDOG_FD, "watchdog FD must be exact");
         let pgid = std::env::var("TACHYON_TEST_WATCHDOG_CORE_PGID")
             .expect("watchdog process group")
             .parse()
@@ -1206,7 +1267,7 @@ mod tests {
                 }
             });
         }
-        let mut target = target.spawn().expect("watchdog signal target");
+        let mut target = crate::process_spawn::spawn(&mut target).expect("watchdog signal target");
         let identity = process_identity(target.id() as i32).expect("target process identity");
         let mut fds = [-1; 2];
         assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
@@ -1234,6 +1295,94 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_cloexec_pipe_sets_both_ends_and_fcntl_faults_fail_closed() {
+        use std::os::fd::AsRawFd;
+
+        let pipe = create_cloexec_pipe(CloexecPipeFault::None).expect("Darwin CLOEXEC pipe");
+        for fd in &pipe {
+            let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+            assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+        }
+        drop(pipe);
+        for fault in [CloexecPipeFault::FirstFcntl, CloexecPipeFault::SecondFcntl] {
+            assert!(create_cloexec_pipe(fault).is_err());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_fd_probe_fixture_child() {
+        let Some(first) = std::env::var("TACHYON_TEST_DARWIN_PIPE_FD_0")
+            .ok()
+            .and_then(|value| value.parse::<i32>().ok())
+        else {
+            return;
+        };
+        let second = std::env::var("TACHYON_TEST_DARWIN_PIPE_FD_1")
+            .expect("second Darwin pipe FD")
+            .parse::<i32>()
+            .expect("second Darwin pipe FD");
+        assert_eq!(unsafe { libc::fcntl(first, libc::F_GETFD) }, -1);
+        assert_eq!(unsafe { libc::fcntl(second, libc::F_GETFD) }, -1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_pipe_window_blocks_concurrent_spawn_and_prevents_fd_leak() {
+        use std::sync::mpsc;
+
+        let (created_tx, created_rx) = mpsc::sync_channel(1);
+        let (mark_tx, mark_rx) = mpsc::sync_channel(1);
+        let (close_tx, close_rx) = mpsc::sync_channel(1);
+        let creator = thread::spawn(move || {
+            let guard = crate::process_spawn::fd_spawn_guard().expect("FD/spawn guard");
+            let mut raw = [-1; 2];
+            assert_eq!(unsafe { libc::pipe(raw.as_mut_ptr()) }, 0);
+            created_tx.send(raw).expect("publish unprotected pipe");
+            mark_rx.recv().expect("mark CLOEXEC");
+            for fd in raw {
+                let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+                assert!(flags >= 0);
+                assert_eq!(
+                    unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) },
+                    0
+                );
+            }
+            drop(guard);
+            close_rx.recv().expect("spawn completed");
+            for fd in raw {
+                unsafe { libc::close(fd) };
+            }
+        });
+        let raw = created_rx.recv().expect("unprotected pipe descriptors");
+        let (spawn_tx, spawn_rx) = mpsc::sync_channel(1);
+        let spawner = thread::spawn(move || {
+            let mut command = Command::new(std::env::current_exe().expect("test executable"));
+            command
+                .args([
+                    "--exact",
+                    "core_ipc::tests::darwin_fd_probe_fixture_child",
+                    "--nocapture",
+                ])
+                .env("TACHYON_TEST_DARWIN_PIPE_FD_0", raw[0].to_string())
+                .env("TACHYON_TEST_DARWIN_PIPE_FD_1", raw[1].to_string());
+            let output = crate::process_spawn::output(&mut command).expect("Darwin FD probe");
+            spawn_tx
+                .send(output.status.success())
+                .expect("publish probe result");
+        });
+        assert!(spawn_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        mark_tx.send(()).expect("release pipe setup");
+        assert!(spawn_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Darwin FD probe result"));
+        close_tx.send(()).expect("close temporary pipe");
+        spawner.join().expect("spawn fixture thread");
+        creator.join().expect("pipe creator thread");
+    }
+
     #[test]
     fn crashing_parent_fixture_child() {
         let Some(pid_path) = std::env::var_os("TACHYON_TEST_CRASH_PID_PATH") else {
@@ -1249,15 +1398,15 @@ mod tests {
     #[test]
     fn prism_process_exit_cleans_core_child() {
         let pid_path = unique_pid_path();
-        let status = Command::new(std::env::current_exe().expect("test executable"))
+        let mut command = Command::new(std::env::current_exe().expect("test executable"));
+        command
             .args([
                 "--exact",
                 "core_ipc::tests::crashing_parent_fixture_child",
                 "--nocapture",
             ])
-            .env("TACHYON_TEST_CRASH_PID_PATH", &pid_path)
-            .status()
-            .expect("crashing parent fixture");
+            .env("TACHYON_TEST_CRASH_PID_PATH", &pid_path);
+        let status = crate::process_spawn::status(&mut command).expect("crashing parent fixture");
         assert!(
             status.success(),
             "crashing parent fixture must reach simulated exit"
