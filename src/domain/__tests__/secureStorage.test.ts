@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { assertSensitiveEqual, assertSensitiveInvocation } from "./sensitiveAssertions";
 
 const tauriMocks = vi.hoisted(() => ({
   invokeDesktop: vi.fn(),
@@ -64,11 +65,11 @@ describe("secure storage migration", () => {
 
     const result = await initializeSecureStorage();
 
-    expect(result.payload).toEqual({ subscriptions, tachyonServers: servers });
+    assertSensitiveEqual(result.payload, { subscriptions, tachyonServers: servers });
     expect(store.has("tachyon.prism.subscription.v1")).toBe(false);
     expect(store.has("tachyon.prism.tachyonServers.v1")).toBe(false);
     expect(store.get("tachyon.prism.secureMigration.v1")).toBe("complete");
-    expect(tauriMocks.invokeDesktop).toHaveBeenCalledWith("migrate_secure_vault", {
+    assertSensitiveInvocation(tauriMocks.invokeDesktop.mock.calls, 0, "migrate_secure_vault", {
       payload: { subscriptions, tachyonServers: servers },
     });
   });
@@ -81,7 +82,7 @@ describe("secure storage migration", () => {
     await expect(initializeSecureStorage()).rejects.toMatchObject({
       code: "secure-vault-keyring-unavailable",
     });
-    expect(store.get("tachyon.prism.subscription.v1")).toBe(raw);
+    assertSensitiveEqual(store.get("tachyon.prism.subscription.v1"), raw);
     expect(store.has("tachyon.prism.secureMigration.v1")).toBe(false);
   });
 
@@ -98,7 +99,7 @@ describe("secure storage migration", () => {
     await expect(initializeSecureStorage()).rejects.toEqual(
       new SecureStorageError("secure-vault-migration-verification-failed"),
     );
-    expect(store.get("tachyon.prism.tachyonServers.v1")).toBe(raw);
+    assertSensitiveEqual(store.get("tachyon.prism.tachyonServers.v1"), raw);
   });
 
   it("is idempotent after a completed migration", async () => {
@@ -134,7 +135,7 @@ describe("secure storage commands", () => {
 
     await saveSecureStorageSection(secureVaultSections.runtimeTgpAuthPsk, "private-psk");
 
-    expect(tauriMocks.invokeDesktop).toHaveBeenCalledWith("save_secure_vault_section", {
+    assertSensitiveInvocation(tauriMocks.invokeDesktop.mock.calls, 0, "save_secure_vault_section", {
       section: "runtimeTgpAuthPsk",
       value: "private-psk",
     });

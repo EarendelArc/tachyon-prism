@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildCoreClientConfigDraft } from "../configDrafts";
+import { assertSensitiveEqual } from "./sensitiveAssertions";
 import {
   activeTachyonServer,
   draftFromTachyonServerProfile,
@@ -27,8 +28,8 @@ describe("tachyon server profiles", () => {
       name: "Game Relay",
       address: "relay.example.com",
       port: 443,
-      psk: "0123456789abcdef",
     });
+    assertSensitiveEqual(active?.psk, "0123456789abcdef");
     expect(active?.id).toMatch(/^tachyon-server-/);
     expect(tachyonServerEndpoint(active)).toBe("relay.example.com:443");
   });
@@ -51,7 +52,7 @@ describe("tachyon server profiles", () => {
     const tgp = config.tgp as Record<string, unknown>;
 
     expect(proxy.server_addr).toBe("relay.example.com:2443");
-    expect(tgp.auth).toEqual({ psk: "psk-value-012345" });
+    assertSensitiveEqual(tgp.auth, { psk: "psk-value-012345" });
   });
 
   it("selects and removes profiles without touching other entries", () => {
@@ -115,9 +116,10 @@ describe("tachyon server profiles", () => {
     );
 
     expect(activeTachyonServer(loaded)?.name).toBe("Stored");
-    expect(draftFromTachyonServerProfile(activeTachyonServer(loaded))).toMatchObject({
+    const loadedDraft = draftFromTachyonServerProfile(activeTachyonServer(loaded));
+    expect(loadedDraft).toMatchObject({
       address: "stored.example.com",
-      psk: "stored-psk-01234",
     });
+    assertSensitiveEqual(loadedDraft.psk, "stored-psk-01234");
   });
 });

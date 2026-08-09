@@ -1,6 +1,6 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
@@ -19,6 +19,31 @@ const TOKEN_READ_LIMIT: u64 = (TOKEN_MESSAGE_BYTES + 1) as u64;
 const UNIX_TOKEN_FD: i32 = 198;
 #[cfg(unix)]
 const UNIX_WATCHDOG_FD: i32 = 199;
+#[cfg(unix)]
+const WATCHDOG_NORMAL_EXIT: u8 = b'N';
+
+#[derive(Default)]
+struct SpawnOptions {
+    child_env: Vec<(OsString, OsString)>,
+    #[cfg(all(test, unix))]
+    watchdog_failure: Option<UnixWatchdogFailure>,
+}
+
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy)]
+enum UnixWatchdogFailure {
+    Pipe,
+    CurrentExe,
+    Spawn,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UnixProcessIdentity {
+    pid: i32,
+    pgid: i32,
+    started: u128,
+}
 
 pub(crate) struct SpawnedCore {
     pub(crate) child: CoreChild,
@@ -64,9 +89,19 @@ pub(crate) fn spawn(
     current_dir: Option<&Path>,
     timeout: Duration,
 ) -> Result<SpawnedCore, String> {
+    spawn_with_options(binary, args, current_dir, timeout, SpawnOptions::default())
+}
+
+fn spawn_with_options(
+    binary: &Path,
+    args: &[&OsStr],
+    current_dir: Option<&Path>,
+    timeout: Duration,
+    options: SpawnOptions,
+) -> Result<SpawnedCore, String> {
     let (reader, pipe) = platform::create_token_pipe()
         .map_err(|_| "create secure Core IPC token handoff".to_string())?;
-    let mut spawned = platform::spawn_core(binary, args, current_dir, pipe)
+    let mut spawned = platform::spawn_core(binary, args, current_dir, pipe, options)
         .map_err(|_| "start Tachyon Core secure child".to_string())?;
     let token = match read_token(reader, timeout) {
         Ok(token) => token,
@@ -100,7 +135,7 @@ fn read_token(reader: File, timeout: Duration) -> Result<Zeroizing<String>, Stri
     thread::Builder::new()
         .name("tachyon-core-ipc-token-reader".to_string())
         .spawn(move || {
-            let mut bytes = Vec::with_capacity(TOKEN_MESSAGE_BYTES + 1);
+            let mut bytes = Zeroizing::new(Vec::with_capacity(TOKEN_MESSAGE_BYTES + 1));
             let result = reader
                 .take(TOKEN_READ_LIMIT)
                 .read_to_end(&mut bytes)
@@ -112,7 +147,7 @@ fn read_token(reader: File, timeout: Duration) -> Result<Zeroizing<String>, Stri
         .recv_timeout(timeout)
         .map_err(|_| "Tachyon Core IPC token handoff timed out".to_string())?
         .map_err(|_| "read Tachyon Core IPC token handoff".to_string())?;
-    validate_token_message(&bytes)
+    validate_token_message(bytes.as_slice())
 }
 
 fn validate_token_message(bytes: &[u8]) -> Result<Zeroizing<String>, String> {
@@ -125,17 +160,19 @@ fn validate_token_message(bytes: &[u8]) -> Result<Zeroizing<String>, String> {
     {
         return Err("Tachyon Core IPC token handoff is not base64url".to_string());
     }
-    let encoded = std::str::from_utf8(&bytes[..TOKEN_ENCODED_BYTES])
-        .map_err(|_| "Tachyon Core IPC token handoff is not UTF-8".to_string())?;
     let decoded = Zeroizing::new(
         URL_SAFE_NO_PAD
-            .decode(encoded)
+            .decode(&bytes[..TOKEN_ENCODED_BYTES])
             .map_err(|_| "Tachyon Core IPC token handoff is not base64url".to_string())?,
     );
     if decoded.len() != TOKEN_BYTES {
         return Err("Tachyon Core IPC token handoff is not 256-bit".to_string());
     }
-    Ok(Zeroizing::new(encoded.to_string()))
+    let mut encoded = Zeroizing::new(String::with_capacity(TOKEN_ENCODED_BYTES));
+    for byte in &bytes[..TOKEN_ENCODED_BYTES] {
+        encoded.push(char::from(*byte));
+    }
+    Ok(encoded)
 }
 
 enum PlatformChild {
@@ -203,14 +240,15 @@ struct PlatformSpawn {
 #[cfg(unix)]
 mod platform {
     use super::*;
-    use std::os::fd::{FromRawFd, RawFd};
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd, RawFd};
     use std::os::unix::process::CommandExt;
     use std::process::{Child, Command, Stdio};
 
     pub(super) struct UnixChild {
         child: Child,
         watchdog: Option<Child>,
-        watchdog_liveness: Option<File>,
+        watchdog_control: Option<File>,
     }
 
     impl UnixChild {
@@ -246,7 +284,10 @@ mod platform {
         }
 
         fn finish_watchdog(&mut self) {
-            self.watchdog_liveness.take();
+            if let Some(mut control) = self.watchdog_control.take() {
+                let _ = control.write_all(&[WATCHDOG_NORMAL_EXIT]);
+                let _ = control.flush();
+            }
             if let Some(mut watchdog) = self.watchdog.take() {
                 let _ = watchdog.wait();
             }
@@ -255,12 +296,11 @@ mod platform {
 
     impl Drop for UnixChild {
         fn drop(&mut self) {
-            self.watchdog_liveness.take();
-            let _ = unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) };
-            let _ = self.child.wait();
-            if let Some(mut watchdog) = self.watchdog.take() {
-                let _ = watchdog.wait();
+            if self.child.try_wait().ok().flatten().is_none() {
+                let _ = unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) };
+                let _ = self.child.wait();
             }
+            self.finish_watchdog();
         }
     }
 
@@ -290,12 +330,14 @@ mod platform {
         args: &[&OsStr],
         current_dir: Option<&Path>,
         mut pipe: TokenPipe,
+        options: SpawnOptions,
     ) -> io::Result<PlatformSpawn> {
         let parent_pid = unsafe { libc::getpid() };
         let write_fd = pipe.write_fd;
         let mut command = Command::new(binary);
         command.args(args);
         command.env(TOKEN_ENV, UNIX_TOKEN_FD.to_string());
+        command.envs(options.child_env.iter().map(|(key, value)| (key, value)));
         command.stdin(Stdio::null());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
@@ -342,31 +384,69 @@ mod platform {
             .stderr
             .take()
             .map(|stream| Box::new(stream) as Box<dyn Read + Send>);
-        let (watchdog, watchdog_liveness) = spawn_parent_watchdog(child.id())?;
+        let identity = match process_identity(child.id() as i32) {
+            Ok(identity) => identity,
+            Err(error) => {
+                terminate_group_and_reap(&mut child);
+                return Err(error);
+            }
+        };
+        let watchdog_result = spawn_parent_watchdog(
+            identity,
+            #[cfg(test)]
+            options.watchdog_failure,
+        );
+        let (watchdog, watchdog_control) = match watchdog_result {
+            Ok(watchdog) => watchdog,
+            Err(error) => {
+                terminate_group_and_reap(&mut child);
+                return Err(error);
+            }
+        };
         Ok(PlatformSpawn {
             child: PlatformChild::Unix(UnixChild {
                 child,
                 watchdog: Some(watchdog),
-                watchdog_liveness: Some(watchdog_liveness),
+                watchdog_control: Some(watchdog_control),
             }),
             stdout,
             stderr,
         })
     }
 
-    fn spawn_parent_watchdog(core_pid: u32) -> io::Result<(Child, File)> {
+    fn terminate_group_and_reap(child: &mut Child) {
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+        }
+        let _ = child.wait();
+    }
+
+    fn spawn_parent_watchdog(
+        identity: UnixProcessIdentity,
+        #[cfg(test)] failure: Option<UnixWatchdogFailure>,
+    ) -> io::Result<(Child, File)> {
+        #[cfg(test)]
+        if matches!(failure, Some(UnixWatchdogFailure::Pipe)) {
+            return Err(io::Error::other("injected watchdog pipe failure"));
+        }
         let mut fds = [-1; 2];
         if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        let read_fd = fds[0];
-        let liveness = unsafe { File::from_raw_fd(fds[1]) };
+        let reader = unsafe { File::from_raw_fd(fds[0]) };
+        let control = unsafe { File::from_raw_fd(fds[1]) };
+        #[cfg(test)]
+        if matches!(failure, Some(UnixWatchdogFailure::CurrentExe)) {
+            return Err(io::Error::other("injected watchdog executable failure"));
+        }
         let executable = std::env::current_exe()?;
         let mut command = Command::new(executable);
         #[cfg(not(test))]
         command.args([
             "--tachyon-core-parent-watchdog",
-            &core_pid.to_string(),
+            &identity.pid.to_string(),
+            &identity.pgid.to_string(),
+            &identity.started.to_string(),
             &UNIX_WATCHDOG_FD.to_string(),
         ]);
         #[cfg(test)]
@@ -376,7 +456,12 @@ mod platform {
                 "core_ipc::tests::parent_watchdog_fixture_child",
                 "--nocapture",
             ])
-            .env("TACHYON_TEST_WATCHDOG_CORE_PID", core_pid.to_string())
+            .env("TACHYON_TEST_WATCHDOG_CORE_PID", identity.pid.to_string())
+            .env("TACHYON_TEST_WATCHDOG_CORE_PGID", identity.pgid.to_string())
+            .env(
+                "TACHYON_TEST_WATCHDOG_CORE_STARTED",
+                identity.started.to_string(),
+            )
             .env(
                 "TACHYON_TEST_WATCHDOG_LIVENESS_FD",
                 UNIX_WATCHDOG_FD.to_string(),
@@ -384,6 +469,7 @@ mod platform {
         command.stdin(Stdio::null());
         command.stdout(Stdio::null());
         command.stderr(Stdio::null());
+        let read_fd = reader.as_raw_fd();
         unsafe {
             command.pre_exec(move || {
                 if libc::dup2(read_fd, UNIX_WATCHDOG_FD) < 0 {
@@ -401,15 +487,13 @@ mod platform {
                 Ok(())
             });
         }
-        let spawned = command.spawn();
-        unsafe { libc::close(read_fd) };
-        match spawned {
-            Ok(child) => Ok((child, liveness)),
-            Err(error) => {
-                let _ = unsafe { libc::kill(-(core_pid as i32), libc::SIGKILL) };
-                Err(error)
-            }
+        #[cfg(test)]
+        if matches!(failure, Some(UnixWatchdogFailure::Spawn)) {
+            return Err(io::Error::other("injected watchdog spawn failure"));
         }
+        let child = command.spawn()?;
+        drop(reader);
+        Ok((child, control))
     }
 }
 
@@ -426,36 +510,91 @@ pub(crate) fn run_parent_watchdog_from_args() -> bool {
         .get(index + 1)
         .and_then(|value| value.parse::<i32>().ok())
         .filter(|value| *value > 1);
-    let liveness_fd = args
+    let core_pgid = args
         .get(index + 2)
         .and_then(|value| value.parse::<i32>().ok())
+        .filter(|value| *value > 1);
+    let core_started = args
+        .get(index + 3)
+        .and_then(|value| value.parse::<u128>().ok());
+    let liveness_fd = args
+        .get(index + 4)
+        .and_then(|value| value.parse::<i32>().ok())
         .filter(|value| *value > 2);
-    if let (Some(core_pid), Some(liveness_fd)) = (core_pid, liveness_fd) {
-        run_parent_watchdog(core_pid, liveness_fd);
+    if let (Some(pid), Some(pgid), Some(started), Some(liveness_fd)) =
+        (core_pid, core_pgid, core_started, liveness_fd)
+    {
+        run_parent_watchdog(UnixProcessIdentity { pid, pgid, started }, liveness_fd);
     }
     true
 }
 
 #[cfg(unix)]
-fn run_parent_watchdog(core_pid: i32, liveness_fd: i32) {
+fn run_parent_watchdog(identity: UnixProcessIdentity, liveness_fd: i32) {
     let mut byte = [0_u8; 1];
-    loop {
+    let normal_exit = loop {
         let read = unsafe { libc::read(liveness_fd, byte.as_mut_ptr().cast(), 1) };
         if read == 0 {
-            break;
+            break false;
         }
         if read < 0 {
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::Interrupted {
                 continue;
             }
-            break;
+            break false;
         }
+        if byte[0] == WATCHDOG_NORMAL_EXIT {
+            break true;
+        }
+    };
+    unsafe { libc::close(liveness_fd) };
+    if !normal_exit && process_identity(identity.pid).ok() == Some(identity) {
+        unsafe { libc::kill(-identity.pgid, libc::SIGKILL) };
     }
-    unsafe {
-        libc::close(liveness_fd);
-        libc::kill(-core_pid, libc::SIGKILL);
-    }
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn process_identity(pid: i32) -> io::Result<UnixProcessIdentity> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let suffix = stat
+        .get(
+            stat.rfind(')')
+                .ok_or_else(|| io::Error::other("invalid process stat"))?
+                + 1..,
+        )
+        .ok_or_else(|| io::Error::other("invalid process stat"))?;
+    let fields: Vec<&str> = suffix.split_whitespace().collect();
+    let pgid = fields
+        .get(2)
+        .and_then(|value| value.parse::<i32>().ok())
+        .ok_or_else(|| io::Error::other("invalid process group identity"))?;
+    let started = fields
+        .get(19)
+        .and_then(|value| value.parse::<u128>().ok())
+        .ok_or_else(|| io::Error::other("invalid process start identity"))?;
+    Ok(UnixProcessIdentity { pid, pgid, started })
+}
+
+#[cfg(all(unix, target_os = "macos"))]
+fn process_identity(pid: i32) -> io::Result<UnixProcessIdentity> {
+    use libproc::bsd_info::BSDInfo;
+    use libproc::proc_pid::pidinfo;
+
+    let info = pidinfo::<BSDInfo>(pid, 0).map_err(io::Error::other)?;
+    Ok(UnixProcessIdentity {
+        pid,
+        pgid: info.pbi_pgid as i32,
+        started: (u128::from(info.pbi_start_tvsec) << 64) | u128::from(info.pbi_start_tvusec),
+    })
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn process_identity(_pid: i32) -> io::Result<UnixProcessIdentity> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "secure Core process identity is unsupported on this Unix platform",
+    ))
 }
 
 #[cfg(not(unix))]
@@ -603,6 +742,7 @@ mod platform {
         args: &[&OsStr],
         current_dir: Option<&Path>,
         mut pipe: TokenPipe,
+        options: SpawnOptions,
     ) -> io::Result<PlatformSpawn> {
         let mut attribute_bytes = 0_usize;
         unsafe {
@@ -642,7 +782,7 @@ mod platform {
         let application = wide_null(binary.as_os_str());
         let mut command_line = wide_null(OsStr::new(&build_command_line(binary.as_os_str(), args)));
         let current_directory = current_dir.map(|path| wide_null(path.as_os_str()));
-        let mut environment = environment_block(pipe.write as usize);
+        let mut environment = environment_block(pipe.write as usize, &options.child_env);
         let flags = CREATE_NO_WINDOW
             | CREATE_SUSPENDED
             | CREATE_UNICODE_ENVIRONMENT
@@ -717,7 +857,7 @@ mod platform {
         })
     }
 
-    fn environment_block(token_handle: usize) -> Vec<u16> {
+    fn environment_block(token_handle: usize, child_env: &[(OsString, OsString)]) -> Vec<u16> {
         let mut entries: Vec<(String, String)> = std::env::vars_os()
             .filter_map(|(key, value)| {
                 let key = key.to_string_lossy().into_owned();
@@ -728,6 +868,14 @@ mod platform {
                 }
             })
             .collect();
+        for (key, value) in child_env {
+            let key = key.to_string_lossy().into_owned();
+            if key.eq_ignore_ascii_case(TOKEN_ENV) || key.contains('=') || key.is_empty() {
+                continue;
+            }
+            entries.retain(|(existing, _)| !existing.eq_ignore_ascii_case(&key));
+            entries.push((key, value.to_string_lossy().into_owned()));
+        }
         entries.push((TOKEN_ENV.to_string(), token_handle.to_string()));
         entries.sort_by(|left, right| {
             left.0
@@ -801,6 +949,7 @@ mod platform {
         _args: &[&OsStr],
         _current_dir: Option<&Path>,
         _pipe: TokenPipe,
+        _options: SpawnOptions,
     ) -> io::Result<PlatformSpawn> {
         unreachable!()
     }
@@ -854,7 +1003,6 @@ mod tests {
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 2)
             .expect("fixture requires inherited token handle");
-        std::env::remove_var(TOKEN_ENV);
         let mut pipe = fixture_pipe_from_raw(raw_handle);
         match mode.as_str() {
             "early-exit" => return,
@@ -896,16 +1044,25 @@ mod tests {
     }
 
     fn spawn_fixture(mode: &str, timeout: Duration) -> Result<SpawnedCore, String> {
+        spawn_fixture_with_options(mode, timeout, SpawnOptions::default())
+    }
+
+    fn spawn_fixture_with_options(
+        mode: &str,
+        timeout: Duration,
+        mut options: SpawnOptions,
+    ) -> Result<SpawnedCore, String> {
         let executable = std::env::current_exe().expect("test executable");
-        std::env::set_var("TACHYON_TEST_CORE_TOKEN_MODE", mode);
+        options.child_env.push((
+            OsString::from("TACHYON_TEST_CORE_TOKEN_MODE"),
+            OsString::from(mode),
+        ));
         let arguments = [
             OsStr::new("--exact"),
             OsStr::new("core_ipc::tests::token_handoff_fixture_child"),
             OsStr::new("--nocapture"),
         ];
-        let result = spawn(&executable, &arguments, None, timeout);
-        std::env::remove_var("TACHYON_TEST_CORE_TOKEN_MODE");
-        result
+        spawn_with_options(&executable, &arguments, None, timeout, options)
     }
 
     #[test]
@@ -989,7 +1146,92 @@ mod tests {
             .ok()
             .and_then(|value| value.parse::<i32>().ok())
             .expect("watchdog liveness descriptor");
-        run_parent_watchdog(core_pid.parse().expect("watchdog core pid"), liveness_fd);
+        let pgid = std::env::var("TACHYON_TEST_WATCHDOG_CORE_PGID")
+            .expect("watchdog process group")
+            .parse()
+            .expect("watchdog process group");
+        let started = std::env::var("TACHYON_TEST_WATCHDOG_CORE_STARTED")
+            .expect("watchdog process identity")
+            .parse()
+            .expect("watchdog process identity");
+        run_parent_watchdog(
+            UnixProcessIdentity {
+                pid: core_pid.parse().expect("watchdog core pid"),
+                pgid,
+                started,
+            },
+            liveness_fd,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watchdog_setup_failures_reap_the_started_core_group() {
+        for failure in [
+            UnixWatchdogFailure::Pipe,
+            UnixWatchdogFailure::CurrentExe,
+            UnixWatchdogFailure::Spawn,
+        ] {
+            let options = SpawnOptions {
+                watchdog_failure: Some(failure),
+                ..SpawnOptions::default()
+            };
+            assert!(
+                spawn_fixture_with_options("valid-sleep", Duration::from_secs(5), options).is_err(),
+                "an injected watchdog setup failure must fail closed"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watchdog_normal_exit_message_does_not_kill_a_live_core_group() {
+        use std::os::fd::{FromRawFd, IntoRawFd};
+        use std::os::unix::process::CommandExt;
+
+        let mut target = Command::new(std::env::current_exe().expect("test executable"));
+        target
+            .args([
+                "--exact",
+                "core_ipc::tests::watchdog_signal_target_fixture_child",
+                "--nocapture",
+            ])
+            .env("TACHYON_TEST_WATCHDOG_SIGNAL_TARGET", "1");
+        unsafe {
+            target.pre_exec(|| {
+                if libc::setpgid(0, 0) == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error())
+                }
+            });
+        }
+        let mut target = target.spawn().expect("watchdog signal target");
+        let identity = process_identity(target.id() as i32).expect("target process identity");
+        let mut fds = [-1; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        let read_fd = unsafe { File::from_raw_fd(fds[0]) }.into_raw_fd();
+        let mut control = unsafe { File::from_raw_fd(fds[1]) };
+        let watchdog = thread::spawn(move || run_parent_watchdog(identity, read_fd));
+        control
+            .write_all(&[WATCHDOG_NORMAL_EXIT])
+            .expect("normal watchdog completion");
+        drop(control);
+        watchdog.join().expect("watchdog thread");
+        assert!(
+            process_exists(target.id()),
+            "normal Prism shutdown must not signal a still-identical Core group"
+        );
+        unsafe { libc::kill(-(target.id() as i32), libc::SIGKILL) };
+        target.wait().expect("reap watchdog signal target");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watchdog_signal_target_fixture_child() {
+        if std::env::var_os("TACHYON_TEST_WATCHDOG_SIGNAL_TARGET").is_some() {
+            thread::sleep(Duration::from_secs(30));
+        }
     }
 
     #[test]

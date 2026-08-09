@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { assertSensitiveContains, assertSensitiveEqual } from "./sensitiveAssertions";
 import {
   buildCoreClientConfigDraft,
   buildXrayClientConfigDraft,
@@ -577,7 +578,7 @@ describe("buildXrayClientConfigDraft", () => {
       routingMode: "global",
     });
 
-    expect(config).toEqual(raw);
+    assertSensitiveEqual(config, raw);
     expect(config).not.toBe(raw);
     expect(config).toHaveProperty("outbounds.0.tag", "tachyon-proxy");
     expect(config).toHaveProperty("outbounds.1.tag", "tachyon-direct");
@@ -625,7 +626,7 @@ describe("buildXrayClientConfigDraft", () => {
         wsSettings: { path: "/trojan" },
       },
     });
-    expect(hysteriaProxy).toMatchObject({
+    assertSensitiveContains(hysteriaProxy, {
       protocol: "hysteria",
       streamSettings: {
         network: "hysteria",
@@ -634,7 +635,7 @@ describe("buildXrayClientConfigDraft", () => {
         },
       },
     });
-    expect(tuicNode.outbound).toMatchObject({
+    assertSensitiveContains(tuicNode.outbound, {
       protocol: "tuic",
       settings: {
         address: "tuic.example.com",
@@ -686,19 +687,19 @@ describe("buildXrayClientConfigDraft", () => {
       } else {
         expect(selectedTag).toMatch(/^tachyon-proxy(?:-[2-9]|-[1-9]\d+)?$/);
       }
-      expect(proxy).toMatchObject({
+      assertSensitiveContains(proxy, {
         ...outboundMatch,
         tag: selectedTag,
       });
       expect(managedTag).toBe(selectedTag);
-      expect(managedSemantics).toEqual(originalSemantics);
-      expect(node).toEqual(nodeBeforeBuild);
-      expect(buildXrayOutboundDraft(node)).toEqual({
+      assertSensitiveEqual(managedSemantics, originalSemantics);
+      assertSensitiveEqual(node, nodeBeforeBuild);
+      assertSensitiveEqual(buildXrayOutboundDraft(node), {
         ...outboundBeforeBuild,
         ...(originalTag ? { tag: originalTag } : {}),
       });
       expect(restored.selectedNodeId).toBe(node.id);
-      expect(restored.nodes[0]).toMatchObject({
+      assertSensitiveContains(restored.nodes[0], {
         id: nodeBeforeBuild.id,
         rawUri: nodeBeforeBuild.rawUri,
         xrayConfigId: nodeBeforeBuild.xrayConfigId,
@@ -902,7 +903,7 @@ describe("buildCoreClientConfigDraft", () => {
       tgpAuthPsk: " 0123456789abcdef ",
     });
     const tgp = config.tgp as Record<string, unknown>;
-    expect(tgp.auth).toEqual({ psk: "0123456789abcdef" });
+    assertSensitiveEqual(tgp.auth, { psk: "0123456789abcdef" });
   });
 
   it("omits TGP PSK authentication when the value is empty", () => {
@@ -1095,7 +1096,7 @@ describe("complete Xray JSON editing", () => {
   it("round-trips the complete fixture without dropping known or future fields", () => {
     const parsed = parseXrayConfigText(xrayAdvancedRoundTripJsonFixture);
 
-    expect(parsed).toEqual(JSON.parse(xrayAdvancedRoundTripJsonFixture));
+    assertSensitiveEqual(parsed, JSON.parse(xrayAdvancedRoundTripJsonFixture));
     expect((parsed.inbounds as unknown[])).toHaveLength(2);
     expect((parsed.outbounds as unknown[])).toHaveLength(2);
     expect(parsed).toMatchObject({
@@ -1137,8 +1138,8 @@ describe("complete Xray JSON editing", () => {
       ],
     };
 
-    expect(parseXrayConfigText(JSON.stringify(raw), "en")).toEqual(raw);
-    expect(parseXrayConfigText(JSON.stringify(raw), "zh-CN")).toEqual(raw);
+    assertSensitiveEqual(parseXrayConfigText(JSON.stringify(raw), "en"), raw);
+    assertSensitiveEqual(parseXrayConfigText(JSON.stringify(raw), "zh-CN"), raw);
   });
 
   it("defers imported handler and balancer existence checks to Xray run -test", () => {
@@ -1166,7 +1167,7 @@ describe("complete Xray JSON editing", () => {
       },
     };
 
-    expect(parseXrayConfigText(JSON.stringify(config))).toEqual(config);
+    assertSensitiveEqual(parseXrayConfigText(JSON.stringify(config)), config);
   });
 
   it("accepts declared balancer references and Xray's outboundTag precedence", () => {
@@ -1178,7 +1179,7 @@ describe("complete Xray JSON editing", () => {
       },
     };
 
-    expect(parseXrayConfigText(JSON.stringify(valid))).toEqual(valid);
+    assertSensitiveEqual(parseXrayConfigText(JSON.stringify(valid)), valid);
     const dualTarget = {
       ...valid,
       routing: {
@@ -1192,7 +1193,7 @@ describe("complete Xray JSON editing", () => {
         ],
       },
     };
-    expect(parseXrayConfigText(JSON.stringify(dualTarget))).toEqual(dualTarget);
+    assertSensitiveEqual(parseXrayConfigText(JSON.stringify(dualTarget)), dualTarget);
   });
 
   it("matches only exact managed tags or canonical numeric suffixes", () => {
@@ -1212,6 +1213,6 @@ describe("complete Xray JSON editing", () => {
       outbounds: [],
     };
 
-    expect(parseXrayConfigText(JSON.stringify(raw), "en")).toEqual(raw);
+    assertSensitiveEqual(parseXrayConfigText(JSON.stringify(raw), "en"), raw);
   });
 });

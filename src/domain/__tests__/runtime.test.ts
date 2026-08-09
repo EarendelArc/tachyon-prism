@@ -16,6 +16,7 @@ import {
   type TachyonCorePreflightResult,
 } from "../runtime";
 import { preflightMessagesForLanguage } from "../preflightI18n";
+import { assertSensitiveEqual, assertSensitiveInvocation } from "./sensitiveAssertions";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -43,7 +44,7 @@ describe("commitValidatedXrayConfig", () => {
 
     await expect(commitValidatedXrayConfig(contents)).resolves.toEqual(paths);
 
-    expect(invokeMock).toHaveBeenCalledWith("commit_validated_xray_config", {
+    assertSensitiveInvocation(invokeMock.mock.calls, 0, "commit_validated_xray_config", {
       contents,
       authorizationTicket: null,
     });
@@ -80,11 +81,11 @@ describe("commitValidatedXrayConfig", () => {
     const ticket = await requestAdvancedXrayAuthorization(contents, "en");
     await commitValidatedXrayConfig(contents, ticket ?? undefined);
 
-    expect(invokeMock).toHaveBeenNthCalledWith(1, "request_advanced_xray_authorization", {
+    assertSensitiveInvocation(invokeMock.mock.calls, 0, "request_advanced_xray_authorization", {
       contents,
       language: "en",
     });
-    expect(invokeMock).toHaveBeenNthCalledWith(2, "commit_validated_xray_config", {
+    assertSensitiveInvocation(invokeMock.mock.calls, 1, "commit_validated_xray_config", {
       contents,
       authorizationTicket: "opaque-native-ticket",
     });
@@ -100,7 +101,7 @@ describe("readCanonicalXrayConfig", () => {
     };
     invokeMock.mockResolvedValueOnce(canonical);
 
-    await expect(readCanonicalXrayConfig()).resolves.toEqual(canonical);
+    assertSensitiveEqual(await readCanonicalXrayConfig(), canonical);
     expect(invokeMock).toHaveBeenCalledWith("read_canonical_xray_config", undefined);
     expect(invokeMock).toHaveBeenCalledTimes(1);
   });

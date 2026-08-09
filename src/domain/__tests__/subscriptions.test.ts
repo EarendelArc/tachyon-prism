@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { assertSensitiveContains, assertSensitiveEqual } from "./sensitiveAssertions";
 import {
   activeSubscription,
   buildXrayOutboundDraft,
@@ -88,7 +89,7 @@ describe("parseSubscription", () => {
     expect(nodes[0].address).toBe("10.0.0.1");
     expect(nodes[0].port).toBe(443);
     expect(nodes[0].transport).toBe("websocket");
-    expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
+    assertSensitiveContains(buildXrayOutboundDraft(nodes[0]).settings, {
       address: "10.0.0.1",
       port: 443,
       id: "test-uuid",
@@ -112,11 +113,11 @@ describe("parseSubscription", () => {
     expect(nodes[0].protocol).toBe("vless");
     expect(nodes[0].address).toBe("10.0.0.1");
     expect(nodes[0].port).toBe(443);
-    expect(nodes[0].credential).toBe("test-uuid");
+    assertSensitiveEqual(nodes[0].credential, "test-uuid");
     expect(nodes[0].name).toBe("My VLESS");
     expect(nodes[0].transport).toBe("websocket");
     expect(nodes[0].security).toBe("tls");
-    expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
+    assertSensitiveContains(buildXrayOutboundDraft(nodes[0]).settings, {
       address: "10.0.0.1",
       port: 443,
       id: "test-uuid",
@@ -180,7 +181,7 @@ describe("parseSubscription", () => {
     const tlsUri = "trojan://password@tls.example.com:443?security=tls&sni=edge.example.com&echConfigList=ech-list&pinnedPeerCertSha256=sha256-pin&alpn=h2,http/1.1#TLS";
     const [reality, xhttp, grpc, tls] = parseSubscription([realityUri, xhttpUri, grpcUri, tlsUri].join("\n"));
 
-    expect(reality.outbound?.streamSettings).toMatchObject({
+    assertSensitiveContains(reality.outbound?.streamSettings, {
       network: "raw",
       security: "reality",
       realitySettings: {
@@ -242,9 +243,9 @@ describe("parseSubscription", () => {
     expect(nodes[0].protocol).toBe("trojan");
     expect(nodes[0].address).toBe("example.com");
     expect(nodes[0].port).toBe(8443);
-    expect(nodes[0].credential).toBe("password");
+    assertSensitiveEqual(nodes[0].credential, "password");
     expect(nodes[0].name).toBe("Trojan Node");
-    expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
+    assertSensitiveContains(buildXrayOutboundDraft(nodes[0]).settings, {
       address: "example.com",
       port: 8443,
       password: "password",
@@ -255,7 +256,7 @@ describe("parseSubscription", () => {
     const uri = "trojan-go://password@example.com:443?sni=edge.example.com&type=ws&path=/trojan#Trojan-Go Node";
     const nodes = parseSubscription(uri);
     expect(nodes).toHaveLength(1);
-    expect(nodes[0]).toMatchObject({
+    assertSensitiveContains(nodes[0], {
       name: "Trojan-Go Node",
       protocol: "trojan",
       address: "example.com",
@@ -276,7 +277,7 @@ describe("parseSubscription", () => {
     expect(nodes[0].address).toBe("10.0.0.1");
     expect(nodes[0].port).toBe(8388);
     expect(nodes[0].name).toBe("SS Node");
-    expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
+    assertSensitiveContains(buildXrayOutboundDraft(nodes[0]).settings, {
       address: "10.0.0.1",
       port: 8388,
       method: "aes-256-gcm",
@@ -309,8 +310,8 @@ describe("parseSubscription", () => {
     expect(nodes[0].address).toBe("example.com");
     expect(nodes[0].port).toBe(443);
     expect(nodes[0].name).toBe("Hysteria Node");
-    expect(nodes[0].credential).toBe("secret");
-    expect(buildXrayOutboundDraft(nodes[0]).streamSettings).toMatchObject({
+    assertSensitiveEqual(nodes[0].credential, "secret");
+    assertSensitiveContains(buildXrayOutboundDraft(nodes[0]).streamSettings, {
       network: "hysteria",
       security: "tls",
       tlsSettings: {
@@ -331,7 +332,7 @@ describe("parseSubscription", () => {
     const uri = "tuic://uuid:secret@tuic.example.com:443?sni=edge.example.com&alpn=h3&congestion=bbr&udpRelayMode=native&zeroRttHandshake=true#TUIC Node";
     const nodes = parseSubscription(uri);
     expect(nodes).toHaveLength(1);
-    expect(nodes[0]).toMatchObject({
+    assertSensitiveContains(nodes[0], {
       name: "TUIC Node",
       protocol: "tuic",
       address: "tuic.example.com",
@@ -340,7 +341,7 @@ describe("parseSubscription", () => {
       security: "tls",
       sni: "edge.example.com",
     });
-    expect(nodes[0].outbound).toMatchObject({
+    assertSensitiveContains(nodes[0].outbound, {
       protocol: "tuic",
       settings: {
         address: "tuic.example.com",
@@ -373,8 +374,8 @@ describe("parseSubscription", () => {
     expect(nodes[0].protocol).toBe("socks");
     expect(nodes[0].address).toBe("10.0.0.1");
     expect(nodes[0].port).toBe(1080);
-    expect(nodes[0].credential).toContain("user");
-    expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
+    assertSensitiveEqual(nodes[0].credential, "user:***");
+    assertSensitiveContains(buildXrayOutboundDraft(nodes[0]).settings, {
       address: "10.0.0.1",
       port: 1080,
       user: "user",
@@ -386,14 +387,14 @@ describe("parseSubscription", () => {
     const uri = "http://user:pass@proxy.example.com:8080#HTTP Proxy";
     const nodes = parseSubscription(uri);
     expect(nodes).toHaveLength(1);
-    expect(nodes[0]).toMatchObject({
+    assertSensitiveContains(nodes[0], {
       name: "HTTP Proxy",
       protocol: "http",
       address: "proxy.example.com",
       port: 8080,
       credential: "user:***",
     });
-    expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
+    assertSensitiveContains(buildXrayOutboundDraft(nodes[0]).settings, {
       address: "proxy.example.com",
       port: 8080,
       user: "user",
@@ -408,7 +409,7 @@ describe("parseSubscription", () => {
     expect(nodes[0].protocol).toBe("wireguard");
     expect(nodes[0].address).toBe("10.0.0.1");
     expect(nodes[0].port).toBe(51820);
-    expect(buildXrayOutboundDraft(nodes[0]).settings).toMatchObject({
+    assertSensitiveContains(buildXrayOutboundDraft(nodes[0]).settings, {
       secretKey: "c2VjcmV0LWtleQ==",
       address: ["10.1.0.2/24", "fd00::2/128"],
       reserved: [1, 2, 3],
@@ -490,7 +491,7 @@ describe("parseSubscription", () => {
     const nodes = parseSubscription(payload);
 
     expect(nodes).toHaveLength(2);
-    expect(nodes[0]).toMatchObject({
+    assertSensitiveContains(nodes[0], {
       name: "Legacy VLESS",
       protocol: "vless",
       address: "vless.example.com",
@@ -742,7 +743,7 @@ proxy-groups:
     const nodes = parseSubscription(payload);
 
     expect(nodes).toHaveLength(5);
-    expect(nodes[0]).toMatchObject({
+    assertSensitiveContains(nodes[0], {
       name: "Clash VLESS Reality",
       protocol: "vless",
       address: "vless.example.com",
@@ -759,27 +760,27 @@ proxy-groups:
         headers: { Host: "cdn.example.com" },
       },
     });
-    expect(nodes[0].outbound?.settings).toMatchObject({
+    assertSensitiveContains(nodes[0].outbound?.settings, {
       address: "vless.example.com",
       port: 443,
       id: "vless-uuid",
       encryption: "none",
       flow: "xtls-rprx-vision",
     });
-    expect(nodes[1]).toMatchObject({
+    assertSensitiveContains(nodes[1], {
       name: "Clash SS",
       protocol: "shadowsocks",
       address: "ss.example.com",
       port: 8388,
       credential: "2022-blake3-aes-128-gcm:ss-secret",
     });
-    expect(nodes[1].outbound?.settings).toMatchObject({
+    assertSensitiveContains(nodes[1].outbound?.settings, {
       address: "ss.example.com",
       port: 8388,
       method: "2022-blake3-aes-128-gcm",
       password: "ss-secret",
     });
-    expect(nodes[2]).toMatchObject({
+    assertSensitiveContains(nodes[2], {
       name: "Clash Trojan TLS",
       protocol: "trojan",
       address: "trojan.example.com",
@@ -796,7 +797,7 @@ proxy-groups:
         alpn: ["h2", "http/1.1"],
       },
     });
-    expect(nodes[3]).toMatchObject({
+    assertSensitiveContains(nodes[3], {
       name: "Clash Hy2",
       protocol: "hysteria",
       address: "hy2.example.com",
@@ -804,21 +805,21 @@ proxy-groups:
       credential: "hy-secret",
       transport: "hysteria",
     });
-    expect(nodes[3].outbound?.streamSettings).toMatchObject({
+    assertSensitiveContains(nodes[3].outbound?.streamSettings, {
       network: "hysteria",
       hysteriaSettings: {
         auth: "hy-secret",
         udpIdleTimeout: 20,
       },
     });
-    expect(nodes[4]).toMatchObject({
+    assertSensitiveContains(nodes[4], {
       name: "Clash WG",
       protocol: "wireguard",
       address: "wg.example.com",
       port: 51820,
       credential: "private-key",
     });
-    expect(nodes[4].outbound?.settings).toMatchObject({
+    assertSensitiveContains(nodes[4].outbound?.settings, {
       secretKey: "private-key",
       address: ["10.0.0.2/32", "fd00::2/128"],
       reserved: [1, 2, 3],
@@ -923,7 +924,7 @@ proxies:
     const report = parseSubscriptionWithReport(payload);
 
     expect(report.nodes).toHaveLength(2);
-    expect(report.nodes[1]).toMatchObject({
+    assertSensitiveContains(report.nodes[1], {
       name: "TUIC",
       protocol: "tuic",
       address: "tuic.example.com",
@@ -932,7 +933,7 @@ proxies:
       security: "tls",
       sni: "edge.example.com",
     });
-    expect(report.nodes[1].outbound?.settings).toMatchObject({
+    assertSensitiveContains(report.nodes[1].outbound?.settings, {
       uuid: "tuic-uuid",
       password: "secret",
       congestion: "bbr",
@@ -1057,11 +1058,10 @@ describe("createSubscriptionSnapshot", () => {
 
     expect(alphaUpdate.subscriptions).toHaveLength(2);
     expect(alphaUpdate.subscriptions.map((item) => item.name)).toEqual(["Alpha", "Beta"]);
-    expect(activeSubscription(alphaUpdate)).toMatchObject({
-      name: "Alpha",
-      sourceUrl: "https://example.com/shared",
-      nodes: [expect.objectContaining({ id: "node-bbbbbbbb" })],
-    });
+    const active = activeSubscription(alphaUpdate);
+    expect(active?.name).toBe("Alpha");
+    expect(active?.nodes[0]?.id).toBe("node-bbbbbbbb");
+    assertSensitiveEqual(active?.sourceUrl, "https://example.com/shared");
     expect(alphaUpdate.selectedNodeId).toBe("node-bbbbbbbb");
   });
 });
@@ -1151,7 +1151,7 @@ describe("subscription vault serialization", () => {
     };
     const loaded = subscriptionSnapshotFromStored(rawSnapshot);
     expect(activeSubscription(loaded)?.name).toBe("Stored");
-    expect(buildXrayOutboundDraft(loaded.nodes[0]).settings).toMatchObject({
+    assertSensitiveContains(buildXrayOutboundDraft(loaded.nodes[0]).settings, {
       address: "example.com",
       port: 443,
       id: "uuid",
@@ -1193,7 +1193,7 @@ describe("subscription vault serialization", () => {
       const loadedTemplate = xrayConfigTemplateForNode(loaded.nodes[1]);
       expect(loaded.nodes[0].xrayConfigId).toBe(loaded.nodes[1].xrayConfigId);
       expect(loaded.nodes[0]).not.toHaveProperty("xrayConfig");
-      expect(activeSubscription(loaded)?.xrayConfigTemplates).toEqual(persistedTemplates);
+      assertSensitiveEqual(activeSubscription(loaded)?.xrayConfigTemplates, persistedTemplates);
       expect(Object.keys(loadedTemplate ?? {})).toEqual(["outbounds"]);
       expect((loadedTemplate?.outbounds as unknown[] | undefined)?.length).toBe(
         (source.outbounds as unknown[]).length,
