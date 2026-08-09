@@ -1247,7 +1247,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn watchdog_normal_exit_message_does_not_kill_a_live_core_group() {
-        use std::os::fd::{FromRawFd, IntoRawFd};
+        use std::os::fd::IntoRawFd;
         use std::os::unix::process::CommandExt;
 
         let mut target = Command::new(std::env::current_exe().expect("test executable"));
@@ -1269,10 +1269,10 @@ mod tests {
         }
         let mut target = crate::process_spawn::spawn(&mut target).expect("watchdog signal target");
         let identity = process_identity(target.id() as i32).expect("target process identity");
-        let mut fds = [-1; 2];
-        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
-        let read_fd = unsafe { File::from_raw_fd(fds[0]) }.into_raw_fd();
-        let mut control = unsafe { File::from_raw_fd(fds[1]) };
+        let [reader, control] =
+            create_cloexec_pipe(CloexecPipeFault::None).expect("watchdog test pipe");
+        let read_fd = reader.into_raw_fd();
+        let mut control = File::from(control);
         let watchdog = thread::spawn(move || run_parent_watchdog(identity, read_fd));
         control
             .write_all(&[WATCHDOG_NORMAL_EXIT])
