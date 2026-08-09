@@ -5,13 +5,17 @@ All notable changes to Tachyon Prism will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- Nothing yet.
+- Added a signed-tag-only immutable prerelease pipeline with a strict six-target,
+  seven-installer, thirteen-asset contract; machine-readable release index and
+  manifest; cross-platform reproducibility fixtures; and independent remote
+  digest, size, target commit, prerelease, and immutable-state verification.
 
 ### Fixed
 - Nothing yet.
 
 ### Verified
-- Nothing yet.
+- `main` and `refs/tags/v*` governance are checked before the first GitHub
+  Release write. Publication requires the strict `Required CI gate` context.
 
 ## [v0.1.0-alpha.14] - 2026-07-04
 

@@ -203,8 +203,7 @@ def validate_workflows() -> None:
         "verify-published-release.py",
         'python .github/scripts/normalize-release-timestamps.py release "${SOURCE_DATE_EPOCH}"',
         "BUILD_METADATA.json",
-        '"schemaVersion": 1',
-        '"artifactDigests": artifact_digests',
+        "prepare_release_assets.py",
         '"installerByteReproducibilityGuaranteed": False',
         '"stagedAssetTimestampsNormalized": True',
         "SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}",
@@ -212,7 +211,7 @@ def validate_workflows() -> None:
         "EXPECTED_TAG_VERIFICATION: ${{ needs.prepare.outputs.verification }}",
         "EXPECTED_REPRODUCIBILITY_JSON:",
         'export EXPECTED_TOOLS_JSON="$(python -c',
-        "GOVERNANCE_TOKEN: ${{ secrets.RELEASE_GOVERNANCE_TOKEN }}",
+        "RELEASE_SETTINGS_TOKEN: ${{ secrets.RELEASE_SETTINGS_TOKEN }}",
         "SHA256SUMS.txt",
         "SIGNING_STATUS",
     ]
@@ -291,14 +290,15 @@ def validate_workflows() -> None:
         fail("release tag verification still accepts lightweight tags")
     published_guards = [
         '"immutable": True',
-        'len(names) != 11',
+        'len(names) != 13',
         'len(installers) != 7',
-        'len(manifest) != 10',
+        'len(checksums) != 12',
         'latest_tag == tag',
-        'remote[name] != expected_digest',
+        'remote[name].get("digest") != expected_digest',
+        'remote[name].get("size") != local_sizes[name]',
         'set(metadata) != {',
-        'prism.get("tagObject") != expected_tag_object',
-        'prism.get("sourceDateEpoch") != expected_source_date_epoch',
+        '"tagObject": expected_tag_object',
+        '"sourceDateEpoch": expected_source_date_epoch',
         'metadata.get("reproducibility") != expected_reproducibility',
         'metadata.get("tools") != expected_tools',
     ]
@@ -306,9 +306,11 @@ def validate_workflows() -> None:
     if missing_published:
         fail("published release verification is missing guards: " + ", ".join(missing_published))
     governance_guards = [
-        'REQUIRED_RULE_TYPES = {"deletion", "non_fast_forward", "update"}',
+        'REQUIRED_TAG_RULE_TYPES = {"deletion", "non_fast_forward", "update"}',
+        'REQUIRED_STATUS_CONTEXT = "Required CI gate"',
         'RELEASE_TAG_PATTERN = "refs/tags/v*"',
-        'ruleset.get("target") != "tag"',
+        'MAIN_BRANCH_PATTERN = "refs/heads/main"',
+        'ruleset.get("target") != target',
         'ruleset.get("enforcement") != "active"',
         'if not isinstance(bypass_actors, list) or bypass_actors:',
         'immutable.get("enabled") is not True',

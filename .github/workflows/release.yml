@@ -10,14 +10,6 @@ on:
         description: "Existing tag, for example v0.1.0-alpha.1 or v0.1.0"
         required: true
         type: string
-      channel:
-        description: "Must agree with the tag: stable has no suffix; prerelease has an approved suffix"
-        required: true
-        default: prerelease
-        type: choice
-        options:
-          - prerelease
-          - stable
 
 permissions:
   contents: read
@@ -50,11 +42,12 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          RELEASE_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'auto' }}
+          RELEASE_CHANNEL: prerelease
         run: |
           set -euo pipefail
           python scripts/validate_release.py --check-workflows
           python scripts/verify_production_bundle.py --self-test
+          python scripts/prepare_release_assets.py --self-test
           python scripts/validate_release.py \
             --tag "${RELEASE_TAG}" \
             --channel "${RELEASE_CHANNEL}" \
@@ -684,14 +677,21 @@ jobs:
           )
           PY
 
-          (cd release && sha256sum * > SHA256SUMS.txt && sha256sum --check SHA256SUMS.txt)
+          python scripts/prepare_release_assets.py \
+            --release-dir release \
+            --artifacts-dir artifacts \
+            --tag "${VERSION}" \
+            --commit "${PRISM_COMMIT}" \
+            --tag-object "${PRISM_TAG_OBJECT}" \
+            --source-date-epoch "${SOURCE_DATE_EPOCH}"
+          (cd release && sha256sum --check SHA256SUMS.txt)
           python .github/scripts/verify-published-release.py \
             --release-dir release \
             --tag "${VERSION}" \
             --commit "${PRISM_COMMIT}" \
             --expected-tag-object "${PRISM_TAG_OBJECT}" \
             --expected-source-date-epoch "${SOURCE_DATE_EPOCH}" \
-            --expected-tag-verification "${TAG_VERIFICATION}" \
+            --expected-tag-verification signature \
             --expected-reproducibility-json '{"installerByteReproducibilityGuaranteed":false,"stagedAssetTimestampsNormalized":true}' \
             --expected-tools-json "$(python -c 'import json; print(json.dumps(dict(line.split(maxsplit=1) for line in open(".tool-versions", encoding="utf-8") if line.strip()), sort_keys=True, separators=(",", ":")))')"
           python .github/scripts/normalize-release-timestamps.py release "${SOURCE_DATE_EPOCH}"
@@ -707,7 +707,7 @@ jobs:
           EXPECTED_SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
           EXPECTED_TAG_VERIFICATION: ${{ needs.prepare.outputs.verification }}
           EXPECTED_REPRODUCIBILITY_JSON: '{"installerByteReproducibilityGuaranteed":false,"stagedAssetTimestampsNormalized":true}'
-          GOVERNANCE_TOKEN: ${{ secrets.RELEASE_GOVERNANCE_TOKEN }}
+          RELEASE_SETTINGS_TOKEN: ${{ secrets.RELEASE_SETTINGS_TOKEN }}
         run: |
           set -euo pipefail
           export EXPECTED_TOOLS_JSON="$(python -c 'import json; print(json.dumps(dict(line.split(maxsplit=1) for line in open(".tool-versions", encoding="utf-8") if line.strip()), sort_keys=True, separators=(",", ":")))')"

@@ -20,10 +20,10 @@ github_api_version=${GITHUB_API_VERSION:-2026-03-10}
 : "${EXPECTED_TAG_VERIFICATION:?EXPECTED_TAG_VERIFICATION is required}"
 : "${EXPECTED_REPRODUCIBILITY_JSON:?EXPECTED_REPRODUCIBILITY_JSON is required}"
 : "${EXPECTED_TOOLS_JSON:?EXPECTED_TOOLS_JSON is required}"
-: "${GOVERNANCE_TOKEN:?GOVERNANCE_TOKEN with access to immutable settings and ruleset bypass actors is required}"
+: "${RELEASE_SETTINGS_TOKEN:?RELEASE_SETTINGS_TOKEN with read access to immutable settings and full ruleset details is required}"
 
-[[ "${PRERELEASE}" == "true" || "${PRERELEASE}" == "false" ]] || {
-  echo "PRERELEASE must be true or false" >&2
+[[ "${PRERELEASE}" == "true" ]] || {
+  echo "Prism publication is prerelease-only; PRERELEASE must be true" >&2
   exit 1
 }
 [[ -s "${release_notes_en}" ]] || { echo "English release notes are missing: ${release_notes_en}" >&2; exit 1; }
@@ -114,11 +114,11 @@ existing_id=$("${gh_cli}" api --paginate \
 governance_dir=$(mktemp -d)
 immutable_json="${governance_dir}/immutable.json"
 ruleset_ids_file="${governance_dir}/ruleset-ids.txt"
-GH_TOKEN="${GOVERNANCE_TOKEN}" "${gh_cli}" api \
+GH_TOKEN="${RELEASE_SETTINGS_TOKEN}" "${gh_cli}" api \
   -H "Accept: application/vnd.github+json" \
   -H "X-GitHub-Api-Version: ${github_api_version}" \
   "repos/${GITHUB_REPOSITORY}/immutable-releases" > "${immutable_json}"
-GH_TOKEN="${GOVERNANCE_TOKEN}" "${gh_cli}" api --paginate \
+GH_TOKEN="${RELEASE_SETTINGS_TOKEN}" "${gh_cli}" api --paginate \
   -H "Accept: application/vnd.github+json" \
   -H "X-GitHub-Api-Version: ${github_api_version}" \
   "repos/${GITHUB_REPOSITORY}/rulesets?includes_parents=false&per_page=100" \
@@ -131,7 +131,7 @@ for ruleset_id in "${ruleset_ids[@]}"; do
     exit 1
   }
   ruleset_json="${governance_dir}/ruleset-${ruleset_id}.json"
-  GH_TOKEN="${GOVERNANCE_TOKEN}" "${gh_cli}" api \
+  GH_TOKEN="${RELEASE_SETTINGS_TOKEN}" "${gh_cli}" api \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: ${github_api_version}" \
     "repos/${GITHUB_REPOSITORY}/rulesets/${ruleset_id}" > "${ruleset_json}"
@@ -148,7 +148,7 @@ release_id=$("${gh_cli}" api --method POST \
   -f name="Tachyon Prism ${VERSION}" \
   -f body="${release_body}" \
   -F draft=true \
-  -F prerelease="${PRERELEASE}" \
+  -F prerelease=true \
   --jq '.id')
 [[ "${release_id}" =~ ^[0-9]+$ ]] || {
   echo "draft create returned an invalid release id: ${release_id}" >&2
@@ -157,16 +157,11 @@ release_id=$("${gh_cli}" api --method POST \
 
 "${gh_cli}" release upload "${VERSION}" "${release_dir}"/*
 
-if [[ "${PRERELEASE}" == "true" ]]; then
-  make_latest="false"
-else
-  make_latest="true"
-fi
 "${gh_cli}" api --method PATCH \
   "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
   -F draft=false \
-  -F prerelease="${PRERELEASE}" \
-  -f make_latest="${make_latest}" >/dev/null
+  -F prerelease=true \
+  -f make_latest=false >/dev/null
 
 readback_file=$(mktemp)
 "${gh_cli}" api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "${readback_file}"
@@ -194,7 +189,6 @@ python .github/scripts/verify-published-release.py \
   --expected-reproducibility-json "${EXPECTED_REPRODUCIBILITY_JSON}" \
   --expected-tools-json "${EXPECTED_TOOLS_JSON}" \
   --release-json "${readback_file}" \
-  --prerelease "${PRERELEASE}" \
   --latest-tag "${latest_tag}"
 
 release_id=""

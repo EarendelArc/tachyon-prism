@@ -5,6 +5,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,13 +17,21 @@ import { afterEach, describe, expect, it } from "vitest";
 const verifier = fileURLToPath(
   new URL("../../../.github/scripts/verify-published-release.py", import.meta.url),
 );
+const preparer = fileURLToPath(
+  new URL("../../../scripts/prepare_release_assets.py", import.meta.url),
+);
 const coreContractPath = fileURLToPath(new URL("../../../core-contract.json", import.meta.url));
-const coreContract = JSON.parse(readFileSync(coreContractPath, "utf8")) as Record<string, string>;
+const toolVersionsPath = fileURLToPath(new URL("../../../.tool-versions", import.meta.url));
 const tempDirs: string[] = [];
 const commit = "a".repeat(40);
 const tagObject = "b".repeat(40);
 const sourceDateEpoch = 1_700_000_000;
-const tools = { node: "26.4.0" };
+const tools = Object.fromEntries(
+  readFileSync(toolVersionsPath, "utf8")
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => line.split(/\s+/, 2)),
+);
 const reproducibility = {
   installerByteReproducibilityGuaranteed: false,
   stagedAssetTimestampsNormalized: true,
@@ -42,89 +51,85 @@ function installerNames(): string[] {
   ];
 }
 
-function writeMetadata(releaseDir: string, installers: string[], mutate?: (value: any) => void): void {
-  const artifactDigests = Object.fromEntries(
-    installers.map((name) => [name, `sha256:${digest(readFileSync(join(releaseDir, name)))}`]),
-  );
-  const metadata = {
-    artifactDigests,
-    coreContract,
-    prism: {
-      commit,
-      sourceDateEpoch,
-      tag: "v0.1.0-alpha.1",
-      tagObject,
-      tagVerification: "ref-commit",
-    },
-    reproducibility: { ...reproducibility },
-    schemaVersion: 1,
-    tools: { ...tools },
-  };
-  mutate?.(metadata);
-  writeFileSync(join(releaseDir, "BUILD_METADATA.json"), `${JSON.stringify(metadata, null, 2)}\n`);
-}
-
-function writeManifest(releaseDir: string): void {
-  const names = installerNamesFromDisk(releaseDir)
-    .concat(["BUILD_METADATA.json", "RELEASE_NOTES.md", "RELEASE_NOTES.zh-CN.md"])
-    .sort();
+function writeChecksums(releaseDir: string): void {
+  const names = Array.from(
+    new Set([
+      ...installerNames().filter((name) => {
+        try { readFileSync(join(releaseDir, name)); return true; } catch { return false; }
+      }),
+      "BUILD_METADATA.json",
+      "RELEASE_INDEX.json",
+      "RELEASE_MANIFEST.json",
+      "RELEASE_NOTES.md",
+      "RELEASE_NOTES.zh-CN.md",
+    ]),
+  ).sort();
   writeFileSync(
     join(releaseDir, "SHA256SUMS.txt"),
     `${names.map((name) => `${digest(readFileSync(join(releaseDir, name)))}  ${name}`).join("\n")}\n`,
   );
 }
 
-function installerNamesFromDisk(releaseDir: string): string[] {
-  return installerNames().map((name) => {
-    if (name === "tachyon-prism-windows-arm64_Prism.exe") {
-      try {
-        readFileSync(join(releaseDir, name));
-      } catch {
-        return "tachyon-prism-windows-arm64_Prism.zip";
-      }
-    }
-    return name;
-  });
+function refreshManifestEntry(releaseDir: string, name: string): void {
+  const path = join(releaseDir, name);
+  const manifestPath = join(releaseDir, "RELEASE_MANIFEST.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const asset = manifest.assets.find((candidate: any) => candidate.name === name);
+  if (!asset) throw new Error(`manifest entry missing for ${name}`);
+  asset.sha256 = `sha256:${digest(readFileSync(path))}`;
+  asset.size = statSync(path).size;
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  writeChecksums(releaseDir);
 }
 
 function fixture(): string {
   const root = mkdtempSync(join(tmpdir(), "prism-release-assets-"));
   tempDirs.push(root);
   const releaseDir = join(root, "release");
+  const artifactsDir = join(root, "artifacts");
   mkdirSync(releaseDir);
   for (const name of installerNames()) {
     writeFileSync(join(releaseDir, name), `payload:${name}\n`);
   }
-  writeFileSync(join(releaseDir, "RELEASE_NOTES.md"), "# Release\n\nEnglish.\n");
-  writeFileSync(join(releaseDir, "RELEASE_NOTES.zh-CN.md"), "# Release\n\nChinese.\n");
-  writeMetadata(releaseDir, installerNames());
-  writeManifest(releaseDir);
+  for (const target of ["windows-x64", "windows-arm64", "macos-x64", "macos-arm64", "linux-x64", "linux-arm64"]) {
+    const statusDir = join(artifactsDir, `tachyon-prism-${target}`, "release-status");
+    mkdirSync(statusDir, { recursive: true });
+    writeFileSync(join(statusDir, `${target}.txt`), target.startsWith("linux-")
+      ? "not-applicable-unsigned\n"
+      : "unsigned-no-credentials\n");
+  }
+  const prepared = spawnSync("python", [
+    preparer,
+    "--release-dir", releaseDir,
+    "--artifacts-dir", artifactsDir,
+    "--tag", "v0.1.0-alpha.1",
+    "--commit", commit,
+    "--tag-object", tagObject,
+    "--source-date-epoch", String(sourceDateEpoch),
+    "--core-contract", coreContractPath,
+    "--tool-versions", toolVersionsPath,
+  ], { encoding: "utf8" });
+  expect(prepared.status, prepared.stdout + prepared.stderr).toBe(0);
   return releaseDir;
 }
 
 function runVerifier(releaseDir: string) {
-  return spawnSync(
-    "python",
-    [
-      verifier,
-      "--release-dir", releaseDir,
-      "--tag", "v0.1.0-alpha.1",
-      "--commit", commit,
-      "--core-contract", coreContractPath,
-      "--expected-tag-object", tagObject,
-      "--expected-source-date-epoch", String(sourceDateEpoch),
-      "--expected-tag-verification", "ref-commit",
-      "--expected-reproducibility-json", JSON.stringify(reproducibility),
-      "--expected-tools-json", JSON.stringify(tools),
-    ],
-    { encoding: "utf8" },
-  );
+  return spawnSync("python", [
+    verifier,
+    "--release-dir", releaseDir,
+    "--tag", "v0.1.0-alpha.1",
+    "--commit", commit,
+    "--core-contract", coreContractPath,
+    "--expected-tag-object", tagObject,
+    "--expected-source-date-epoch", String(sourceDateEpoch),
+    "--expected-tag-verification", "signature",
+    "--expected-reproducibility-json", JSON.stringify(reproducibility),
+    "--expected-tools-json", JSON.stringify(tools),
+  ], { encoding: "utf8" });
 }
 
 afterEach(() => {
-  for (const path of tempDirs.splice(0)) {
-    rmSync(path, { force: true, recursive: true });
-  }
+  for (const path of tempDirs.splice(0)) rmSync(path, { force: true, recursive: true });
 });
 
 describe("release asset and metadata verification", () => {
@@ -136,82 +141,82 @@ describe("release asset and metadata verification", () => {
   it.each([
     ["tagObject", (value: any) => { value.prism.tagObject = "c".repeat(40); }],
     ["sourceDateEpoch", (value: any) => { value.prism.sourceDateEpoch += 1; }],
-    ["tagVerification", (value: any) => { value.prism.tagVerification = "signature"; }],
+    ["tagVerification", (value: any) => { value.prism.tagVerification = "ref-commit"; }],
+    ["channel", (value: any) => { value.prism.channel = "stable"; }],
+    ["prerelease", (value: any) => { value.prism.prerelease = false; }],
     ["reproducibility", (value: any) => { value.reproducibility.stagedAssetTimestampsNormalized = false; }],
     ["tools", (value: any) => { value.tools.node = "0.0.0"; }],
     ["schema extension", (value: any) => { value.unexpected = true; }],
-  ] as const)("rejects metadata %s drift even with a refreshed manifest", (_name, mutate) => {
+  ] as const)("rejects metadata %s drift with refreshed integrity data", (_name, mutate) => {
     const releaseDir = fixture();
-    writeMetadata(releaseDir, installerNames(), mutate);
-    writeManifest(releaseDir);
-
+    const metadataPath = join(releaseDir, "BUILD_METADATA.json");
+    const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+    mutate(metadata);
+    writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
+    refreshManifestEntry(releaseDir, "BUILD_METADATA.json");
     expect(runVerifier(releaseDir).status).not.toBe(0);
   });
 
-  it("rejects a duplicate manifest entry", () => {
+  it("rejects a duplicate checksum entry", () => {
     const releaseDir = fixture();
-    const manifest = join(releaseDir, "SHA256SUMS.txt");
-    const first = readFileSync(manifest, "utf8").split(/\r?\n/)[0];
-    writeFileSync(manifest, `${readFileSync(manifest, "utf8")}${first}\n`);
-
+    const checksumPath = join(releaseDir, "SHA256SUMS.txt");
+    const first = readFileSync(checksumPath, "utf8").split(/\r?\n/)[0];
+    writeFileSync(checksumPath, `${readFileSync(checksumPath, "utf8")}${first}\n`);
     const result = runVerifier(releaseDir);
     expect(result.status).not.toBe(0);
-    expect(result.stdout).toContain("duplicate manifest entry");
+    expect(result.stdout).toContain("duplicate checksum entry");
   });
 
-  it("rejects an extra staged asset", () => {
+  it.each([
+    ["extra", (dir: string) => writeFileSync(join(dir, "EXTRA.txt"), "unexpected\n")],
+    ["missing", (dir: string) => rmSync(join(dir, "tachyon-prism-linux-arm64_Prism.deb"))],
+  ] as const)("rejects an %s staged asset", (_name, mutate) => {
     const releaseDir = fixture();
-    writeFileSync(join(releaseDir, "EXTRA.txt"), "unexpected\n");
-
+    mutate(releaseDir);
     const result = runVerifier(releaseDir);
     expect(result.status).not.toBe(0);
-    expect(result.stdout).toContain("exactly 11 files");
+    expect(result.stdout).toContain("exactly 13 files");
   });
 
-  it("rejects a missing staged asset", () => {
+  it("rejects a wrong checksum digest", () => {
     const releaseDir = fixture();
-    rmSync(join(releaseDir, "tachyon-prism-linux-arm64_Prism.deb"));
-
-    const result = runVerifier(releaseDir);
-    expect(result.status).not.toBe(0);
-    expect(result.stdout).toContain("exactly 11 files");
+    const checksumPath = join(releaseDir, "SHA256SUMS.txt");
+    writeFileSync(checksumPath, readFileSync(checksumPath, "utf8").replace(/^[0-9a-f]{64}/, "0".repeat(64)));
+    expect(runVerifier(releaseDir).stdout).toContain("SHA256SUMS.txt digest mismatch");
   });
 
-  it("rejects a wrong manifest digest", () => {
-    const releaseDir = fixture();
-    const manifest = join(releaseDir, "SHA256SUMS.txt");
-    const contents = readFileSync(manifest, "utf8").replace(/^[0-9a-f]{64}/, "0".repeat(64));
-    writeFileSync(manifest, contents);
-
-    const result = runVerifier(releaseDir);
-    expect(result.status).not.toBe(0);
-    expect(result.stdout).toContain("SHA256SUMS.txt digest mismatch");
-  });
-
-  it("rejects an installer suffix drift even when metadata and manifest agree", () => {
+  it("rejects installer format drift", () => {
     const releaseDir = fixture();
     renameSync(
       join(releaseDir, "tachyon-prism-windows-arm64_Prism.exe"),
       join(releaseDir, "tachyon-prism-windows-arm64_Prism.zip"),
     );
-    const installers = installerNamesFromDisk(releaseDir);
-    writeMetadata(releaseDir, installers);
-    writeManifest(releaseDir);
-
     const result = runVerifier(releaseDir);
     expect(result.status).not.toBe(0);
     expect(result.stdout).toContain("installer layout");
   });
 
-  it("rejects installer digest drift in metadata even when the manifest is refreshed", () => {
+  it("rejects release index stable/preview drift", () => {
     const releaseDir = fixture();
-    writeMetadata(releaseDir, installerNames(), (value) => {
-      value.artifactDigests[installerNames()[0]] = `sha256:${"0".repeat(64)}`;
-    });
-    writeManifest(releaseDir);
-
+    const indexPath = join(releaseDir, "RELEASE_INDEX.json");
+    const index = JSON.parse(readFileSync(indexPath, "utf8"));
+    index.channels.stable.acceptsPrerelease = true;
+    writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`);
+    refreshManifestEntry(releaseDir, "RELEASE_INDEX.json");
     const result = runVerifier(releaseDir);
     expect(result.status).not.toBe(0);
-    expect(result.stdout).toContain("BUILD_METADATA.json digest mismatch");
+    expect(result.stdout).toContain("stable/preview runtime contract");
+  });
+
+  it("rejects manifest size drift even when its checksum is refreshed", () => {
+    const releaseDir = fixture();
+    const manifestPath = join(releaseDir, "RELEASE_MANIFEST.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    manifest.assets[0].size += 1;
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    writeChecksums(releaseDir);
+    const result = runVerifier(releaseDir);
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toContain("digest or size mismatch");
   });
 });

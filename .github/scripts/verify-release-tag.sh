@@ -49,21 +49,14 @@ fi
 [[ "${tag_commit}" == "${expected_commit}" ]] || \
   die "tag ${release_tag} points to ${tag_commit}, expected ${expected_commit}"
 
-verification=""
 verify_output=""
-if verify_output=$(git verify-tag "${FETCH_REF}" 2>&1); then
-  verification="signature"
-  [[ -z "${verify_output}" ]] || printf '%s\n' "${verify_output}"
-  echo "release tag ${release_tag}: cryptographic signature verified with git verify-tag"
-else
-  if [[ "${verify_output}" == *"no signature found"* ]]; then
-    verification="ref-commit"
-  else
-    printf '%s\n' "${verify_output}" >&2
-    die "tag contains a signature that git verify-tag could not validate"
-  fi
-  echo "::warning::Tag ${release_tag} is unsigned; exact remote tag object and peeled commit equality were verified."
+if ! verify_output=$(git verify-tag "${FETCH_REF}" 2>&1); then
+  printf '%s\n' "${verify_output}" >&2
+  die "release tag ${release_tag} must carry a cryptographically valid signature"
 fi
+verification="signature"
+[[ -z "${verify_output}" ]] || printf '%s\n' "${verify_output}"
+echo "release tag ${release_tag}: cryptographic signature verified with git verify-tag"
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   {

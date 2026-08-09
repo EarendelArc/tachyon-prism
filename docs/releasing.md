@@ -2,22 +2,21 @@
 
 ## Channels and tags
 
-The release workflow accepts only these existing Git tags:
+The immutable publication workflow accepts only these existing prerelease Git tags:
 
-- Stable: `vMAJOR.MINOR.PATCH`, for example `v0.1.0`.
-- Prerelease: `vMAJOR.MINOR.PATCH-(alpha|beta|rc|pre|preview)[.N]`, for example
+- `vMAJOR.MINOR.PATCH-(alpha|beta|rc|pre|preview)[.N]`, for example
   `v0.1.0-alpha.1` or `v0.1.0-rc.2`.
 
 The version before the suffix must match `package.json`,
 `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`. Tag pushes derive the
-channel from the tag. A manual dispatch requires both an existing tag and a
-channel; a mismatch fails before tests or builds start. Manual runs check out
+channel from the tag. A manual dispatch requires an existing prerelease tag;
+stable tags and `prerelease=false` fail before publication. Manual runs check out
 the tag itself, not the branch from which the workflow was started.
 
-Stable releases are marked as GitHub's latest release. Prereleases are marked
-as prereleases and explicitly excluded from latest.
+Published builds are always marked as prereleases and excluded from Latest.
 
-Release tags must be annotated Git tag objects; lightweight tags fail validation.
+Release tags must be signed annotated Git tag objects; lightweight and unsigned
+annotated tags fail validation.
 The prepare job fetches the remote tag into an isolated ref, verifies the tag
 object and peeled commit, and records both full object IDs. Every downstream
 test, build, and publish job checks out that same verified commit SHA. Runs for
@@ -79,9 +78,10 @@ to be confirmed before the first release.
 Each build uploads an Actions artifact. The publish job refuses to create the
 GitHub Release unless all six artifact directories contain a payload and a
 signing-status record. Release asset names include the platform label, and
-the final release must contain exactly 11 assets: seven installers, English and
-Chinese release notes, `BUILD_METADATA.json`, and `SHA256SUMS.txt`.
-`SHA256SUMS.txt` contains exactly ten entries and covers every other asset.
+the final release must contain exactly 13 assets: seven installers, English and
+Chinese release notes, `BUILD_METADATA.json`, `RELEASE_INDEX.json`,
+`RELEASE_MANIFEST.json`, and `SHA256SUMS.txt`. `SHA256SUMS.txt` contains exactly
+12 entries and covers every other asset.
 The schema-versioned metadata records the verified full Prism tag object and
 commit, `SOURCE_DATE_EPOCH`, the exact Core tag object and peeled commit, tool
 versions, and a deterministic SHA-256 map for all seven installers. Before
@@ -104,9 +104,10 @@ The GitHub Release body is the complete English note followed by the complete
 Chinese note. After publication, the transaction reads the release back through
 the API and fails closed unless the tag, full target commit, draft/prerelease
 flags, immutable state, latest-release semantics, bilingual body, exact asset
-set, and every remote asset digest match the staged contract. Repositories must
+set, and every remote asset digest and size match the staged contract. Repositories must
 enable GitHub immutable releases and an active `refs/tags/v*` ruleset that
-prevents tag update, deletion, and non-fast-forward changes before dispatching
+prevents tag update, deletion, and non-fast-forward changes, plus an active
+zero-bypass `main` ruleset requiring pull requests and strict `Required CI gate`, before dispatching
 the release workflow.
 
 The publication script independently enforces that repository governance before
@@ -126,7 +127,7 @@ explicitly from the prepare job and must match exactly both before upload and
 during final release readback.
 
 Store a fine-grained token as the repository Actions secret
-`RELEASE_GOVERNANCE_TOKEN`. It must be able to read the repository immutable
+`RELEASE_SETTINGS_TOKEN`. It must be able to read the repository immutable
 release setting and the full ruleset shape, including `bypass_actors`. GitHub
 may suppress bypass actors unless the credential has ruleset write access, even
 though Prism performs GET requests only. Keep this

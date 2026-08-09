@@ -32,13 +32,20 @@ function repository(tagKind: "annotated" | "lightweight") {
   execFileSync("git", tagKind === "annotated"
     ? ["tag", "-a", tag, "-m", "annotated release"]
     : ["tag", tag], { cwd: local });
+  writeFileSync(join(local, "payload.txt"), "next\n", "utf8");
+  execFileSync("git", ["add", "payload.txt"], { cwd: local });
+  execFileSync("git", ["commit", "-m", "next fixture"], { cwd: local });
+  const wrongCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: local,
+    encoding: "utf8",
+  }).trim();
   execFileSync("git", ["remote", "add", "origin", remote], { cwd: local });
   execFileSync("git", ["push", "origin", `refs/tags/${tag}`], { cwd: local });
   const tagObject = execFileSync("git", ["rev-parse", `refs/tags/${tag}`], {
     cwd: local,
     encoding: "utf8",
   }).trim();
-  return { commit, local, tag, tagObject };
+  return { commit, local, tag, tagObject, wrongCommit };
 }
 
 afterEach(() => {
@@ -60,7 +67,7 @@ describe("release tag verification", () => {
     expect(result.stderr).toContain("must be an annotated tag object");
   });
 
-  it("accepts an unsigned annotated tag with exact object and peeled commit", () => {
+  it("rejects an unsigned annotated tag even with exact object and peeled commit", () => {
     const fixture = repository("annotated");
     const result = spawnSync(
       bashBinary,
@@ -68,7 +75,31 @@ describe("release tag verification", () => {
       { cwd: fixture.local, encoding: "utf8" },
     );
 
-    expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain("release tag verified");
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("cryptographically valid signature");
+  });
+
+  it("rejects an annotated tag that peels to the wrong commit", () => {
+    const fixture = repository("annotated");
+    const result = spawnSync(
+      bashBinary,
+      [shellPath(verifyScript), fixture.tag, fixture.wrongCommit, "origin", fixture.tagObject],
+      { cwd: fixture.local, encoding: "utf8" },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("points to");
+  });
+
+  it("rejects a moved tag object", () => {
+    const fixture = repository("annotated");
+    const result = spawnSync(
+      bashBinary,
+      [shellPath(verifyScript), fixture.tag, fixture.commit, "origin", "c".repeat(40)],
+      { cwd: fixture.local, encoding: "utf8" },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("object changed");
   });
 });

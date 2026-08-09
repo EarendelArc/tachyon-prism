@@ -86,7 +86,6 @@ describe("release workflow checksum assets", () => {
     const commands = getReleaseChecksumCommands(workflow);
 
     expect(commands).toEqual([
-      "sha256sum * > SHA256SUMS.txt",
       "sha256sum --check SHA256SUMS.txt",
     ]);
   });
@@ -94,7 +93,7 @@ describe("release workflow checksum assets", () => {
   it("includes release notes in generated checksums", () => {
     const workflow = readReleaseWorkflow();
     const notesIndex = workflow.indexOf("} > release/RELEASE_NOTES.md");
-    const checksumsIndex = workflow.indexOf("(cd release && sha256sum * > SHA256SUMS.txt");
+    const checksumsIndex = workflow.indexOf("(cd release && sha256sum --check SHA256SUMS.txt");
 
     expect(notesIndex).toBeGreaterThan(-1);
     expect(checksumsIndex).toBeGreaterThan(-1);
@@ -203,7 +202,9 @@ describe("release workflow checksum assets", () => {
     expect(publication.indexOf("immutable-releases")).toBeLessThan(createIndex);
     expect(publication.indexOf("rulesets?includes_parents=false&per_page=100")).toBeLessThan(createIndex);
     expect(publication.indexOf('python "${governance_verify_script}"')).toBeLessThan(createIndex);
-    expect(governance).toContain('REQUIRED_RULE_TYPES = {"deletion", "non_fast_forward", "update"}');
+    expect(governance).toContain('REQUIRED_TAG_RULE_TYPES = {"deletion", "non_fast_forward", "update"}');
+    expect(governance).toContain('REQUIRED_STATUS_CONTEXT = "Required CI gate"');
+    expect(governance).toContain('MAIN_BRANCH_PATTERN = "refs/heads/main"');
     expect(governance).toContain('RELEASE_TAG_PATTERN = "refs/tags/v*"');
     expect(governance).toContain('ruleset.get("enforcement") != "active"');
     expect(governance).toContain("bypass_actors");

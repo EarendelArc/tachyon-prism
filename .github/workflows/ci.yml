@@ -8,8 +8,16 @@ on:
 
 jobs:
   release-contract:
-    name: Release contract
-    runs-on: ubuntu-latest
+    name: Release contract (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu
+            os: ubuntu-latest
+          - platform: windows
+            os: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6.0.3
@@ -18,6 +26,7 @@ jobs:
         run: |
           python scripts/validate_release.py --check-workflows
           python scripts/verify_production_bundle.py --self-test
+          python scripts/prepare_release_assets.py --self-test
           python -m unittest discover -s scripts -p "test_*.py"
 
   typecheck:
@@ -342,3 +351,41 @@ jobs:
       - name: Verify Tauri bundle without publishing
         working-directory: .
         run: npm run build -- --target ${{ matrix.rust_target }} ${{ matrix.bundle_args }}
+
+  required-ci-gate:
+    name: Required CI gate
+    if: always()
+    needs:
+      - release-contract
+      - typecheck
+      - ui-evidence
+      - core-contract
+      - system-keyring-live
+      - rust
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every CI group
+        env:
+          RELEASE_CONTRACT_RESULT: ${{ needs.release-contract.result }}
+          TYPECHECK_RESULT: ${{ needs.typecheck.result }}
+          UI_EVIDENCE_RESULT: ${{ needs.ui-evidence.result }}
+          CORE_CONTRACT_RESULT: ${{ needs.core-contract.result }}
+          SYSTEM_KEYRING_RESULT: ${{ needs.system-keyring-live.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+        run: |
+          python - <<'PY'
+          import os
+
+          results = {
+              "release-contract": os.environ["RELEASE_CONTRACT_RESULT"],
+              "typecheck": os.environ["TYPECHECK_RESULT"],
+              "ui-evidence": os.environ["UI_EVIDENCE_RESULT"],
+              "core-contract": os.environ["CORE_CONTRACT_RESULT"],
+              "system-keyring-live": os.environ["SYSTEM_KEYRING_RESULT"],
+              "rust": os.environ["RUST_RESULT"],
+          }
+          failed = {name: result for name, result in results.items() if result != "success"}
+          if failed:
+              raise SystemExit(f"required CI groups did not succeed: {failed}")
+          print("all required CI groups succeeded")
+          PY

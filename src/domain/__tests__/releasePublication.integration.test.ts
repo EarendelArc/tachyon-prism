@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
@@ -17,9 +18,14 @@ import { afterEach, describe, expect, it } from "vitest";
 const publishScript = fileURLToPath(
   new URL("../../../.github/scripts/publish-release.sh", import.meta.url),
 );
-const coreContract = JSON.parse(
-  readFileSync(fileURLToPath(new URL("../../../core-contract.json", import.meta.url)), "utf8"),
-) as Record<string, string>;
+const prepareScript = fileURLToPath(
+  new URL("../../../scripts/prepare_release_assets.py", import.meta.url),
+);
+const coreContractPath = fileURLToPath(new URL("../../../core-contract.json", import.meta.url));
+const toolVersionsPath = fileURLToPath(new URL("../../../.tool-versions", import.meta.url));
+const releaseTools = Object.fromEntries(
+  readFileSync(toolVersionsPath, "utf8").trim().split(/\r?\n/).map((line) => line.split(/\s+/, 2)),
+);
 const tempDirs: string[] = [];
 const bashBinary = process.env.BASH_BINARY?.trim()
   || (process.platform === "win32" && existsSync("C:\\Program Files\\Git\\bin\\bash.exe")
@@ -40,6 +46,7 @@ type Failure =
   | "body-order"
   | "body-paragraph"
   | "digest"
+  | "size"
   | "governance-bypass"
   | "governance-immutable-api"
   | "governance-immutable"
@@ -47,7 +54,11 @@ type Failure =
   | "governance-missing-rule"
   | "governance-no-ruleset"
   | "governance-wrong-pattern"
+  | "governance-main-bypass"
+  | "governance-main-missing-check"
+  | "governance-main-wrong-pattern"
   | "immutable"
+  | "non-prerelease"
   | "latest"
   | "latest-401"
   | "latest-403"
@@ -68,7 +79,7 @@ type Failure =
 function stageRelease(releaseDir: string, omitChinese: boolean): {
   notesEn: string;
   notesZh: string;
-  remoteAssets: Array<{ digest: string; name: string }>;
+  remoteAssets: Array<{ digest: string; name: string; size: number }>;
 } {
   const installers = [
     "tachyon-prism-windows-x64_Prism.exe",
@@ -82,54 +93,49 @@ function stageRelease(releaseDir: string, omitChinese: boolean): {
   for (const name of installers) {
     writeFileSync(join(releaseDir, name), `payload:${name}\n`, "utf8");
   }
+  const artifactsDir = join(releaseDir, "..", "artifacts");
+  for (const target of ["windows-x64", "windows-arm64", "macos-x64", "macos-arm64", "linux-x64", "linux-arm64"]) {
+    const statusDir = join(artifactsDir, `tachyon-prism-${target}`, "release-status");
+    mkdirSync(statusDir, { recursive: true });
+    writeFileSync(join(statusDir, `${target}.txt`), target.startsWith("linux-")
+      ? "not-applicable-unsigned\n"
+      : "unsigned-no-credentials\n");
+  }
+  const prepared = spawnSync("python", [
+    prepareScript,
+    "--release-dir", releaseDir,
+    "--artifacts-dir", artifactsDir,
+    "--tag", "v0.1.0-alpha.1",
+    "--commit", "a".repeat(40),
+    "--tag-object", "b".repeat(40),
+    "--source-date-epoch", "1700000000",
+    "--core-contract", coreContractPath,
+    "--tool-versions", toolVersionsPath,
+  ], { encoding: "utf8" });
+  expect(prepared.status, prepared.stdout + prepared.stderr).toBe(0);
   const notesEn = join(releaseDir, "RELEASE_NOTES.md");
   const notesZh = join(releaseDir, "RELEASE_NOTES.zh-CN.md");
-  writeFileSync(notesEn, "# Tachyon Prism\n\nEnglish notes.\n", "utf8");
   if (!omitChinese) {
-    writeFileSync(notesZh, "# Tachyon Prism\n\n中文发布说明。\n", "utf8");
+    // Prepared above.
+  } else {
+    rmSync(notesZh);
   }
-  const artifactDigests = Object.fromEntries(
-    installers.map((name) => [name, `sha256:${digest(readFileSync(join(releaseDir, name)))}`]),
-  );
-  writeFileSync(
-    join(releaseDir, "BUILD_METADATA.json"),
-    `${JSON.stringify({
-      artifactDigests,
-      coreContract,
-      prism: {
-        commit: "a".repeat(40),
-        sourceDateEpoch: 1_700_000_000,
-        tag: "v0.1.0-alpha.1",
-        tagObject: "b".repeat(40),
-        tagVerification: "ref-commit",
-      },
-      reproducibility: {
-        installerByteReproducibilityGuaranteed: false,
-        stagedAssetTimestampsNormalized: true,
-      },
-      schemaVersion: 1,
-      tools: { node: "26.4.0" },
-    }, null, 2)}\n`,
-    "utf8",
-  );
-  const manifestNames = [
+  const remoteNames = [
     ...installers,
     "BUILD_METADATA.json",
+    "RELEASE_INDEX.json",
+    "RELEASE_MANIFEST.json",
     "RELEASE_NOTES.md",
     ...(omitChinese ? [] : ["RELEASE_NOTES.zh-CN.md"]),
+    "SHA256SUMS.txt",
   ].sort();
-  writeFileSync(
-    join(releaseDir, "SHA256SUMS.txt"),
-    `${manifestNames.map((name) => `${digest(readFileSync(join(releaseDir, name)))}  ${name}`).join("\n")}\n`,
-    "utf8",
-  );
-  const remoteNames = [...manifestNames, "SHA256SUMS.txt"].sort();
   return {
     notesEn,
     notesZh,
     remoteAssets: remoteNames.map((name) => ({
       digest: `sha256:${digest(readFileSync(join(releaseDir, name)))}`,
       name,
+      size: statSync(join(releaseDir, name)).size,
     })),
   };
 }
@@ -148,10 +154,14 @@ function runPublication(failAt: Failure, omitChinese = false) {
   const english = readFileSync(staged.notesEn, "utf8").trimEnd();
   const chinese = omitChinese ? "" : readFileSync(staged.notesZh, "utf8").trimEnd();
   let remoteAssets = staged.remoteAssets.map((asset, index) => (
-    failAt === "digest" && index === 0 ? { ...asset, digest: `sha256:${"0".repeat(64)}` } : asset
+    failAt === "digest" && index === 0
+      ? { ...asset, digest: `sha256:${"0".repeat(64)}` }
+      : failAt === "size" && index === 0
+        ? { ...asset, size: asset.size + 1 }
+        : asset
   ));
   if (failAt === "remote-extra") {
-    remoteAssets = [...remoteAssets, { digest: `sha256:${"1".repeat(64)}`, name: "EXTRA.txt" }];
+    remoteAssets = [...remoteAssets, { digest: `sha256:${"1".repeat(64)}`, name: "EXTRA.txt", size: 1 }];
   } else if (failAt === "remote-missing") {
     remoteAssets = remoteAssets.slice(1);
   } else if (failAt === "remote-duplicate") {
@@ -168,7 +178,7 @@ function runPublication(failAt: Failure, omitChinese = false) {
       : failAt === "body-order"
         ? `${chinese}\n\n---\n\n${english}`
         : failAt === "body-paragraph"
-          ? `${english.replace("English notes.", "English notes changed.")}\n\n---\n\n${chinese}`
+          ? `${english.replace("This is an immutable", "This is a modified")}\n\n---\n\n${chinese}`
         : `${english}\n\n---\n\n${chinese}`;
   writeFileSync(
     releaseJsonPath,
@@ -177,7 +187,7 @@ function runPublication(failAt: Failure, omitChinese = false) {
       body: releaseBody,
       draft: false,
       immutable: failAt !== "immutable",
-      prerelease: true,
+      prerelease: failAt !== "non-prerelease",
       tag_name: "v0.1.0-alpha.1",
       target_commitish: failAt === "target" ? "c".repeat(40) : "a".repeat(40),
     }),
@@ -206,7 +216,7 @@ function runPublication(failAt: Failure, omitChinese = false) {
       "if [[ \"$1\" == api && \"${joined}\" == *\"/rulesets?includes_parents=false&per_page=100\"* ]]; then",
       "  echo GET_RULESET_LIST >> \"${MOCK_LOG}\"",
       "  [[ \"${MOCK_FAIL_AT}\" != ruleset-list-api ]] || exit 74",
-      "  [[ \"${MOCK_FAIL_AT}\" == governance-no-ruleset ]] || echo 9001",
+      "  if [[ \"${MOCK_FAIL_AT}\" != governance-no-ruleset ]]; then printf '9001\\n9002\\n'; fi",
       "  exit 0",
       "fi",
       "if [[ \"$1\" == api && \"${joined}\" == *\"/rulesets/9001\"* ]]; then",
@@ -220,6 +230,17 @@ function runPublication(failAt: Failure, omitChinese = false) {
       "  pattern='refs/tags/v*'",
       "  [[ \"${MOCK_FAIL_AT}\" != governance-wrong-pattern ]] || pattern='refs/tags/release-*'",
       "  printf '{\"id\":9001,\"target\":\"tag\",\"enforcement\":\"%s\",\"bypass_actors\":%s,\"conditions\":{\"ref_name\":{\"include\":[\"%s\"],\"exclude\":[]}},\"rules\":[{\"type\":\"deletion\"},{\"type\":\"non_fast_forward\"}%s]}\\n' \"${enforcement}\" \"${bypass}\" \"${pattern}\" \"${update_rule}\"",
+      "  exit 0",
+      "fi",
+      "if [[ \"$1\" == api && \"${joined}\" == *\"/rulesets/9002\"* ]]; then",
+      "  echo GET_MAIN_RULESET_DETAIL >> \"${MOCK_LOG}\"",
+      "  bypass='[]'",
+      "  [[ \"${MOCK_FAIL_AT}\" != governance-main-bypass ]] || bypass='[{\"actor_id\":1,\"actor_type\":\"RepositoryRole\",\"bypass_mode\":\"always\"}]'",
+      "  pattern='refs/heads/main'",
+      "  [[ \"${MOCK_FAIL_AT}\" != governance-main-wrong-pattern ]] || pattern='refs/heads/trunk'",
+      "  context='Required CI gate'",
+      "  [[ \"${MOCK_FAIL_AT}\" != governance-main-missing-check ]] || context='Other check'",
+      "  printf '{\"id\":9002,\"target\":\"branch\",\"enforcement\":\"active\",\"bypass_actors\":%s,\"conditions\":{\"ref_name\":{\"include\":[\"%s\"],\"exclude\":[]}},\"rules\":[{\"type\":\"deletion\"},{\"type\":\"non_fast_forward\"},{\"type\":\"pull_request\"},{\"type\":\"required_status_checks\",\"parameters\":{\"strict_required_status_checks_policy\":true,\"required_status_checks\":[{\"context\":\"%s\"}]}}]}\\n' \"${bypass}\" \"${pattern}\" \"${context}\"",
       "  exit 0",
       "fi",
       "if [[ \"$1\" == api && \"${joined}\" == *\"--method POST\"* ]]; then",
@@ -296,11 +317,11 @@ function runPublication(failAt: Failure, omitChinese = false) {
         }),
         EXPECTED_SOURCE_DATE_EPOCH: "1700000000",
         EXPECTED_TAG_OBJECT: "b".repeat(40),
-        EXPECTED_TAG_VERIFICATION: "ref-commit",
-        EXPECTED_TOOLS_JSON: JSON.stringify({ node: "26.4.0" }),
+        EXPECTED_TAG_VERIFICATION: "signature",
+        EXPECTED_TOOLS_JSON: JSON.stringify(releaseTools),
         GH_CLI: shellPath(ghPath),
         GITHUB_REPOSITORY: "EarendelArc/tachyon-prism",
-        GOVERNANCE_TOKEN: "governance-test-token",
+        RELEASE_SETTINGS_TOKEN: "governance-test-token",
         MOCK_FAIL_AT: failAt,
         MOCK_LOG: shellPath(logPath),
         MOCK_RELEASE_JSON: shellPath(releaseJsonPath),
@@ -338,11 +359,12 @@ describe("release publication transaction", () => {
     const run = runPublication("upload");
 
     expect(run.result.status).not.toBe(0);
-    expect(run.log.slice(0, 7)).toEqual([
+    expect(run.log.slice(0, 8)).toEqual([
       "LIST",
       "GET_IMMUTABLE",
       "GET_RULESET_LIST",
       "GET_RULESET_DETAIL",
+      "GET_MAIN_RULESET_DETAIL",
       "VERIFY",
       "POST",
       "UPLOAD",
@@ -384,7 +406,9 @@ describe("release publication transaction", () => {
 
   it.each([
     ["digest", "digest mismatch"],
+    ["size", "size mismatch"],
     ["latest", "unexpectedly became GitHub latest"],
+    ["non-prerelease", "prerelease"],
     ["target", "target_commitish"],
   ] as const)("fails closed for a mismatched published %s", (failure, message) => {
     const run = runPublication(failure);
@@ -403,6 +427,9 @@ describe("release publication transaction", () => {
     "governance-missing-rule",
     "governance-no-ruleset",
     "governance-wrong-pattern",
+    "governance-main-bypass",
+    "governance-main-missing-check",
+    "governance-main-wrong-pattern",
     "ruleset-list-api",
   ] as const)("fails before every GitHub write when %s is detected", (failure) => {
     const run = runPublication(failure);
@@ -455,7 +482,7 @@ describe("release publication transaction", () => {
     const run = runPublication(failure);
 
     expect(run.result.status).not.toBe(0);
-    expect(run.result.stdout).toContain("exact 11 staged assets");
+    expect(run.result.stdout).toMatch(/exact 13 staged assets|duplicate asset/);
   });
 
   it("rejects a published BUILD_METADATA digest drift", () => {
@@ -474,6 +501,7 @@ describe("release publication transaction", () => {
       "GET_IMMUTABLE",
       "GET_RULESET_LIST",
       "GET_RULESET_DETAIL",
+      "GET_MAIN_RULESET_DETAIL",
       "VERIFY",
       "POST",
       "UPLOAD",

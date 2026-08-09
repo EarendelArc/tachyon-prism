@@ -11,7 +11,8 @@
 `src-tauri/tauri.conf.json` 一致。stable 会成为 GitHub Latest Release；
 prerelease 必须明确排除在 Latest 之外。
 
-发布标签必须是 annotated tag，lightweight tag 会直接失败。prepare job 会把远端标签
+发布标签必须是带有效密码学签名的 annotated tag；lightweight tag 与未签名 annotated tag
+都会直接失败。prepare job 会把远端标签
 取到隔离 ref，验证 tag object、peeled commit 和完整对象 ID。后续测试、构建和发布 job
 全部检出同一个已验证 commit。相同标签共享不可取消的并发组，避免两个发布事务竞争。
 
@@ -53,9 +54,10 @@ Core 拒绝且错误定位到 `client.tun.game_routes[0]`。Linux/macOS 必须�
 | Linux x64 | `ubuntu-22.04` | `x86_64-unknown-linux-gnu` | Debian `.deb` |
 | Linux ARM64 | `ubuntu-24.04-arm` | `aarch64-unknown-linux-gnu` | Debian `.deb` |
 
-最终 Release 必须精确包含 11 个资产：7 个安装包、`RELEASE_NOTES.md`、
-`RELEASE_NOTES.zh-CN.md`、`BUILD_METADATA.json` 和 `SHA256SUMS.txt`。清单必须精确覆盖
-其余 10 个资产。带 schema 版本的构建元数据记录完整 Prism tag object/commit、Core
+最终 Release 必须精确包含 13 个资产：7 个安装包、`RELEASE_NOTES.md`、
+`RELEASE_NOTES.zh-CN.md`、`BUILD_METADATA.json`、`RELEASE_INDEX.json`、
+`RELEASE_MANIFEST.json` 和 `SHA256SUMS.txt`。清单必须精确覆盖其余 12 个资产。带 schema
+版本的构建元数据记录完整 Prism tag object/commit、Core
 tag/tag object/commit、`SOURCE_DATE_EPOCH`、工具版本，以及按文件名稳定排序的 7 个安装包
 SHA-256 映射。
 
@@ -71,7 +73,7 @@ SHA-256 映射。
 
 Release 正文由完整英文说明、分隔线和完整中文说明组成。发布后必须通过 GitHub API
 fail-closed 复核：tag、完整 target commit、`draft=false`、prerelease 状态、
-`immutable=true`、Latest 语义、双语正文、精确 11 个资产和每个远端 digest 都必须与本地
+`immutable=true`、Latest 语义、双语正文、精确 13 个资产和每个远端 digest/size 都必须与本地
 暂存契约一致。任何字段缺失或不一致都会让发布 job 失败。
 
 发布脚本会在第一次 GitHub 写操作前独立执行治理预检：读取 immutable releases 设置，
@@ -85,7 +87,7 @@ fail-closed。Latest 读回同样只把明确的 HTTP 404 解释为“没有 Lat
 commit 时间戳、标签验证方式、可复现性声明和完整工具版本对象；这些值在上传前及最终远端
 复核时都必须完全一致，不能仅凭字段格式合法而通过。
 
-仓库 Actions secret 必须配置 `RELEASE_GOVERNANCE_TOKEN`。该细粒度凭据需要能够读取仓库
+仓库 Actions secret 必须配置 `RELEASE_SETTINGS_TOKEN`。该独立细粒度凭据需要能够读取仓库
 immutable release 设置和包含 `bypass_actors` 的完整 ruleset 内容。它应与普通发布
 `GITHUB_TOKEN` 分离。GitHub 可能只向具有 ruleset 写权限的凭据返回 bypass actor，尽管
 Prism 实际只执行 GET 请求；发布脚本只会用该凭据执行治理读取。
