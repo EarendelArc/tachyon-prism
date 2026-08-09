@@ -4,6 +4,8 @@ import argparse
 import base64
 import json
 import os
+import re
+import signal
 import subprocess
 import tempfile
 import threading
@@ -12,7 +14,8 @@ import urllib.request
 import socket
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import urlparse
 
 from PIL import Image, ImageStat
 import websocket
@@ -33,6 +36,15 @@ SMOKE_URL_SUBSCRIPTION = "\n".join(
         "trojan://url-password@url-trojan.example.com:8443?security=tls&sni=url-trojan.example.com#Smoke URL Trojan",
     ],
 )
+CDP_DISCOVERY_TIMEOUT_SECONDS = 45.0
+CDP_CONNECT_TIMEOUT_SECONDS = 30.0
+CDP_COMMAND_TIMEOUT_SECONDS = 20.0
+SHELL_READY_TIMEOUT_SECONDS = 30.0
+DIAGNOSTIC_LOG_BYTES = 8192
+
+
+class CDPTimeout(RuntimeError):
+    pass
 
 
 class QuietHandler(SimpleHTTPRequestHandler):
@@ -78,19 +90,57 @@ class QuietHandler(SimpleHTTPRequestHandler):
 
 
 class CDP:
-    def __init__(self, url: str) -> None:
-        self.ws = websocket.create_connection(url, timeout=10)
+    def __init__(
+        self,
+        url: str,
+        edge: subprocess.Popen[Any] | None = None,
+        validator: Callable[[], None] | None = None,
+    ) -> None:
+        self.url = url
+        self.edge = edge
+        self.validator = validator
+        self.ws = self._connect()
         self.next_id = 1
+
+    def _connect(self) -> websocket.WebSocket:
+        if self.edge is not None:
+            ensure_process_alive(self.edge, "CDP WebSocket handshake")
+        if self.validator is not None:
+            self.validator()
+        return websocket.create_connection(self.url, timeout=10)
+
+    def reconnect(self) -> None:
+        try:
+            self.ws.close()
+        except Exception:
+            pass
+        self.ws = self._connect()
 
     def close(self) -> None:
         self.ws.close()
 
-    def call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def call(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        timeout: float = CDP_COMMAND_TIMEOUT_SECONDS,
+    ) -> dict[str, Any]:
+        if self.edge is not None:
+            ensure_process_alive(self.edge, f"CDP {method}")
         message_id = self.next_id
         self.next_id += 1
         self.ws.send(json.dumps({"id": message_id, "method": method, "params": params or {}}))
+        deadline = time.monotonic() + timeout
         while True:
-            raw = self.ws.recv()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CDPTimeout(f"CDP {method} exceeded {timeout:.1f}s")
+            self.ws.settimeout(max(0.1, remaining))
+            try:
+                raw = self.ws.recv()
+            except websocket.WebSocketTimeoutException as error:
+                raise CDPTimeout(f"CDP {method} exceeded {timeout:.1f}s") from error
             payload = json.loads(raw)
             if payload.get("id") != message_id:
                 continue
@@ -98,7 +148,13 @@ class CDP:
                 raise RuntimeError(f"{method}: {payload['error']}")
             return payload.get("result", {})
 
-    def evaluate(self, expression: str, *, await_promise: bool = False) -> Any:
+    def evaluate(
+        self,
+        expression: str,
+        *,
+        await_promise: bool = False,
+        timeout: float = CDP_COMMAND_TIMEOUT_SECONDS,
+    ) -> Any:
         result = self.call(
             "Runtime.evaluate",
             {
@@ -106,6 +162,7 @@ class CDP:
                 "expression": expression,
                 "returnByValue": True,
             },
+            timeout=timeout,
         )
         if "exceptionDetails" in result:
             raise RuntimeError(json.dumps(result["exceptionDetails"], ensure_ascii=False))
@@ -129,6 +186,7 @@ def assert_nonblank_png(path: Path) -> None:
 
 
 def free_port() -> int:
+    """Compatibility helper for native smoke runners that cannot use port zero."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
@@ -147,64 +205,210 @@ def start_server(port: int) -> ThreadingHTTPServer:
     return server
 
 
+def read_json(url: str, timeout: float = 2.0) -> Any:
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def wait_json(url: str, timeout: float = 10.0) -> Any:
-    deadline = time.time() + timeout
+    """Compatibility helper for native smoke runners."""
+    deadline = time.monotonic() + timeout
+    delay = 0.05
     last_error: Exception | None = None
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=2) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except Exception as error:  # noqa: BLE001 - diagnostic retry loop.
+            return read_json(url)
+        except Exception as error:  # noqa: BLE001 - bounded readiness retry.
             last_error = error
-            time.sleep(0.2)
-    raise RuntimeError(f"timed out waiting for {url}: {last_error}")
+            time.sleep(delay)
+            delay = min(delay * 1.7, 1.0)
+    raise RuntimeError(f"timed out waiting for local endpoint: {last_error}")
 
 
-def read_edge_stderr(edge: subprocess.Popen[str]) -> str:
-    if edge.stderr is None:
-        return "(stderr was not captured)"
-    try:
-        _, stderr = edge.communicate(timeout=2)
-    except subprocess.TimeoutExpired:
-        try:
-            edge.stderr.close()
-        except Exception:
-            pass
-        return "(timed out while reading Edge stderr)"
-    except Exception as error:  # noqa: BLE001 - best-effort diagnostics.
-        return f"(failed to read Edge stderr: {error})"
-    stderr = (stderr or "").strip()
-    return stderr or "(no stderr)"
-
-
-def wait_edge_tabs(edge: subprocess.Popen[str], debug_port: int, timeout: float = 30.0) -> Any:
-    deadline = time.time() + timeout
-    last_error: Exception | None = None
-    url = f"http://127.0.0.1:{debug_port}/json/list"
-    while time.time() < deadline:
-        if edge.poll() is not None:
-            stderr = read_edge_stderr(edge)
-            raise RuntimeError(
-                "Edge exited before DevTools became ready "
-                f"(exit code {edge.returncode}, port {debug_port}). stderr:\n{stderr}",
-            )
-        try:
-            return wait_json(url, timeout=2.0)
-        except Exception as error:  # noqa: BLE001 - diagnostic retry loop.
-            last_error = error
-            time.sleep(0.2)
-    raise RuntimeError(f"timed out waiting for Edge DevTools {url}: {last_error}")
-
-
-def stop_edge(edge: subprocess.Popen[str]) -> None:
+def ensure_process_alive(edge: subprocess.Popen[str], phase: str) -> None:
     if edge.poll() is not None:
-        return
-    edge.terminate()
+        raise RuntimeError(f"Edge exited during {phase} (exit code {edge.returncode})")
+
+
+def parse_devtools_active_port(path: Path) -> tuple[int, str]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if len(lines) < 2:
+        raise RuntimeError("DevToolsActivePort is incomplete")
+    port = int(lines[0])
+    browser_path = lines[1].strip()
+    if not 1 <= port <= 65535 or not browser_path.startswith("/devtools/browser/"):
+        raise RuntimeError("DevToolsActivePort is invalid")
+    return port, browser_path
+
+
+def validate_websocket_endpoint(url: str, port: int, expected_path: str | None = None) -> None:
+    parsed = urlparse(url)
+    if (
+        parsed.scheme != "ws"
+        or parsed.hostname not in {"127.0.0.1", "localhost"}
+        or parsed.port != port
+        or (expected_path is not None and parsed.path != expected_path)
+    ):
+        raise RuntimeError("CDP endpoint does not belong to the reserved Edge profile")
+
+
+def wait_edge_endpoint(
+    edge: subprocess.Popen[str],
+    user_dir: Path,
+    expected_page_url: str,
+    timeout: float = CDP_DISCOVERY_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    delay = 0.05
+    last_error: Exception | None = None
+    active_port_path = user_dir / "DevToolsActivePort"
+    while time.monotonic() < deadline:
+        ensure_process_alive(edge, "CDP endpoint discovery")
+        try:
+            port, browser_path = parse_devtools_active_port(active_port_path)
+            version = read_json(f"http://127.0.0.1:{port}/json/version")
+            browser_ws = str(version.get("webSocketDebuggerUrl", ""))
+            validate_websocket_endpoint(browser_ws, port, browser_path)
+            tabs = read_json(f"http://127.0.0.1:{port}/json/list")
+            page = next(
+                item
+                for item in tabs
+                if item.get("type") == "page"
+                and str(item.get("url", "")).startswith(expected_page_url)
+            )
+            page_ws = str(page.get("webSocketDebuggerUrl", ""))
+            validate_websocket_endpoint(page_ws, port)
+            return {
+                "port": port,
+                "browser": str(version.get("Browser", "unknown"))[:120],
+                "browserWebSocketUrl": browser_ws,
+                "pageWebSocketUrl": page_ws,
+                "pageUrl": str(page.get("url", ""))[:300],
+                "ownership": "exclusive-profile-ready-file",
+            }
+        except Exception as error:  # noqa: BLE001 - bounded discovery retry.
+            last_error = error
+            time.sleep(delay)
+            delay = min(delay * 1.7, 1.0)
+    raise RuntimeError(f"CDP endpoint discovery timed out after {timeout:.1f}s: {last_error}")
+
+
+def connect_cdp(
+    edge: subprocess.Popen[str],
+    endpoint: dict[str, Any],
+    timeout: float = CDP_CONNECT_TIMEOUT_SECONDS,
+) -> CDP:
+    deadline = time.monotonic() + timeout
+    delay = 0.05
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        ensure_process_alive(edge, "CDP WebSocket connection")
+        try:
+            port = int(endpoint["port"])
+
+            def validate_owner() -> None:
+                ensure_process_alive(edge, "CDP endpoint ownership check")
+                version = read_json(f"http://127.0.0.1:{port}/json/version")
+                browser_ws = str(version.get("webSocketDebuggerUrl", ""))
+                validate_websocket_endpoint(browser_ws, port)
+                if browser_ws != endpoint["browserWebSocketUrl"]:
+                    raise RuntimeError("CDP browser endpoint identity changed")
+                tabs = read_json(f"http://127.0.0.1:{port}/json/list")
+                if not any(
+                    item.get("type") == "page"
+                    and item.get("webSocketDebuggerUrl") == endpoint["pageWebSocketUrl"]
+                    for item in tabs
+                ):
+                    raise RuntimeError("CDP page endpoint is no longer owned by the Edge process")
+
+            return CDP(str(endpoint["pageWebSocketUrl"]), edge, validate_owner)
+        except Exception as error:  # noqa: BLE001 - bounded handshake retry.
+            last_error = error
+            time.sleep(delay)
+            delay = min(delay * 1.7, 1.0)
+    raise RuntimeError(f"CDP WebSocket handshake timed out after {timeout:.1f}s: {last_error}")
+
+
+def sanitize_diagnostic_text(value: str) -> str:
+    text = value[-DIAGNOSTIC_LOG_BYTES:]
+    text = re.sub(r"(?i)bearer\s+[a-z0-9._~+/=-]+", "Bearer <redacted>", text)
+    text = re.sub(
+        r"(?i)(token|password|passwd|psk|authorization|secret)(\s*[:=]\s*)([^\s,;]+)",
+        r"\1\2<redacted>",
+        text,
+    )
+    text = re.sub(r"(://)[^/@\s]+@", r"\1<redacted>@", text)
+    text = re.sub(r"([?&](?:token|password|psk|auth|secret)=)[^&#\s]+", r"\1<redacted>", text, flags=re.IGNORECASE)
+    return text
+
+
+def read_log_tail(path: Path) -> str:
     try:
-        edge.wait(timeout=5)
+        data = path.read_bytes()
+        return sanitize_diagnostic_text(data[-DIAGNOSTIC_LOG_BYTES:].decode("utf-8", "replace"))
+    except FileNotFoundError:
+        return "(log file absent)"
+    except Exception as error:  # noqa: BLE001 - best-effort diagnostics.
+        return f"(log read failed: {type(error).__name__})"
+
+
+def port_accepting_connections(port: int | None) -> bool:
+    if port is None:
+        return False
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
+def wait_port_released(port: int | None, timeout: float = 10.0) -> bool:
+    if port is None:
+        return True
+    deadline = time.monotonic() + timeout
+    delay = 0.05
+    while time.monotonic() < deadline:
+        if not port_accepting_connections(port):
+            return True
+        time.sleep(delay)
+        delay = min(delay * 1.7, 0.75)
+    return not port_accepting_connections(port)
+
+
+def stop_process_tree(process: subprocess.Popen[Any], timeout: float = 10.0) -> None:
+    if process.poll() is not None:
+        process.wait(timeout=1)
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        edge.kill()
-        edge.wait(timeout=5)
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            process.kill()
+        process.wait(timeout=5)
+
+
+def stop_edge(edge: subprocess.Popen[Any]) -> None:
+    stop_process_tree(edge)
 
 
 def page_text(cdp: CDP) -> str:
@@ -212,38 +416,38 @@ def page_text(cdp: CDP) -> str:
 
 
 def wait_for_shell(cdp: CDP) -> str:
-    deadline = time.time() + 8
+    deadline = time.monotonic() + SHELL_READY_TIMEOUT_SECONDS
+    delay = 0.05
     last_error: Exception | None = None
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         try:
-            return str(
-                cdp.evaluate(
-                    """
-                    new Promise((resolve) => {
-                      const started = Date.now();
-                      const tick = () => {
-                        if (document.querySelector('.prism-shell')) {
-                          resolve(document.body.innerText);
-                          return;
-                        }
-                        if (Date.now() - started > 6000) {
-                          resolve('__TIMEOUT__');
-                          return;
-                        }
-                        setTimeout(tick, 50);
-                      };
-                      tick();
-                    })
-                    """,
-                    await_promise=True,
-                ),
+            state = cdp.evaluate(
+                """
+                (() => ({
+                  ready: Boolean(document.querySelector('.prism-shell')),
+                  text: document.body?.innerText ?? '',
+                  documentState: document.readyState
+                }))()
+                """,
+                timeout=3.0,
             )
-        except RuntimeError as error:
+            if state and state.get("ready"):
+                return str(state.get("text", ""))
+        except (CDPTimeout, OSError, RuntimeError, websocket.WebSocketException) as error:
             last_error = error
-            if "Execution context was destroyed" not in str(error):
-                raise
-            time.sleep(0.2)
-    raise RuntimeError(f"shell did not become ready: {last_error}")
+            try:
+                cdp.reconnect()
+                cdp.call("Runtime.enable", timeout=5.0)
+                cdp.call("Page.enable", timeout=5.0)
+                set_viewport(cdp, 800, 540)
+            except Exception as reconnect_error:  # noqa: BLE001 - bounded recovery loop.
+                last_error = reconnect_error
+        time.sleep(delay)
+        delay = min(delay * 1.7, 1.0)
+    detail = type(last_error).__name__ if last_error is not None else "shell marker absent"
+    raise RuntimeError(
+        f"shell did not become ready within {SHELL_READY_TIMEOUT_SECONDS:.1f}s ({detail})"
+    )
 
 
 def navigate_hash(cdp: CDP, view: str) -> str:
@@ -1850,18 +2054,130 @@ def assert_ui_smoke_vault_migration_and_reload(cdp: CDP) -> None:
         raise AssertionError(f"UI smoke vault migration did not verify and delete legacy data: {migrated}")
 
 
-def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
+def capture_failure_screenshot(cdp: CDP | None, output_dir: Path) -> str | None:
+    if cdp is None:
+        return None
+    path = output_dir / "failure-startup.png"
+    try:
+        data = cdp.call(
+            "Page.captureScreenshot",
+            {"captureBeyondViewport": False, "format": "png", "fromSurface": True},
+            timeout=5.0,
+        )["data"]
+        path.write_bytes(base64.b64decode(data))
+        return path.name
+    except Exception:  # noqa: BLE001 - the remaining diagnostics must still be written.
+        return None
+
+
+def collect_failure_diagnostics(
+    *,
+    output_dir: Path,
+    phase: str,
+    error: Exception,
+    edge: subprocess.Popen[Any] | None,
+    endpoint: dict[str, Any] | None,
+    user_dir: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    cdp: CDP | None,
+) -> Path:
+    screenshot = capture_failure_screenshot(cdp, output_dir)
+    endpoint_port = int(endpoint["port"]) if endpoint is not None else None
+    ready_file = user_dir / "DevToolsActivePort"
+    ready_port: int | None = None
+    ready_status = "absent"
+    if ready_file.exists():
+        try:
+            ready_port, _ = parse_devtools_active_port(ready_file)
+            ready_status = "valid"
+        except Exception:
+            ready_status = "invalid"
+    version_snapshot: dict[str, Any] | None = None
+    probe_port = endpoint_port or ready_port
+    if probe_port is not None:
+        try:
+            version = read_json(f"http://127.0.0.1:{probe_port}/json/version", timeout=1.0)
+            version_snapshot = {
+                "browser": str(version.get("Browser", "unknown"))[:120],
+                "protocolVersion": str(version.get("Protocol-Version", "unknown"))[:40],
+                "port": probe_port,
+            }
+        except Exception as probe_error:  # noqa: BLE001 - best-effort diagnostics.
+            version_snapshot = {"port": probe_port, "probeError": type(probe_error).__name__}
+    parsed_page = urlparse(str(endpoint.get("pageUrl", ""))) if endpoint else None
+    diagnostics = {
+        "status": "failed",
+        "phase": phase,
+        "errorType": type(error).__name__,
+        "error": sanitize_diagnostic_text(str(error)),
+        "process": {
+            "pid": edge.pid if edge is not None else None,
+            "exitCode": edge.poll() if edge is not None else None,
+            "alive": edge is not None and edge.poll() is None,
+        },
+        "cdp": {
+            "port": endpoint_port,
+            "ownership": endpoint.get("ownership") if endpoint else None,
+            "browser": endpoint.get("browser") if endpoint else None,
+            "pageOrigin": (
+                f"{parsed_page.scheme}://{parsed_page.hostname}:{parsed_page.port}"
+                if parsed_page and parsed_page.hostname
+                else None
+            ),
+            "endpointAcceptingConnections": port_accepting_connections(probe_port),
+            "version": version_snapshot,
+        },
+        "readyFile": {"status": ready_status, "port": ready_port},
+        "logs": {
+            "stdoutTail": read_log_tail(stdout_path),
+            "stderrTail": read_log_tail(stderr_path),
+        },
+        "failureScreenshot": screenshot,
+    }
+    path = output_dir / "DIAGNOSTICS.json"
+    write_json(path, diagnostics)
+    return path
+
+
+def run(
+    edge_path: Path,
+    port: int,
+    output_dir: Path,
+    *,
+    startup_only: bool = False,
+) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     server = start_server(port)
-    debug_port = free_port()
+    port = int(server.server_address[1])
     # Crashpad can briefly keep files locked on Windows after Edge exits.
     user_dir = tempfile.TemporaryDirectory(
         prefix="tachyon-prism-edge-",
         ignore_cleanup_errors=True,
     )
+    user_dir_path = Path(user_dir.name)
+    stdout_path = user_dir_path / "edge.stdout.log"
+    stderr_path = user_dir_path / "edge.stderr.log"
     cdp: CDP | None = None
-    edge: subprocess.Popen[str] | None = None
+    edge: subprocess.Popen[Any] | None = None
+    endpoint: dict[str, Any] | None = None
+    stdout_file = None
+    stderr_file = None
+    phase = "Edge launch"
+    cleanup_port: int | None = None
+    failed = False
     try:
+        stdout_file = stdout_path.open("w", encoding="utf-8", errors="replace")
+        stderr_file = stderr_path.open("w", encoding="utf-8", errors="replace")
+        popen_options: dict[str, Any] = {}
+        if os.name == "nt":
+            popen_options["creationflags"] = (
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+        else:
+            popen_options["start_new_session"] = True
+        page_url = f"http://127.0.0.1:{port}/"
         edge = subprocess.Popen(
             [
                 str(edge_path),
@@ -1876,25 +2192,27 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
                 "--no-first-run",
                 "--no-sandbox",
                 "--remote-debugging-address=127.0.0.1",
-                f"--remote-debugging-port={debug_port}",
+                "--remote-debugging-port=0",
                 "--remote-allow-origins=*",
                 f"--user-data-dir={user_dir.name}",
                 "--window-size=800,540",
-                f"http://127.0.0.1:{port}/",
+                page_url,
             ],
-            stderr=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            encoding="utf-8",
-            errors="replace",
-            text=True,
+            stdin=subprocess.DEVNULL,
+            stderr=stderr_file,
+            stdout=stdout_file,
+            **popen_options,
         )
-        tabs = wait_edge_tabs(edge, debug_port)
-        page = next(item for item in tabs if item.get("type") == "page")
-        cdp = CDP(page["webSocketDebuggerUrl"])
+        phase = "CDP endpoint discovery"
+        endpoint = wait_edge_endpoint(edge, user_dir_path, page_url)
+        cleanup_port = int(endpoint["port"])
+        phase = "CDP WebSocket handshake"
+        cdp = connect_cdp(edge, endpoint)
         cdp.call("Runtime.enable")
         cdp.call("Page.enable")
         set_viewport(cdp, 800, 540)
 
+        phase = "Prism shell readiness"
         text = wait_for_shell(cdp)
         assert_contains(text, "Tachyon Prism", "系统代理", "实时流量")
         assert_no_runtime_error(text)
@@ -1908,6 +2226,20 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
         inject_dual_core_traffic(cdp)
         assert_dual_core_chart(cdp)
         cdp.screenshot(output_dir / "overview-desktop.png")
+        if startup_only:
+            return {
+                "status": "passed",
+                "scope": "startup-cdp-stress",
+                "artifactDirectory": str(output_dir.resolve()),
+                "edgeExecutable": str(edge_path.resolve()),
+                "port": port,
+                "cdp": {
+                    "ownership": endpoint["ownership"],
+                    "browser": endpoint["browser"],
+                },
+                "viewport": {"width": 800, "height": 540},
+            }
+        phase = "full UI evidence"
         text = open_and_close_controller(cdp)
         assert_contains(text, "策略组", "节点选择", "自动选择")
         assert_no_runtime_error(text)
@@ -2210,14 +2542,55 @@ def run(edge_path: Path, port: int, output_dir: Path) -> dict[str, Any]:
                 "strictSelectedOutboundObjectMatch": global_summary["outboundObjectsMatch"],
             },
         }
+    except Exception as error:
+        failed = True
+        for handle in (stdout_file, stderr_file):
+            if handle is not None:
+                handle.flush()
+        collect_failure_diagnostics(
+            output_dir=output_dir,
+            phase=phase,
+            error=error,
+            edge=edge,
+            endpoint=endpoint,
+            user_dir=user_dir_path,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            cdp=cdp,
+        )
+        raise
     finally:
+        cleanup_errors: list[str] = []
         if cdp is not None:
-            cdp.close()
+            try:
+                cdp.close()
+            except Exception as error:  # noqa: BLE001 - continue process-tree cleanup.
+                cleanup_errors.append(f"CDP close: {type(error).__name__}")
         if edge is not None:
-            stop_edge(edge)
+            try:
+                stop_edge(edge)
+            except Exception as error:  # noqa: BLE001 - continue port and file cleanup.
+                cleanup_errors.append(f"Edge cleanup: {type(error).__name__}")
+        for handle in (stdout_file, stderr_file):
+            if handle is not None:
+                handle.close()
+        if not wait_port_released(cleanup_port):
+            cleanup_errors.append("CDP port remained open after Edge tree cleanup")
         server.shutdown()
         server.server_close()
+        if not wait_port_released(port):
+            cleanup_errors.append("HTTP fixture port remained open after server cleanup")
         user_dir.cleanup()
+        if cleanup_errors and failed:
+            diagnostics_path = output_dir / "DIAGNOSTICS.json"
+            try:
+                diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+                diagnostics["cleanupErrors"] = cleanup_errors
+                write_json(diagnostics_path, diagnostics)
+            except Exception:
+                pass
+        elif cleanup_errors:
+            raise RuntimeError("; ".join(cleanup_errors))
 
 
 def main() -> None:
@@ -2226,6 +2599,7 @@ def main() -> None:
     parser.add_argument("--out", default=str(ARTIFACTS))
     parser.add_argument("--port", default=1422, type=int)
     parser.add_argument("--run-label", default="ui-smoke")
+    parser.add_argument("--startup-only", action="store_true")
     args = parser.parse_args()
 
     output_dir = Path(args.out).resolve()
@@ -2239,11 +2613,15 @@ def main() -> None:
         edge_path = Path(args.edge).resolve()
         if not edge_path.is_file():
             raise FileNotFoundError(f"Edge executable not found: {edge_path}")
-        port = args.port or free_port()
         result = {
             "gitCommit": commit,
             "runLabel": args.run_label,
-            **run(edge_path, port, output_dir),
+            **run(
+                edge_path,
+                args.port,
+                output_dir,
+                startup_only=args.startup_only,
+            ),
         }
         write_json(result_path, result)
     except Exception as error:
@@ -2254,7 +2632,12 @@ def main() -> None:
                 "gitCommit": commit,
                 "runLabel": args.run_label,
                 "errorType": type(error).__name__,
-                "error": str(error),
+                "error": sanitize_diagnostic_text(str(error)),
+                "diagnostics": (
+                    "DIAGNOSTICS.json"
+                    if (output_dir / "DIAGNOSTICS.json").is_file()
+                    else None
+                ),
             },
         )
         raise

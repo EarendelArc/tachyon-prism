@@ -60,6 +60,7 @@ jobs:
   ui-evidence:
     name: Immutable UI evidence
     runs-on: windows-latest
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@v6.0.3
@@ -87,10 +88,16 @@ jobs:
       - name: Build evidence subject executable
         run: npm run build -- --no-bundle
 
+      - name: Stress CDP startup lifecycle
+        timeout-minutes: 15
+        run: npm run test:ui:stress
+
       - name: Generate two-run UI evidence
+        timeout-minutes: 20
         run: npm run test:ui:twice
 
       - name: Upload content-addressed UI evidence
+        if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
           name: tachyon-prism-ui-evidence-${{ github.sha }}

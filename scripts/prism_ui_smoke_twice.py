@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from prism_ui_smoke import EDGE
+from prism_ui_smoke import EDGE, stop_process_tree
 from smoke_evidence import (
     build_evidence_manifest,
     current_git_commit,
@@ -24,6 +24,7 @@ from smoke_evidence import (
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ARTIFACTS = ROOT / "artifacts" / "ui-smoke-runs"
 DEFAULT_EXECUTABLE = ROOT / "src-tauri" / "target" / "release" / "tachyon-prism.exe"
+RUN_TIMEOUT_SECONDS = 600
 RENDERER_MANIFEST_NAME = "RENDERER_EVIDENCE_MANIFEST.json"
 NATIVE_MANIFEST_NAME = "NATIVE_BUILD_MANIFEST.json"
 LEGACY_COMBINED_MANIFEST_NAME = "EVIDENCE_MANIFEST.json"
@@ -52,9 +53,19 @@ def run_once(edge: Path, output_dir: Path, label: str, commit: str) -> dict[str,
         "--run-label",
         label,
     ]
-    completed = subprocess.run(command, cwd=ROOT, check=False)
-    if completed.returncode != 0:
-        raise RuntimeError(f"{label} exited with code {completed.returncode}")
+    options: dict[str, Any] = {"cwd": ROOT}
+    if os.name == "nt":
+        options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        options["start_new_session"] = True
+    process = subprocess.Popen(command, **options)
+    try:
+        return_code = process.wait(timeout=RUN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        stop_process_tree(process)
+        raise RuntimeError(f"{label} exceeded the {RUN_TIMEOUT_SECONDS}s hard timeout") from error
+    if return_code != 0:
+        raise RuntimeError(f"{label} exited with code {return_code}")
     result_path = output_dir / "RESULT.json"
     result = json.loads(result_path.read_text(encoding="utf-8"))
     if result.get("status") != "passed" or result.get("gitCommit") != commit:
