@@ -22,6 +22,7 @@ use ureq::http::{Method, Request, Uri};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+mod core_ipc;
 mod secure_vault;
 mod system_proxy;
 #[cfg(unix)]
@@ -750,7 +751,7 @@ struct RuntimeProcesses {
 
 #[derive(Default)]
 struct ManagedProcess {
-    child: Option<Child>,
+    child: Option<ManagedChild>,
     binary_path: Option<String>,
     config_path: Option<String>,
     started_at: Option<u64>,
@@ -764,6 +765,48 @@ struct ManagedProcess {
     sanitize_diagnostics: bool,
     #[cfg(test)]
     stop_fault: Option<StopFault>,
+}
+
+enum ManagedChild {
+    Standard(Child),
+    Core(core_ipc::CoreChild),
+}
+
+impl ManagedChild {
+    fn id(&self) -> u32 {
+        match self {
+            Self::Standard(child) => child.id(),
+            Self::Core(child) => child.id(),
+        }
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        match self {
+            Self::Standard(child) => child.try_wait(),
+            Self::Core(child) => child.try_wait(),
+        }
+    }
+
+    fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+        match self {
+            Self::Standard(child) => child.wait(),
+            Self::Core(child) => child.wait(),
+        }
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        match self {
+            Self::Standard(child) => child.kill(),
+            Self::Core(child) => child.kill(),
+        }
+    }
+
+    fn core_bearer(&self) -> Option<&str> {
+        match self {
+            Self::Standard(_) => None,
+            Self::Core(child) => Some(child.bearer()),
+        }
+    }
 }
 
 enum ManagedConfigDelivery<'a> {
@@ -1255,6 +1298,7 @@ impl XrayCoordinator {
                             .confirm_running("tachyon-core")?;
                         let status = core_health_check_with_timeout(
                             &settings,
+                            self.processes.tachyon_core.core_bearer()?,
                             remaining.min(STARTUP_PROBE_TIMEOUT),
                         )?;
                         if status == "ok" {
@@ -1621,24 +1665,36 @@ struct ProcessLogs {
 }
 
 #[tauri::command]
-fn core_status(app: tauri::AppHandle) -> String {
-    match load_runtime_settings(&app).and_then(|settings| core_health_check(&settings)) {
+fn core_status(app: tauri::AppHandle, state: tauri::State<RuntimeState>) -> String {
+    let result = (|| {
+        let settings = load_runtime_settings(&app)?;
+        let processes = state
+            .xray
+            .lock()
+            .map_err(|_| "lock native Core IPC session".to_string())?;
+        let bearer = processes.processes.tachyon_core.core_bearer()?;
+        core_health_check(&settings, bearer)
+    })();
+    match result {
         Ok(status) => status,
         Err(_) => "disconnected".to_string(),
     }
 }
 
-fn core_health_check(settings: &RuntimeSettings) -> Result<String, String> {
-    core_health_check_with_timeout(settings, Duration::from_secs(3))
+fn core_health_check(settings: &RuntimeSettings, bearer: &str) -> Result<String, String> {
+    core_health_check_with_timeout(settings, bearer, Duration::from_secs(3))
 }
 
 fn core_health_check_with_timeout(
     settings: &RuntimeSettings,
+    bearer: &str,
     timeout: Duration,
 ) -> Result<String, String> {
     let url = core_health_url(settings)?;
+    let authorization = zeroize::Zeroizing::new(format!("Bearer {bearer}"));
     let mut response = health_agent_with_timeout(timeout)
         .get(&url)
+        .header("Authorization", authorization.as_str())
         .header("User-Agent", "Tachyon-Prism/0.1")
         .call()
         .map_err(|err| format!("core health check: {err}"))?;
@@ -1975,7 +2031,10 @@ fn xray_traffic_stats(app: tauri::AppHandle) -> Result<XrayTrafficStats, String>
 }
 
 #[tauri::command]
-fn tachyon_telemetry_events(app: tauri::AppHandle) -> Result<TachyonTelemetryPoll, String> {
+fn tachyon_telemetry_events(
+    app: tauri::AppHandle,
+    state: tauri::State<RuntimeState>,
+) -> Result<TachyonTelemetryPoll, String> {
     let settings = load_runtime_settings(&app)?;
     let address = local_loopback_socket_addr(
         &settings.tachyon_ipc_listen,
@@ -1986,15 +2045,23 @@ fn tachyon_telemetry_events(app: tauri::AppHandle) -> Result<TachyonTelemetryPol
     let interval = Duration::from_millis(u64::from(
         settings.tachyon_telemetry_interval_ms.clamp(100, 2_000),
     ));
-    poll_tachyon_telemetry_url(&url, interval + Duration::from_secs(1))
+    let processes = state
+        .xray
+        .lock()
+        .map_err(|_| "lock native Core IPC session".to_string())?;
+    let bearer = processes.processes.tachyon_core.core_bearer()?;
+    poll_tachyon_telemetry_url(&url, bearer, interval + Duration::from_secs(1))
 }
 
 fn poll_tachyon_telemetry_url(
     url: &str,
+    bearer: &str,
     timeout: Duration,
 ) -> Result<TachyonTelemetryPoll, String> {
+    let authorization = zeroize::Zeroizing::new(format!("Bearer {bearer}"));
     let mut response = health_agent_with_timeout(timeout)
         .get(url)
+        .header("Authorization", authorization.as_str())
         .header("Accept", "text/event-stream")
         .header("User-Agent", "Tachyon-Prism/0.1")
         .call()
@@ -2437,6 +2504,7 @@ fn stop_xray_transaction<T>(
 
 #[tauri::command]
 fn start_tachyon_core(
+    app: tauri::AppHandle,
     state: tauri::State<RuntimeState>,
     binary_path: String,
     config_path: String,
@@ -2455,7 +2523,33 @@ fn start_tachyon_core(
         path_string(&binary),
         path_string(&config),
         &["run", "--config"],
-    )
+    )?;
+    let settings = load_runtime_settings(&app)?;
+    let readiness = wait_for_readiness(
+        "Tachyon Core",
+        STARTUP_READINESS_TIMEOUT,
+        STARTUP_READINESS_INTERVAL,
+        |remaining| {
+            let core = &mut processes.processes.tachyon_core;
+            core.confirm_running("tachyon-core")?;
+            let bearer = core.core_bearer()?;
+            let status = core_health_check_with_timeout(
+                &settings,
+                bearer,
+                remaining.min(STARTUP_PROBE_TIMEOUT),
+            )?;
+            if status == "ok" {
+                Ok(())
+            } else {
+                Err("Tachyon Core health was not ready".to_string())
+            }
+        },
+    );
+    if let Err(error) = readiness {
+        let _ = processes.processes.tachyon_core.stop("tachyon-core");
+        return Err(error);
+    }
+    Ok(processes.processes.tachyon_core.status())
 }
 
 #[tauri::command]
@@ -7872,8 +7966,8 @@ fn validate_prism_managed_xray_config(
     const BASE_FIELDS: &[&str] = &["inbounds", "log", "outbounds", "routing"];
     const STATS_FIELDS: &[&str] = &["api", "policy", "stats"];
     if config.keys().any(|key| {
-        !BASE_FIELDS.contains(&key.as_str())
-            && !(settings.xray_stats_enabled && STATS_FIELDS.contains(&key.as_str()))
+        !(BASE_FIELDS.contains(&key.as_str())
+            || settings.xray_stats_enabled && STATS_FIELDS.contains(&key.as_str()))
     }) {
         return Err("managed Xray plan contains an untrusted top-level field".to_string());
     }
@@ -8617,6 +8711,13 @@ fn start_all_rollback_error(start_error: String, rollback_errors: Vec<String>) -
 }
 
 impl ManagedProcess {
+    fn core_bearer(&self) -> Result<&str, String> {
+        self.child
+            .as_ref()
+            .and_then(ManagedChild::core_bearer)
+            .ok_or_else(|| "Tachyon Core secure IPC session is unavailable".to_string())
+    }
+
     fn confirm_running(&mut self, label: &str) -> Result<(), String> {
         self.refresh(label)?;
         if self.child.is_some() {
@@ -8700,37 +8801,57 @@ impl ManagedProcess {
                 (config.path(), config.child_config_path(), Some(*config))
             }
         };
-        let mut command = Command::new(&binary);
-        command.args(args);
-        command.arg(&config_argument);
-        command.stdin(Stdio::null());
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
         let work_dir = if secure_config.is_some() {
             generation_config_work_dir(&binary, config_status_path)
         } else {
             config_status_path.parent().or_else(|| binary.parent())
         };
-        if let Some(work_dir) = work_dir {
-            command.current_dir(work_dir);
-        }
-        hide_command_window(&mut command);
-
-        let mut child = match secure_config {
-            Some(config) => config.spawn_command(&mut command),
-            None => command.spawn(),
-        }
-        .map_err(|err| format!("start {label}: {err}"))?;
+        let (child, stdout, stderr) = if kind == ManagedBinaryKind::TachyonCore {
+            if secure_config.is_some() {
+                return Err("Tachyon Core does not accept Xray generation delivery".to_string());
+            }
+            let mut core_args: Vec<&std::ffi::OsStr> =
+                args.iter().map(std::ffi::OsStr::new).collect();
+            core_args.push(config_argument.as_os_str());
+            let spawned = core_ipc::spawn(&binary, &core_args, work_dir, STARTUP_PROBE_TIMEOUT)
+                .map_err(|err| format!("start {label}: {err}"))?;
+            (
+                ManagedChild::Core(spawned.child),
+                spawned.stdout,
+                spawned.stderr,
+            )
+        } else {
+            let mut command = Command::new(&binary);
+            command.args(args);
+            command.arg(&config_argument);
+            command.stdin(Stdio::null());
+            command.stdout(Stdio::piped());
+            command.stderr(Stdio::piped());
+            if let Some(work_dir) = work_dir {
+                command.current_dir(work_dir);
+            }
+            hide_command_window(&mut command);
+            let mut child = match secure_config {
+                Some(config) => config.spawn_command(&mut command),
+                None => command.spawn(),
+            }
+            .map_err(|err| format!("start {label}: {err}"))?;
+            let stdout = child
+                .stdout
+                .take()
+                .map(|stream| Box::new(stream) as Box<dyn Read + Send>);
+            let stderr = child
+                .stderr
+                .take()
+                .map(|stream| Box::new(stream) as Box<dyn Read + Send>);
+            (ManagedChild::Standard(child), stdout, stderr)
+        };
         self.stdout_tail = Arc::new(Mutex::new(String::new()));
         self.stderr_tail = Arc::new(Mutex::new(String::new()));
-        self.stdout_reader = child
-            .stdout
-            .take()
-            .map(|stdout| spawn_log_reader(stdout, Arc::clone(&self.stdout_tail)));
-        self.stderr_reader = child
-            .stderr
-            .take()
-            .map(|stderr| spawn_log_reader(stderr, Arc::clone(&self.stderr_tail)));
+        self.stdout_reader =
+            stdout.map(|stdout| spawn_log_reader(stdout, Arc::clone(&self.stdout_tail)));
+        self.stderr_reader =
+            stderr.map(|stderr| spawn_log_reader(stderr, Arc::clone(&self.stderr_tail)));
         self.child = Some(child);
         self.binary_path = Some(path_string(&binary));
         self.config_path = Some(path_string(config_status_path));
@@ -8900,7 +9021,7 @@ impl ManagedProcess {
             } else {
                 "stopped".to_string()
             },
-            pid: self.child.as_ref().map(Child::id),
+            pid: self.child.as_ref().map(ManagedChild::id),
             binary_path: self.binary_path.clone(),
             config_path: self.config_path.clone(),
             started_at: self.started_at,
@@ -8959,7 +9080,7 @@ fn log_tail_snapshot(tail: &Mutex<String>) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn request_graceful_stop(child: &Child) -> Result<(), String> {
+fn request_graceful_stop(child: &ManagedChild) -> Result<(), String> {
     let mut command = Command::new("taskkill");
     command.args(["/PID", &child.id().to_string(), "/T"]);
     let output = command_output_with_timeout(command, Duration::from_secs(2))?;
@@ -8974,13 +9095,20 @@ fn request_graceful_stop(child: &Child) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn request_graceful_stop(child: &Child) -> Result<(), String> {
-    let pid = child.id().to_string();
-    run_command("kill", &["-TERM", &pid]).map(|_| ())
+fn request_graceful_stop(child: &ManagedChild) -> Result<(), String> {
+    match child {
+        ManagedChild::Core(child) => child
+            .request_graceful_stop()
+            .map_err(|error| format!("request Core process-group stop: {error}")),
+        ManagedChild::Standard(child) => {
+            let pid = child.id().to_string();
+            run_command("kill", &["-TERM", &pid]).map(|_| ())
+        }
+    }
 }
 
 #[cfg(not(any(target_os = "windows", unix)))]
-fn request_graceful_stop(_child: &Child) -> Result<(), String> {
+fn request_graceful_stop(_child: &ManagedChild) -> Result<(), String> {
     Err("graceful process stop is unsupported on this platform".to_string())
 }
 
@@ -12198,7 +12326,7 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
             Command::new("sh").args(["-c", "sleep 20"]).spawn().unwrap()
         };
         let mut process = ManagedProcess {
-            child: Some(child),
+            child: Some(ManagedChild::Standard(child)),
             stop_fault: Some(StopFault::TryWait),
             ..ManagedProcess::default()
         };
@@ -13491,4 +13619,8 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+pub fn run_core_parent_watchdog_if_requested() -> bool {
+    core_ipc::run_parent_watchdog_from_args()
 }
