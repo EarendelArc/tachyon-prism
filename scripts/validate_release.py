@@ -132,7 +132,10 @@ def extract_matrix(path: Path, job_name: str) -> list[dict[str, str]]:
 def validate_workflows() -> None:
     release_path = ROOT / ".github" / "workflows" / "release.yml"
     ci_path = ROOT / ".github" / "workflows" / "ci.yml"
-    publication_path = ROOT / ".github" / "scripts" / "publish-release.sh"
+    governance_path = ROOT / ".github" / "scripts" / "check-release-governance.sh"
+    stage_path = ROOT / ".github" / "scripts" / "stage-release-draft.sh"
+    publication_path = ROOT / ".github" / "scripts" / "publish-staged-release.sh"
+    resume_verification_path = ROOT / ".github" / "scripts" / "verify-resumable-draft.py"
     tag_verification_path = ROOT / ".github" / "scripts" / "verify-release-tag.sh"
     published_verification_path = ROOT / ".github" / "scripts" / "verify-published-release.py"
     governance_verification_path = ROOT / ".github" / "scripts" / "verify-release-governance.py"
@@ -150,7 +153,10 @@ def validate_workflows() -> None:
 
     release = release_path.read_text(encoding="utf-8")
     ci = ci_path.read_text(encoding="utf-8")
+    governance_script = governance_path.read_text(encoding="utf-8")
+    stage = stage_path.read_text(encoding="utf-8")
     publication = publication_path.read_text(encoding="utf-8")
+    resume_verification = resume_verification_path.read_text(encoding="utf-8")
     tag_verification = tag_verification_path.read_text(encoding="utf-8")
     published_verification = published_verification_path.read_text(encoding="utf-8")
     governance_verification = governance_verification_path.read_text(encoding="utf-8")
@@ -198,7 +204,9 @@ def validate_workflows() -> None:
         "ref: ${{ needs.prepare.outputs.commit }}",
         "group: prism-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}",
         "release/RELEASE_NOTES.zh-CN.md",
-        "bash .github/scripts/publish-release.sh",
+        "bash .github/scripts/check-release-governance.sh",
+        "bash .github/scripts/stage-release-draft.sh",
+        "bash .github/scripts/publish-staged-release.sh",
         "release payload must contain exactly 7 installers",
         "verify-published-release.py",
         'python .github/scripts/normalize-release-timestamps.py release "${SOURCE_DATE_EPOCH}"',
@@ -242,54 +250,68 @@ def validate_workflows() -> None:
     missing_scanner_guards = [guard for guard in scanner_guards if guard not in bundle_verifier]
     if missing_scanner_guards:
         fail("production bundle scanner is missing guards: " + ", ".join(missing_scanner_guards))
-    publication_fragments = [
-        "trap 'cleanup_failed_draft $?' EXIT",
+    stage_fragments = [
         'bash "${tag_verify_script}" "${VERSION}" "${COMMIT}" origin "${EXPECTED_TAG_OBJECT}"',
         '[[ -s "${release_notes_zh}" ]]',
         'release_id=$("${gh_cli}" api --method POST',
         '-F draft=true',
-        '"${gh_cli}" release upload "${VERSION}" "${release_dir}"/*',
+        '"${gh_cli}" release upload "${VERSION}" "${release_dir}/${name}"',
+        'verify-resumable-draft.py',
+        '--expected-state draft',
+        'RELEASE_SETTINGS_TOKEN must not be present',
+    ]
+    missing_stage = [fragment for fragment in stage_fragments if fragment not in stage]
+    if missing_stage:
+        fail("draft staging script is missing transaction guards: " + ", ".join(missing_stage))
+    publication_fragments = [
+        'bash "${tag_verify_script}" "${VERSION}" "${COMMIT}" origin "${EXPECTED_TAG_OBJECT}"',
         '"${gh_cli}" api --method PATCH',
-        '"${gh_cli}" api --method DELETE',
-        '"${current_draft}" != "true"',
         '"repos/${GITHUB_REPOSITORY}/releases/latest"',
-        '"repos/${GITHUB_REPOSITORY}/immutable-releases"',
-        '"repos/${GITHUB_REPOSITORY}/rulesets?includes_parents=false&per_page=100"',
-        'python "${governance_verify_script}"',
         '"${gh_cli}" api --include',
         'python "${latest_response_parser}"',
         '--release-json "${readback_file}"',
+        '--expected-state draft',
+        '--expected-state published',
         '--latest-tag "${latest_tag}"',
         '--expected-tag-object "${EXPECTED_TAG_OBJECT}"',
         '--expected-source-date-epoch "${EXPECTED_SOURCE_DATE_EPOCH}"',
         '--expected-tag-verification "${EXPECTED_TAG_VERIFICATION}"',
         '--expected-reproducibility-json "${EXPECTED_REPRODUCIBILITY_JSON}"',
         '--expected-tools-json "${EXPECTED_TOOLS_JSON}"',
-        "release ${VERSION} already exists",
+        'RELEASE_SETTINGS_TOKEN must not be present',
     ]
     missing_publication = [fragment for fragment in publication_fragments if fragment not in publication]
     if missing_publication:
         fail("publication script is missing transaction guards: " + ", ".join(missing_publication))
-    governance_index = publication.index('python "${governance_verify_script}"')
-    verify_index = publication.index('bash "${tag_verify_script}"')
-    create_index = publication.index('release_id=$("${gh_cli}" api --method POST')
-    if not governance_index < verify_index < create_index:
-        fail("governance and final tag verification must immediately precede draft creation")
+    governance_fragments = [
+        '[[ -z "${GH_TOKEN:-}" ]]',
+        'GH_TOKEN="${RELEASE_SETTINGS_TOKEN}"',
+        '"repos/${GITHUB_REPOSITORY}/immutable-releases"',
+        '"repos/${GITHUB_REPOSITORY}/rulesets?includes_parents=false&per_page=100"',
+        'python "${governance_verify_script}"',
+    ]
+    missing_governance_script = [fragment for fragment in governance_fragments if fragment not in governance_script]
+    if missing_governance_script:
+        fail("governance-only script is missing isolation guards: " + ", ".join(missing_governance_script))
+    resume_guards = ["existing draft contains duplicate asset", "existing draft contains unexpected asset", '"target_commitish": args.commit']
+    missing_resume = [fragment for fragment in resume_guards if fragment not in resume_verification]
+    if missing_resume:
+        fail("resumable draft verifier is missing guards: " + ", ".join(missing_resume))
 
     forbidden = ['gh release edit', '--clobber']
-    present = [fragment for fragment in forbidden if fragment in release or fragment in publication]
+    present = [fragment for fragment in forbidden if fragment in release or fragment in stage or fragment in publication]
     if present:
         fail("release workflow contains replace-in-place operations: " + ", ".join(present))
-    if release.count("ref: ${{ needs.prepare.outputs.commit }}") != 4:
+    if release.count("ref: ${{ needs.prepare.outputs.commit }}") != 7:
         fail("release jobs are not all pinned to the verified Prism commit")
-    if publication.count('release upload "${VERSION}" "${release_dir}"/*') != 1:
-        fail("release assets must be uploaded exactly once")
+    if "--method DELETE" in stage or "--method DELETE" in publication:
+        fail("release transaction must preserve failed drafts")
     if '[[ "${tag_type}" == "tag" ]]' not in tag_verification:
         fail("release tag verification must require an annotated tag object")
     if '[[ "${tag_type}" == "commit" ]]' in tag_verification:
         fail("release tag verification still accepts lightweight tags")
     published_guards = [
-        '"immutable": True',
+        'expected_fields["immutable"] = True',
         'len(names) != 13',
         'len(installers) != 7',
         'len(checksums) != 12',

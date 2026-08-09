@@ -186,6 +186,6 @@ an active protected `refs/tags/v*` ruleset with no bypass actors, bilingual
 release notes, reproducible source metadata, and exact remote digest checks.
 The final release contract is exactly seven installers plus
 `RELEASE_NOTES.md`, `RELEASE_NOTES.zh-CN.md`, `BUILD_METADATA.json`, and
-`SHA256SUMS.txt` (11 assets total, with 10 manifest entries). This deterministic
+`SHA256SUMS.txt` (13 GitHub assets total, with 12 SHA-256 entries). This deterministic
 staging contract is not a claim that installer bytes are reproducible across
 different signing or packaging environments.

@@ -66,17 +66,23 @@ SHA-256 映射。
 
 ## 发布事务与远端复核
 
-发布采用 fail-on-existing：相同标签只要已有任意 Release（包括 draft）就停止。事务创建
-新 draft，只上传一次完整资产集，不使用 `--clobber`，然后发布该 draft。上传或 PATCH
-失败时，EXIT trap 只检查本事务返回的 release ID；仅当它仍是相同标签且 `draft=true`
-时才删除。已成为正式 Release 的对象绝不会被清理逻辑删除。
+发布是可重入的四作业事务。A 作业只使用 `RELEASE_SETTINGS_TOKEN` 执行 immutable release
+与 ruleset 预检；B 作业只使用具有 contents write 权限的 `GITHUB_TOKEN` 创建或恢复精确
+draft，并在不使用 `--clobber` 的前提下仅上传缺失资产；C 作业再次只使用设置令牌复检治理
+状态；D 作业只使用 contents write 令牌校验完整 draft、公开并执行 immutable 读回验证。
+设置令牌和内容写令牌不会出现在同一个 step 或进程环境中。
+
+同标签已有 draft 仅在其数字 ID、完整 target commit、名称、预发布标记、双语正文，以及
+每个已有资产的 digest/size 都与本地事务一致时才允许恢复。额外、重复或被修改的资产以及
+错误 target 都会 fail-closed。上传失败或第二次治理复检失败时，draft 保持私有并原样保留，
+供 workflow rerun 幂等续传；流程不会删除 Release。已有公开 Release 绝不会被编辑或替换。
 
 Release 正文由完整英文说明、分隔线和完整中文说明组成。发布后必须通过 GitHub API
 fail-closed 复核：tag、完整 target commit、`draft=false`、prerelease 状态、
 `immutable=true`、Latest 语义、双语正文、精确 13 个资产和每个远端 digest/size 都必须与本地
 暂存契约一致。任何字段缺失或不一致都会让发布 job 失败。
 
-发布脚本会在第一次 GitHub 写操作前独立执行治理预检：读取 immutable releases 设置，
+两个纯治理作业会在第一次 GitHub 写操作前和公开 draft 前分别执行独立预检：读取 immutable releases 设置，
 分页枚举仓库 ruleset 摘要，再读取每个候选 ruleset 的完整内容。只有至少一个 active tag
 ruleset 覆盖 `refs/tags/v*`、没有 bypass actor，并同时包含 deletion、update 和
 non-fast-forward 规则时才允许继续。分页缺失、JSON 结构异常、权限错误或 API 故障全部
@@ -90,7 +96,8 @@ commit 时间戳、标签验证方式、可复现性声明和完整工具版本�
 仓库 Actions secret 必须配置 `RELEASE_SETTINGS_TOKEN`。该独立细粒度凭据需要能够读取仓库
 immutable release 设置和包含 `bypass_actors` 的完整 ruleset 内容。它应与普通发布
 `GITHUB_TOKEN` 分离。GitHub 可能只向具有 ruleset 写权限的凭据返回 bypass actor，尽管
-Prism 实际只执行 GET 请求；发布脚本只会用该凭据执行治理读取。
+Prism 实际只执行 GET 请求。工作流顶层权限为 `contents: read`，只有草稿与公开作业具有
+job 级 `contents: write`；设置令牌只进入治理 step，写令牌只进入草稿/公开 step。
 
 ## 签名策略
 

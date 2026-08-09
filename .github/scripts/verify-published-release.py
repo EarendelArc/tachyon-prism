@@ -307,7 +307,7 @@ def validate_staged(
     return names, local_digests, local_sizes
 
 
-def validate_published(
+def validate_remote_release(
     release_json_path: Path,
     release_dir: Path,
     names: set[str],
@@ -316,6 +316,7 @@ def validate_published(
     tag: str,
     commit: str,
     latest_tag: str,
+    expected_state: str,
 ) -> None:
     release = load_object(release_json_path, "published release")
     expected_body = (
@@ -323,18 +324,20 @@ def validate_published(
         + "\n\n---\n\n"
         + (release_dir / "RELEASE_NOTES.zh-CN.md").read_text(encoding="utf-8").rstrip()
     )
-    expected_fields = {
+    expected_fields: dict[str, object] = {
         "tag_name": tag,
         "target_commitish": commit,
-        "draft": False,
+        "name": f"Tachyon Prism {tag}",
+        "draft": expected_state == "draft",
         "prerelease": True,
-        "immutable": True,
         "body": expected_body,
     }
+    if expected_state == "published":
+        expected_fields["immutable"] = True
     for field, expected in expected_fields.items():
         if release.get(field) != expected:
-            fail(f"published release {field} is {release.get(field)!r}, expected {expected!r}")
-    if latest_tag == tag:
+            fail(f"remote release {field} is {release.get(field)!r}, expected {expected!r}")
+    if expected_state == "published" and latest_tag == tag:
         fail("prerelease unexpectedly became GitHub latest")
     assets = release.get("assets")
     if not isinstance(assets, list):
@@ -369,6 +372,7 @@ def main() -> int:
     parser.add_argument("--expected-reproducibility-json", required=True)
     parser.add_argument("--expected-tools-json", required=True)
     parser.add_argument("--release-json", type=Path)
+    parser.add_argument("--expected-state", choices=("draft", "published"))
     parser.add_argument("--latest-tag")
     args = parser.parse_args()
     try:
@@ -398,11 +402,15 @@ def main() -> int:
             expected_reproducibility, expected_tools,
         )
         if args.release_json:
-            if args.latest_tag is None:
+            if args.expected_state is None:
+                fail("remote validation requires --expected-state")
+            if args.expected_state == "published" and args.latest_tag is None:
                 fail("published validation requires --latest-tag")
-            validate_published(
+            validate_remote_release(
                 args.release_json, args.release_dir, names, digests, sizes,
-                args.tag, args.commit, "" if args.latest_tag == "__NONE__" else args.latest_tag,
+                args.tag, args.commit,
+                "" if args.latest_tag in {None, "__NONE__"} else args.latest_tag,
+                args.expected_state,
             )
         print("release asset contract valid: 6 targets, 7 installers, 13 assets, 12 checksum entries")
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:

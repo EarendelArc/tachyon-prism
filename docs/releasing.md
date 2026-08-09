@@ -92,13 +92,20 @@ This is best-effort timestamp normalization, not a claim that installers are
 byte-for-byte reproducible. Authenticode timestamps, Apple signing and
 notarization, and installer/package tool internals may still vary between runs.
 
-Publication is fail-on-existing: any GitHub Release with the same tag, including
-a draft, stops the workflow. The workflow creates a new draft, uploads the full
-asset set exactly once without `--clobber`, then publishes that draft. It never
-edits or replaces an existing official release. An EXIT trap handles upload or
-publish failures by querying only the numeric release ID returned by this
-transaction. It deletes that ID only when the API still reports the same tag and
-`draft=true`; a release that has become official is never deleted by cleanup.
+Publication is a re-entrant four-job transaction. Job A performs the immutable
+release and ruleset preflight with only `RELEASE_SETTINGS_TOKEN`. Job B uses only
+the contents-write `GITHUB_TOKEN` to create or resume an exact draft and upload
+only missing assets without `--clobber`. Job C repeats the governance check with
+only the settings token. Job D uses only the contents-write token to verify the
+complete draft, publish it, and verify the immutable readback. The settings and
+contents-write credentials never share a step or process environment.
+
+An existing same-tag draft is resumable only when its numeric ID, full target
+commit, name, prerelease flag, bilingual body, and every existing asset digest
+and size match the local transaction. Extra, duplicate, or mutated assets and a
+different target fail closed. Upload or second-governance failures leave the
+draft private and intact for a workflow rerun; no release cleanup or deletion is
+performed. An existing public release is never edited or replaced.
 
 The GitHub Release body is the complete English note followed by the complete
 Chinese note. After publication, the transaction reads the release back through
@@ -110,9 +117,9 @@ prevents tag update, deletion, and non-fast-forward changes, plus an active
 zero-bypass `main` ruleset requiring pull requests and strict `Required CI gate`, before dispatching
 the release workflow.
 
-The publication script independently enforces that repository governance before
-its first write. It reads the immutable-release setting, paginates repository
-ruleset summaries, then reads each candidate ruleset's full shape. Publication
+The governance-only jobs independently enforce repository policy before the
+first write and immediately before publication. They read the immutable-release
+setting, paginate repository ruleset summaries, then read each candidate ruleset's full shape. Publication
 continues only when at least one active tag ruleset includes `refs/tags/v*`, has
 no bypass actors, and contains deletion, update, and non-fast-forward rules.
 Missing pages, malformed JSON, permission errors, and API failures are all
@@ -131,8 +138,10 @@ Store a fine-grained token as the repository Actions secret
 release setting and the full ruleset shape, including `bypass_actors`. GitHub
 may suppress bypass actors unless the credential has ruleset write access, even
 though Prism performs GET requests only. Keep this
-credential separate from the ordinary release `GITHUB_TOKEN`; the publication
-script uses it only for governance GET requests.
+credential separate from the ordinary release `GITHUB_TOKEN`. The workflow has
+top-level `contents: read`; only the draft and publication jobs receive
+job-scoped `contents: write`. The settings token appears only in governance-step
+environments, while the write token appears only in draft/publication steps.
 
 ## Signing policy
 

@@ -149,5 +149,5 @@ Windows x64/ARM64、macOS x64/ARM64 和 Linux x64/ARM64 安装包。
 发布流程采用封闭失败：它要求 annotated tag、immutable releases、无 bypass actor 的 active
 `refs/tags/v*` 保护规则集、双语发布说明、可复现源码元数据和精确远端摘要校验。最终 Release
 契约为七个安装包，加上 `RELEASE_NOTES.md`、`RELEASE_NOTES.zh-CN.md`、
-`BUILD_METADATA.json` 和 `SHA256SUMS.txt`，共 11 个资产，清单包含 10 条记录。这个确定性
+`BUILD_METADATA.json` 和 `SHA256SUMS.txt`，共 13 个 GitHub 资产，SHA-256 清单包含 12 条记录。这个确定性
 暂存契约不代表不同签名或打包环境能够生成字节完全一致的安装包。

@@ -483,12 +483,33 @@ jobs:
             release-status/${{ matrix.asset_name }}.txt
           if-no-files-found: error
 
-  release:
-    name: Publish GitHub Release
+  governance-preflight:
+    name: Immutable release preflight
     needs: [prepare, build]
     runs-on: ubuntu-latest
     permissions:
+      contents: read
+    steps:
+      - name: Checkout verified release commit
+        uses: actions/checkout@v6.0.3
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+
+      - name: Verify immutable release and ruleset policy
+        shell: bash
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_SETTINGS_TOKEN: ${{ secrets.RELEASE_SETTINGS_TOKEN }}
+        run: bash .github/scripts/check-release-governance.sh
+
+  stage-draft:
+    name: Stage immutable release draft
+    needs: [prepare, build, governance-preflight]
+    runs-on: ubuntu-latest
+    permissions:
       contents: write
+    outputs:
+      release_id: ${{ steps.stage.outputs.release_id }}
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v6.0.3
@@ -696,10 +717,12 @@ jobs:
             --expected-tools-json "$(python -c 'import json; print(json.dumps(dict(line.split(maxsplit=1) for line in open(".tool-versions", encoding="utf-8") if line.strip()), sort_keys=True, separators=(",", ":")))')"
           python .github/scripts/normalize-release-timestamps.py release "${SOURCE_DATE_EPOCH}"
 
-      - name: Publish release
+      - name: Stage or resume release draft
+        id: stage
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           VERSION: ${{ needs.prepare.outputs.tag }}
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
           COMMIT: ${{ needs.prepare.outputs.commit }}
@@ -707,11 +730,71 @@ jobs:
           EXPECTED_SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
           EXPECTED_TAG_VERIFICATION: ${{ needs.prepare.outputs.verification }}
           EXPECTED_REPRODUCIBILITY_JSON: '{"installerByteReproducibilityGuaranteed":false,"stagedAssetTimestampsNormalized":true}'
-          RELEASE_SETTINGS_TOKEN: ${{ secrets.RELEASE_SETTINGS_TOKEN }}
         run: |
           set -euo pipefail
           export EXPECTED_TOOLS_JSON="$(python -c 'import json; print(json.dumps(dict(line.split(maxsplit=1) for line in open(".tool-versions", encoding="utf-8") if line.strip()), sort_keys=True, separators=(",", ":")))')"
-          bash .github/scripts/publish-release.sh \
+          bash .github/scripts/stage-release-draft.sh \
             release/RELEASE_NOTES.md \
             release/RELEASE_NOTES.zh-CN.md \
             release
+
+      - name: Preserve exact staged assets for publication
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: tachyon-prism-release-stage-${{ needs.prepare.outputs.commit }}
+          path: release
+          if-no-files-found: error
+
+  governance-recheck:
+    name: Immutable release recheck
+    needs: [prepare, stage-draft]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout verified release commit
+        uses: actions/checkout@v6.0.3
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+
+      - name: Recheck immutable release and ruleset policy
+        shell: bash
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_SETTINGS_TOKEN: ${{ secrets.RELEASE_SETTINGS_TOKEN }}
+        run: bash .github/scripts/check-release-governance.sh
+
+  publish-release:
+    name: Publish verified immutable release
+    needs: [prepare, stage-draft, governance-recheck]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout verified release commit
+        uses: actions/checkout@v6.0.3
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+
+      - name: Restore exact staged assets
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: tachyon-prism-release-stage-${{ needs.prepare.outputs.commit }}
+          path: release
+
+      - name: Publish draft and verify immutable readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.stage-draft.outputs.release_id }}
+          VERSION: ${{ needs.prepare.outputs.tag }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
+          EXPECTED_TAG_OBJECT: ${{ needs.prepare.outputs.tag_object }}
+          EXPECTED_SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
+          EXPECTED_TAG_VERIFICATION: ${{ needs.prepare.outputs.verification }}
+          EXPECTED_REPRODUCIBILITY_JSON: '{"installerByteReproducibilityGuaranteed":false,"stagedAssetTimestampsNormalized":true}'
+        run: |
+          set -euo pipefail
+          export EXPECTED_TOOLS_JSON="$(python -c 'import json; print(json.dumps(dict(line.split(maxsplit=1) for line in open(".tool-versions", encoding="utf-8") if line.strip()), sort_keys=True, separators=(",", ":")))')"
+          bash .github/scripts/publish-staged-release.sh release
