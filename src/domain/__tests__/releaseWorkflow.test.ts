@@ -18,8 +18,17 @@ const vitestConfigPath = fileURLToPath(
 const contractVitestConfigPath = fileURLToPath(
   new URL("../../../vitest.contract.config.ts", import.meta.url),
 );
+const governanceScriptPath = fileURLToPath(
+  new URL("../../../.github/scripts/check-release-governance.sh", import.meta.url),
+);
+const stageScriptPath = fileURLToPath(
+  new URL("../../../.github/scripts/stage-release-draft.sh", import.meta.url),
+);
 const publicationScriptPath = fileURLToPath(
-  new URL("../../../.github/scripts/publish-release.sh", import.meta.url),
+  new URL("../../../.github/scripts/publish-staged-release.sh", import.meta.url),
+);
+const resumableDraftVerifierPath = fileURLToPath(
+  new URL("../../../.github/scripts/verify-resumable-draft.py", import.meta.url),
 );
 const tagVerificationScriptPath = fileURLToPath(
   new URL("../../../.github/scripts/verify-release-tag.sh", import.meta.url),
@@ -32,6 +41,8 @@ const latestResponseParserPath = fileURLToPath(
 );
 
 const readReleaseWorkflow = () => readFileSync(releaseWorkflowPath, "utf8");
+const readGovernanceScript = () => readFileSync(governanceScriptPath, "utf8");
+const readStageScript = () => readFileSync(stageScriptPath, "utf8");
 const readPublicationScript = () => readFileSync(publicationScriptPath, "utf8");
 
 const getReleaseBaseCommand = (workflow: string) => {
@@ -100,21 +111,21 @@ describe("release workflow checksum assets", () => {
     expect(notesIndex).toBeLessThan(checksumsIndex);
     expect(workflow).toContain("} > release/RELEASE_NOTES.zh-CN.md");
     expect(workflow.indexOf("} > release/RELEASE_NOTES.zh-CN.md")).toBeLessThan(checksumsIndex);
-    const publication = readPublicationScript();
-    expect(publication).toContain('"${gh_cli}" release upload "${VERSION}" "${release_dir}"/*');
-    expect(publication).not.toContain("--clobber");
+    const stage = readStageScript();
+    expect(stage).toContain('"${gh_cli}" release upload "${VERSION}" "${release_dir}/${name}"');
+    expect(stage).not.toContain("--clobber");
   });
 
   it("uses generated release notes when creating the draft through the GitHub API", () => {
-    const publication = readPublicationScript();
+    const stage = readStageScript();
 
-    expect(publication).toContain('"${gh_cli}" api --method POST');
-    expect(publication).toContain('$(<"${release_notes_en}")');
-    expect(publication).toContain('$(<"${release_notes_zh}")');
-    expect(publication).toContain('-f body="${release_body}"');
-    expect(publication).toContain("-F draft=true");
-    expect(publication).not.toContain("gh release edit");
-    expect(publication).not.toContain("--clobber");
+    expect(stage).toContain('"${gh_cli}" api --method POST');
+    expect(stage).toContain('$(<"${release_notes_en}")');
+    expect(stage).toContain('$(<"${release_notes_zh}")');
+    expect(stage).toContain('-f body="${release_body}"');
+    expect(stage).toContain("-F draft=true");
+    expect(stage).not.toContain("gh release edit");
+    expect(stage).not.toContain("--clobber");
   });
 
   it("publishes alpha release limitations in GitHub release notes", () => {
@@ -132,33 +143,39 @@ describe("release workflow checksum assets", () => {
 
   it("pins every downstream release job to the verified tag commit", () => {
     const workflow = readReleaseWorkflow();
+    const stage = readStageScript();
     const publication = readPublicationScript();
 
     expect(workflow).toContain("Verify remote tag object and peeled commit");
     expect(workflow).toContain("EXPECTED_TAG_OBJECT: ${{ needs.prepare.outputs.tag_object }}");
-    expect(workflow.match(/ref: \$\{\{ needs\.prepare\.outputs\.commit \}\}/g)).toHaveLength(4);
+    expect(workflow.match(/ref: \$\{\{ needs\.prepare\.outputs\.commit \}\}/g)).toHaveLength(7);
     expect(workflow.match(/bash \.github\/scripts\/verify-release-tag\.sh/g)).toHaveLength(1);
-    expect(publication).toContain('bash "${tag_verify_script}" "${VERSION}" "${COMMIT}" origin "${EXPECTED_TAG_OBJECT}"');
-    expect(publication.indexOf('bash "${tag_verify_script}"')).toBeLessThan(
-      publication.indexOf('release_id=$("${gh_cli}" api --method POST'),
+    expect(stage).toContain('bash "${tag_verify_script}" "${VERSION}" "${COMMIT}" origin "${EXPECTED_TAG_OBJECT}"');
+    expect(stage.indexOf('bash "${tag_verify_script}"')).toBeLessThan(
+      stage.indexOf('release_id=$("${gh_cli}" api --method POST'),
     );
+    expect(publication).toContain('bash "${tag_verify_script}" "${VERSION}" "${COMMIT}" origin "${EXPECTED_TAG_OBJECT}"');
     const tagVerification = readFileSync(tagVerificationScriptPath, "utf8");
     expect(tagVerification).toContain('[[ "${tag_type}" == "tag" ]]');
     expect(tagVerification).not.toContain('[[ "${tag_type}" == "commit" ]]');
   });
 
-  it("uses same-tag concurrency and a fail-on-existing draft publication transaction", () => {
+  it("uses same-tag concurrency and a re-entrant private draft transaction", () => {
     const workflow = readReleaseWorkflow();
+    const stage = readStageScript();
     const publication = readPublicationScript();
+    const resumable = readFileSync(resumableDraftVerifierPath, "utf8");
 
     expect(workflow).toContain("group: prism-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}");
-    expect(workflow).toContain("bash .github/scripts/publish-release.sh");
-    expect(publication).toContain("release ${VERSION} already exists");
-    expect(publication).toContain("trap 'cleanup_failed_draft $?' EXIT");
-    expect(publication.match(/release upload/g)).toHaveLength(1);
+    expect(workflow).toContain("bash .github/scripts/stage-release-draft.sh");
+    expect(workflow).toContain("bash .github/scripts/publish-staged-release.sh");
+    expect(stage).toContain("multiple releases already exist");
+    expect(stage.match(/release upload/g)).toHaveLength(1);
     expect(publication).toContain('"${gh_cli}" api --method PATCH');
-    expect(publication).toContain('"${gh_cli}" api --method DELETE');
-    expect(publication).toContain('"${current_draft}" != "true"');
+    expect(stage).not.toContain("--method DELETE");
+    expect(publication).not.toContain("--method DELETE");
+    expect(resumable).toContain("existing draft contains duplicate asset");
+    expect(resumable).toContain("existing draft contains unexpected asset");
   });
 
   it("records reproducible Prism and Core source metadata", () => {
@@ -179,14 +196,18 @@ describe("release workflow checksum assets", () => {
 
   it("enforces the exact bilingual immutable release readback contract", () => {
     const workflow = readReleaseWorkflow();
+    const stage = readStageScript();
     const publication = readPublicationScript();
 
     expect(workflow).toContain("release payload must contain exactly 7 installers");
     expect(workflow).toContain("RELEASE_NOTES.zh-CN.md");
     expect(workflow).toContain("verify-published-release.py");
-    expect(publication).toContain('"repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "${readback_file}"');
+    expect(stage).toContain('"repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "${release_json}"');
+    expect(stage).toContain("--expected-state draft");
+    expect(publication).toContain('"repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" > "${readback_file}"');
     expect(publication).toContain('"repos/${GITHUB_REPOSITORY}/releases/latest"');
     expect(publication).toContain("verify-published-release.py");
+    expect(publication).toContain("--expected-state published");
     expect(publication).toContain('--latest-tag "${latest_tag}"');
     expect(publication).toContain('--expected-tag-object "${EXPECTED_TAG_OBJECT}"');
     expect(publication).toContain('--expected-source-date-epoch "${EXPECTED_SOURCE_DATE_EPOCH}"');
@@ -194,14 +215,22 @@ describe("release workflow checksum assets", () => {
   });
 
   it("fails closed on repository governance and distinguishes explicit Latest 404", () => {
+    const workflow = readReleaseWorkflow();
+    const governanceScript = readGovernanceScript();
+    const stage = readStageScript();
     const publication = readPublicationScript();
     const governance = readFileSync(governanceVerificationScriptPath, "utf8");
     const latestParser = readFileSync(latestResponseParserPath, "utf8");
-    const createIndex = publication.indexOf('release_id=$("${gh_cli}" api --method POST');
-
-    expect(publication.indexOf("immutable-releases")).toBeLessThan(createIndex);
-    expect(publication.indexOf("rulesets?includes_parents=false&per_page=100")).toBeLessThan(createIndex);
-    expect(publication.indexOf('python "${governance_verify_script}"')).toBeLessThan(createIndex);
+    expect(workflow.match(/bash \.github\/scripts\/check-release-governance\.sh/g)).toHaveLength(2);
+    expect(workflow).toContain("needs: [prepare, stage-draft]");
+    expect(workflow).toContain("needs: [prepare, stage-draft, governance-recheck]");
+    expect(governanceScript).toContain('[[ -z "${GH_TOKEN:-}" ]]');
+    expect(governanceScript).toContain('GH_TOKEN="${RELEASE_SETTINGS_TOKEN}"');
+    expect(stage).toContain('[[ -z "${RELEASE_SETTINGS_TOKEN:-}" ]]');
+    expect(publication).toContain('[[ -z "${RELEASE_SETTINGS_TOKEN:-}" ]]');
+    expect(governanceScript).not.toContain("MOCK_");
+    expect(stage).not.toContain("MOCK_");
+    expect(publication).not.toContain("MOCK_");
     expect(governance).toContain('REQUIRED_TAG_RULE_TYPES = {"deletion", "non_fast_forward", "update"}');
     expect(governance).toContain('REQUIRED_STATUS_CONTEXT = "Required CI gate"');
     expect(governance).toContain('MAIN_BRANCH_PATTERN = "refs/heads/main"');

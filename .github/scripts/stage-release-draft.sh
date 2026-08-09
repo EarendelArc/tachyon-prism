@@ -46,15 +46,17 @@ work_dir=$(mktemp -d)
 trap 'rm -rf "${work_dir}"' EXIT
 release_json="${work_dir}/release.json"
 missing_file="${work_dir}/missing.txt"
+existing_ids_file="${work_dir}/existing-ids.txt"
 release_body="$(<"${release_notes_en}")
 
 ---
 
 $(<"${release_notes_zh}")"
 
-mapfile -t existing_ids < <("${gh_cli}" api --paginate \
+"${gh_cli}" api --paginate \
   "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-  --jq ".[] | select(.tag_name == \"${VERSION}\") | .id")
+  --jq ".[] | select(.tag_name == \"${VERSION}\") | .id" > "${existing_ids_file}"
+mapfile -t existing_ids < "${existing_ids_file}"
 if (( ${#existing_ids[@]} > 1 )); then
   echo "multiple releases already exist for ${VERSION}" >&2
   exit 1
