@@ -8989,8 +8989,13 @@ impl ManagedProcess {
     }
 
     fn stop(&mut self, label: &str) -> Result<ProcessStatus, String> {
+        let child_was_tracked = self.child.is_some();
         self.refresh(label)?;
         let Some(mut child) = self.child.take() else {
+            if child_was_tracked {
+                self.last_error = None;
+                self.stop_method = Some("alreadyExited".to_string());
+            }
             return Ok(self.snapshot());
         };
         let _graceful_request = request_graceful_stop(&child);
@@ -12480,6 +12485,51 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         assert!(process.child.is_none());
         assert_eq!(status.state, "stopped");
         assert!(status.last_error.is_none());
+    }
+
+    #[test]
+    fn managed_process_stop_clears_error_after_reaping_prior_exit() {
+        let child = if cfg!(target_os = "windows") {
+            let mut command =
+                Command::new(std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into()));
+            command.args(["/C", "exit 7"]);
+            process_spawn::spawn(&mut command).unwrap()
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 7"]);
+            process_spawn::spawn(&mut command).unwrap()
+        };
+        let mut process = ManagedProcess {
+            child: Some(ManagedChild::Standard(child)),
+            last_error: Some("earlier stop attempt failed".to_string()),
+            ..ManagedProcess::default()
+        };
+        thread::sleep(Duration::from_millis(150));
+
+        let status = process.stop("exited fixture").unwrap();
+
+        assert!(process.child.is_none());
+        assert_eq!(status.state, "stopped");
+        assert_eq!(status.exit_code, Some(7));
+        assert_eq!(status.stop_method.as_deref(), Some("alreadyExited"));
+        assert!(status.last_error.is_none());
+    }
+
+    #[test]
+    fn managed_process_stop_preserves_failure_without_tracked_child() {
+        let mut process = ManagedProcess {
+            last_error: Some("start failed before child creation".to_string()),
+            ..ManagedProcess::default()
+        };
+
+        let status = process.stop("missing fixture").unwrap();
+
+        assert_eq!(status.state, "failed");
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("start failed before child creation")
+        );
+        assert!(status.stop_method.is_none());
     }
 
     #[test]

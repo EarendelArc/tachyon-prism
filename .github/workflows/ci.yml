@@ -157,6 +157,7 @@ jobs:
   system-keyring-live:
     name: System keyring (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -197,9 +198,9 @@ jobs:
 
       - name: Install keyring test dependencies (Linux)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y dbus-x11 gnome-keyring libayatana-appindicator3-dev libwebkit2gtk-4.1-dev librsvg2-dev
+        working-directory: .
+        timeout-minutes: 10
+        run: bash .github/scripts/install-linux-packages.sh dbus-x11 gnome-keyring libayatana-appindicator3-dev libwebkit2gtk-4.1-dev librsvg2-dev
 
       - name: Credential Manager round trip (Windows)
         if: runner.os == 'Windows'
@@ -265,6 +266,7 @@ jobs:
   rust:
     name: Rust (${{ matrix.asset_name }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -345,9 +347,9 @@ jobs:
 
       - name: Install system deps (Linux)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+        working-directory: .
+        timeout-minutes: 10
+        run: bash .github/scripts/install-linux-packages.sh libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
       - name: Check
         run: cargo check --target ${{ matrix.rust_target }}

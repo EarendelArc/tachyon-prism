@@ -41,6 +41,8 @@ CDP_CONNECT_TIMEOUT_SECONDS = 30.0
 CDP_COMMAND_TIMEOUT_SECONDS = 20.0
 SHELL_READY_TIMEOUT_SECONDS = 30.0
 DIAGNOSTIC_LOG_BYTES = 8192
+TRAFFIC_SAMPLE_ATTEMPTS = 8
+TRAFFIC_SAMPLE_SETTLE_SECONDS = 0.15
 
 
 class CDPTimeout(RuntimeError):
@@ -696,27 +698,42 @@ def assert_desktop_interaction_polish(cdp: CDP) -> None:
         raise AssertionError(f"custom scrollbar style rule missing: {polish}")
 
 
-def inject_dual_core_traffic(cdp: CDP) -> None:
-    cdp.evaluate(
+def inject_dual_core_traffic(cdp: CDP) -> dict[str, int]:
+    return cdp.evaluate(
         """
-        new Promise((resolve) => {
-          const send = (tachyonUp, tachyonDown, xrayUp, xrayDown) =>
-            window.dispatchEvent(new CustomEvent('tachyon-prism:test-traffic', {
-              detail: { tachyonUp, tachyonDown, xrayUp, xrayDown }
-            }));
-          send(1000, 2000, 3000, 4000);
-          setTimeout(() => {
-            send(7000, 10000, 14000, 19000);
-            setTimeout(resolve, 250);
-          }, 150);
-        })
+        (() => {
+          const previous = window.__tachyonPrismTrafficFixture ?? {
+            sequence: 0,
+            tachyonUp: 1000,
+            tachyonDown: 2000,
+            xrayUp: 3000,
+            xrayDown: 4000
+          };
+          const next = previous.sequence === 0 ? previous : {
+            sequence: previous.sequence,
+            tachyonUp: previous.tachyonUp + 6000,
+            tachyonDown: previous.tachyonDown + 8000,
+            xrayUp: previous.xrayUp + 11000,
+            xrayDown: previous.xrayDown + 15000
+          };
+          next.sequence += 1;
+          window.__tachyonPrismTrafficFixture = next;
+          window.dispatchEvent(new CustomEvent('tachyon-prism:test-traffic', {
+            detail: {
+              tachyonUp: next.tachyonUp,
+              tachyonDown: next.tachyonDown,
+              xrayUp: next.xrayUp,
+              xrayDown: next.xrayDown
+            }
+          }));
+          return next;
+        })()
         """,
-        await_promise=True,
     )
 
 
-def assert_dual_core_chart(cdp: CDP) -> None:
-    chart = cdp.evaluate(
+def dual_core_chart_snapshot(cdp: CDP) -> dict[str, Any]:
+    return cdp.evaluate(
         """
         (() => ({
           legend: Array.from(document.querySelectorAll('.legend-item'))
@@ -731,6 +748,23 @@ def assert_dual_core_chart(cdp: CDP) -> None:
         }))()
         """,
     )
+
+
+def assert_dual_core_chart(cdp: CDP) -> None:
+    attempts: list[dict[str, Any]] = []
+    chart: dict[str, Any] = {}
+    for attempt in range(1, TRAFFIC_SAMPLE_ATTEMPTS + 1):
+        sent = inject_dual_core_traffic(cdp)
+        time.sleep(TRAFFIC_SAMPLE_SETTLE_SECONDS)
+        chart = dual_core_chart_snapshot(cdp)
+        attempts.append({"attempt": attempt, "sent": sent, "chart": chart})
+        if (
+            len(chart["rates"]) == 4
+            and not chart["emptyText"]
+            and all(not rate.startswith("0 ") for rate in chart["rates"])
+        ):
+            break
+
     labels = " ".join(chart["legend"])
     if len(chart["legend"]) != 4:
         raise AssertionError(f"dual-core traffic chart must expose four series: {chart}")
@@ -745,7 +779,10 @@ def assert_dual_core_chart(cdp: CDP) -> None:
     if len(chart["points"]) != 4 or any(not points for points in chart["points"]):
         raise AssertionError(f"four real SVG traffic lines were not rendered: {chart}")
     if any(rate.startswith("0 ") for rate in chart["rates"]):
-        raise AssertionError(f"dual-core rates did not become non-zero: {chart}")
+        raise AssertionError(
+            "dual-core rates did not become non-zero after bounded monotonic telemetry "
+            f"samples: {attempts}"
+        )
 
 
 def assert_visible_custom_scrollbar(cdp: CDP) -> None:
@@ -1617,10 +1654,12 @@ def assert_local_proxy_probe_panel(cdp: CDP) -> None:
         """,
         await_promise=True,
     )
-    if "Local Proxy Probe" not in state["text"] or "Test Node" not in state["text"]:
+    if "Local Proxy Probe" not in state["text"] or "Verify Selected Node" not in state["text"]:
         raise AssertionError(f"local proxy probe panel missing: {state}")
-    if not state["disabled"]:
-        raise AssertionError(f"local proxy probe should be disabled while Xray is stopped: {state}")
+    if state["disabled"]:
+        raise AssertionError(
+            f"isolated node verification should be available while Xray is stopped: {state}"
+        )
     rows = state["rows"]
     if len(rows) != 2 or not any("HTTP" in row for row in rows) or not any("SOCKS" in row for row in rows):
         raise AssertionError(f"local proxy probe rows missing: {state}")
@@ -2189,6 +2228,7 @@ def run(
                 "--disable-background-networking",
                 "--disable-breakpad",
                 "--disable-crash-reporter",
+                "--edge-skip-compat-layer-relaunch",
                 "--disable-extensions",
                 "--disable-gpu",
                 "--disable-gpu-sandbox",
@@ -2227,7 +2267,6 @@ def run(
         assert_custom_window_chrome(cdp)
         assert_desktop_interaction_polish(cdp)
         assert_focus_visible(cdp)
-        inject_dual_core_traffic(cdp)
         assert_dual_core_chart(cdp)
         cdp.screenshot(output_dir / "overview-desktop.png")
         if startup_only:
