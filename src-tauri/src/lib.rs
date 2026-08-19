@@ -2399,6 +2399,7 @@ fn commit_validated_xray_config(
     contents: String,
     authorization_ticket: Option<String>,
 ) -> Result<ConfigDraftPaths, String> {
+    ensure_canonical_xray_config_size(&contents)?;
     let settings = load_runtime_settings(&app)?;
     let paths = draft_paths(&app)?;
     let binary = PathBuf::from(clean_path_input(&settings.xray_binary_path));
@@ -7709,13 +7710,7 @@ where
     V: FnOnce(&Path) -> Result<ConfigValidationResult, String>,
     R: AtomicFileReplacer,
 {
-    let size_bytes = contents.len();
-    if size_bytes > CANONICAL_XRAY_CONFIG_LIMIT_BYTES {
-        return Err(format!(
-            "canonical Xray config is {size_bytes} UTF-8 bytes and exceeds the {}-byte UTF-8 limit; no candidate was written or validated",
-            CANONICAL_XRAY_CONFIG_LIMIT_BYTES
-        ));
-    }
+    ensure_canonical_xray_config_size(contents)?;
     let candidate = SyncedTempFile::create(canonical, contents)?;
     let validation = match validate(&candidate.path) {
         Ok(validation) => validation,
@@ -7738,6 +7733,17 @@ where
         return Err(candidate.cleanup_after_failure(error));
     }
     Ok(validation)
+}
+
+fn ensure_canonical_xray_config_size(contents: &str) -> Result<(), String> {
+    let size_bytes = contents.len();
+    if size_bytes > CANONICAL_XRAY_CONFIG_LIMIT_BYTES {
+        return Err(format!(
+            "canonical Xray config is {size_bytes} UTF-8 bytes and exceeds the {}-byte UTF-8 limit; no candidate was written or validated",
+            CANONICAL_XRAY_CONFIG_LIMIT_BYTES
+        ));
+    }
+    Ok(())
 }
 
 fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
@@ -8336,6 +8342,7 @@ fn validate_prism_managed_routing(
                 "ip",
                 "domain",
                 "protocol",
+                "network",
             ]
             .contains(&key.as_str())
         }) || rule.get("type").and_then(Value::as_str) != Some("field")
@@ -8369,6 +8376,12 @@ fn validate_prism_managed_routing(
                     return Err("managed Xray routing contains an invalid matcher".to_string());
                 }
             }
+        }
+        if rule
+            .get("network")
+            .is_some_and(|network| network.as_str() != Some("tcp,udp"))
+        {
+            return Err("managed Xray routing contains an invalid network matcher".to_string());
         }
     }
     Ok(())
@@ -8980,7 +8993,7 @@ impl ManagedProcess {
         let Some(mut child) = self.child.take() else {
             return Ok(self.snapshot());
         };
-        let graceful_request = request_graceful_stop(&child);
+        let _graceful_request = request_graceful_stop(&child);
         let deadline = Instant::now() + GRACEFUL_STOP_TIMEOUT;
         let mut forced = false;
         loop {
@@ -9046,7 +9059,7 @@ impl ManagedProcess {
         }
         self.finish_log_readers();
         self.started_at = None;
-        self.last_error = graceful_request.err().filter(|_| forced);
+        self.last_error = None;
         self.stop_method = Some(if forced {
             "forcedAfterTimeout".to_string()
         } else {
@@ -9415,7 +9428,11 @@ mod tests {
             ],
             "routing": {
                 "domainStrategy": "IPIfNonMatch",
-                "rules": [{ "type": "field", "outboundTag": "tachyon-proxy" }]
+                "rules": [{
+                    "type": "field",
+                    "network": "tcp,udp",
+                    "outboundTag": "tachyon-proxy"
+                }]
             }
         })
     }
@@ -9458,6 +9475,10 @@ mod tests {
             .expect("inbounds")
             .push(duplicate);
         cases.push(duplicate_listener);
+
+        let mut partial_network_matcher = base.clone();
+        partial_network_matcher["routing"]["rules"][0]["network"] = serde_json::json!("tcp");
+        cases.push(partial_network_matcher);
 
         for (field, value) in [
             (
@@ -12455,8 +12476,10 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         assert!(process.stop("injected").is_err());
         assert!(process.child.is_some());
         process.stop_fault = None;
-        process.stop("injected").unwrap();
+        let status = process.stop("injected").unwrap();
         assert!(process.child.is_none());
+        assert_eq!(status.state, "stopped");
+        assert!(status.last_error.is_none());
     }
 
     #[test]

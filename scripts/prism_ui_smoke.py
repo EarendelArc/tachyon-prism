@@ -857,8 +857,10 @@ def update_subscription_url(cdp: CDP, name: str, source_url: str) -> str:
               setValue(card.querySelector('textarea'), '');
               const button = card.querySelector('.row-actions button:first-child');
               if (!button) throw new Error('update button missing');
-              button.click();
-              setTimeout(() => resolve(document.body.innerText), 1000);
+              setTimeout(() => {{
+                button.click();
+                setTimeout(() => resolve(document.body.innerText), 1000);
+              }}, 50);
             }})
             """,
             await_promise=True,

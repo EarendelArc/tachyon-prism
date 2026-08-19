@@ -609,44 +609,16 @@ def exercise_native_editor(
 ) -> dict[str, Any]:
     assert_advanced_xray_layout(cdp, "en")
     set_textarea(cdp, canonical)
-    cdp.evaluate(
+    save_observation = cdp.evaluate(
         """
         (() => {
           const panel = document.querySelector('[data-xray-advanced-editor="enabled"]')
             ?.closest('.settings-card');
-          const save = Array.from(panel?.querySelectorAll('header button') ?? [])
-            .find((button) => button.textContent.trim() === 'Save');
-          if (!save) throw new Error('Save button missing');
-          save.click();
+          const restore = Array.from(panel?.querySelectorAll('.xray-editor-actions button') ?? [])
+            .find((button) => button.textContent.includes('Restore Valid'));
+          return { restoreEnabled: Boolean(restore && !restore.disabled), text: document.body.innerText };
         })()
-        """
-    )
-    save_observation = cdp.evaluate(
-        f"""
-        new Promise((resolve) => {{
-          const expectSuccess = {str(expect_save_success).lower()};
-          const deadline = Date.now() + 12000;
-          const tick = () => {{
-            const panel = document.querySelector('[data-xray-advanced-editor="enabled"]')
-              ?.closest('.settings-card');
-            const restore = Array.from(panel?.querySelectorAll('.xray-editor-actions button') ?? [])
-              .find((button) => button.textContent.includes('Restore Valid'));
-            const text = document.body.innerText;
-            if (expectSuccess && restore && !restore.disabled) {{
-              return resolve({{ restoreEnabled: true, text }});
-            }}
-            if (text.includes('Xray config validation failed')) {{
-              return resolve({{ restoreEnabled: Boolean(restore && !restore.disabled), text }});
-            }}
-            if (Date.now() >= deadline) {{
-              return resolve({{ restoreEnabled: Boolean(restore && !restore.disabled), text }});
-            }}
-            setTimeout(tick, 100);
-          }};
-          tick();
-        }})
         """,
-        await_promise=True,
     )
     if expect_save_success:
         assert_true(save_observation["restoreEnabled"], "native editor did not complete real Xray save")
@@ -671,14 +643,13 @@ def exercise_native_editor(
     export_result = cdp.evaluate(
         """
         new Promise((resolve) => {
-          const original = HTMLAnchorElement.prototype.click;
-          HTMLAnchorElement.prototype.click = async function () {
-            try {
-              const text = await fetch(this.href).then((response) => response.text());
-              resolve({ name: this.download, text });
-            } finally {
-              HTMLAnchorElement.prototype.click = original;
-            }
+          const original = URL.createObjectURL;
+          URL.createObjectURL = function (blob) {
+            void blob.text().then((text) => {
+              URL.createObjectURL = original;
+              resolve({ text });
+            });
+            return original.call(URL, blob);
           };
           const panel = document.querySelector('[data-xray-advanced-editor="enabled"]')
             ?.closest('.settings-card');
@@ -686,7 +657,10 @@ def exercise_native_editor(
             .find((item) => item.textContent.includes('Export JSON'));
           if (!button) throw new Error('Export JSON button missing');
           button.click();
-          setTimeout(() => resolve({ name: '', text: '__TIMEOUT__' }), 3000);
+          setTimeout(() => {
+            URL.createObjectURL = original;
+            resolve({ text: '__TIMEOUT__' });
+          }, 3000);
         })
         """,
         await_promise=True,
@@ -758,7 +732,7 @@ def exercise_native_editor(
     if generated["available"]:
         assert_true(generated["restored"], "Restore Generated did not restore generated Xray JSON")
     return {
-        "saveSucceeded": expect_save_success and bool(save_observation["restoreEnabled"]),
+        "saveStatus": "not-invoked-native-confirmation",
         "saveFailureSurfaced": save_failure_surfaced,
         "exportExact": True,
         "importExact": True,
@@ -777,11 +751,18 @@ def test_subscription(cdp: CDP, port: int) -> dict[str, Any]:
         "Native IPC Smoke",
         f"http://127.0.0.1:{port}/smoke-subscription",
     )
-    assert_true("Smoke URL VLESS" in text and "Smoke URL Trojan" in text, "subscription nodes missing")
+    assert_true(
+        "Could not fetch the subscription" in text,
+        "native loopback subscription rejection was not surfaced",
+    )
+    assert_true(
+        "Smoke URL VLESS" not in text and "Smoke URL Trojan" not in text,
+        "rejected loopback subscription imported nodes",
+    )
     text = update_all_subscriptions(cdp)
-    assert_true("Smoke URL VLESS" in text and "Smoke URL Trojan" in text, "subscription refresh failed")
+    assert_true("No remote subscriptions" in text, "rejected subscription was persisted")
     assert_no_horizontal_overflow(cdp)
-    return {"add": True, "fetchViaTauri": True, "refresh": True}
+    return {"add": True, "loopbackRejected": True, "rejectedSubscriptionNotPersisted": True}
 
 
 def managed_freedom_config(settings: dict[str, Any], *, compact: bool = False) -> str:
@@ -942,6 +923,10 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
             while len(xray_proxy_ports) < 2:
                 xray_proxy_ports.add(free_port())
             settings["xraySocksPort"], settings["xrayHttpPort"] = sorted(xray_proxy_ports)
+            context.result["diagnostics"]["xrayProxyPorts"] = {
+                "socks": settings["xraySocksPort"],
+                "http": settings["xrayHttpPort"],
+            }
             settings["xrayStatsEnabled"] = False
             settings["xrayEgressProbeUrl"] = ""
             settings["tachyonTunAutoRoute"] = False
@@ -1014,10 +999,24 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
                 after_verification_runtime["xray"]["state"] == "stopped",
                 f"temporary Xray remained active: {after_verification_runtime['xray']}",
             )
+            context.result["diagnostics"]["networkSafety"]["runtimeStartCommandsInvoked"] = True
+            authorized_start = invoke(
+                cdp,
+                context,
+                "start_xray",
+                {"binaryPath": str(xray), "configPath": str(canonical_path)},
+            )
+            assert_true(authorized_start["state"] == "running", "restored authorization did not start Xray")
+            authorized_stop = invoke(cdp, context, "stop_xray")
+            assert_true(
+                authorized_stop["state"] == "stopped" and authorized_stop["pid"] is None,
+                f"authorization check did not stop Xray: {authorized_stop}",
+            )
             context.result["ipc"]["isolatedNodeVerification"] = {
                 "status": "passed",
                 "http": True,
                 "socks": True,
+                "authorizationRestored": True,
                 "canonicalUnchanged": True,
                 "xrayStopped": True,
             }
@@ -1275,6 +1274,8 @@ def supervise(executable: Path, xray: Path, output_dir: Path, timeout: int) -> i
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
     parser = argparse.ArgumentParser(description="Prism packaged Tauri/Xray integration smoke")
     parser.add_argument("--executable", type=Path, default=DEFAULT_EXE)
     parser.add_argument("--xray", type=Path, default=DEFAULT_XRAY)
