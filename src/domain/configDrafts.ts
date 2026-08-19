@@ -951,6 +951,7 @@ function xrayRouting(
         ...apiRule,
         {
           type: "field",
+          network: "tcp,udp",
           outboundTag: mode === "direct" ? tags.directTag : tags.proxyTag,
         },
       ],
@@ -981,6 +982,7 @@ function xrayRouting(
       },
       {
         type: "field",
+        network: "tcp,udp",
         outboundTag: tags.proxyTag,
       },
     ],

@@ -323,6 +323,14 @@ struct LocalProxyProbeReport {
     socks: ProxyProbeResult,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct XrayNodeVerificationResult {
+    code: String,
+    ok: bool,
+    report: Option<LocalProxyProbeReport>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConfigValidationResult {
@@ -2207,6 +2215,104 @@ fn test_xray_local_proxies(
         .unwrap_or_else(|| "http://cp.cloudflare.com/generate_204".to_string());
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(5000).clamp(500, 30000));
     probe_xray_local_proxies(&settings, &url, timeout)
+}
+
+#[tauri::command]
+fn verify_xray_node(
+    app: tauri::AppHandle,
+    state: tauri::State<RuntimeState>,
+    proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
+    contents: String,
+    target_url: Option<String>,
+    timeout_ms: Option<u64>,
+) -> XrayNodeVerificationResult {
+    let verification = (|| {
+        let settings = load_runtime_settings(&app)?;
+        let mut coordinator = state
+            .xray
+            .lock()
+            .map_err(|_| "lock Xray verification state failed".to_string())?;
+        if coordinator.processes.xray.status().state == "running"
+            || coordinator.generations.status().active.is_some()
+        {
+            return Ok(xray_node_verification_result("xray-busy", None));
+        }
+
+        if contents.len() > CANONICAL_XRAY_CONFIG_LIMIT_BYTES {
+            return Err("managed Xray verification config exceeds the size limit".to_string());
+        }
+        let authorization =
+            authorize_xray_config(contents.as_bytes(), XrayConfigTrustMode::Managed, &settings)?;
+        let paths = draft_paths(&app)?;
+        let canonical = PathBuf::from(paths.xray_config_path);
+        let candidate = SyncedTempFile::create(&canonical, &contents)?;
+        let binary = PathBuf::from(clean_path_input(&settings.xray_binary_path));
+        let validation = validate_xray_config_file(&binary, &candidate.path)?;
+        if !validation.ok {
+            return Err("managed Xray verification config was rejected".to_string());
+        }
+
+        let previous_authorization = coordinator.xray_config_authorization.clone();
+        coordinator.xray_config_authorization = Some(authorization);
+        if coordinator
+            .apply_xray(
+                &app,
+                &proxy_state,
+                settings.xray_binary_path.clone(),
+                path_string(&candidate.path),
+            )
+            .is_err()
+        {
+            let cleanup_failed = coordinator.processes.xray.status().state == "running"
+                && coordinator.stop_xray(&app, &proxy_state).is_err();
+            if !cleanup_failed {
+                coordinator.xray_config_authorization = previous_authorization;
+            }
+            return Ok(xray_node_verification_result(
+                if cleanup_failed {
+                    "cleanup-failed"
+                } else {
+                    "start-failed"
+                },
+                None,
+            ));
+        }
+
+        let url = target_url
+            .map(|value| clean_url_input(&value))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "http://cp.cloudflare.com/generate_204".to_string());
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(5000).clamp(500, 30000));
+        let report = probe_xray_local_proxies(&settings, &url, timeout).ok();
+        let cleanup_failed = coordinator.stop_xray(&app, &proxy_state).is_err();
+        if !cleanup_failed {
+            coordinator.xray_config_authorization = previous_authorization;
+        }
+        if cleanup_failed {
+            return Ok(xray_node_verification_result("cleanup-failed", report));
+        }
+        Ok(match report {
+            Some(report) if report.ok => xray_node_verification_result("success", Some(report)),
+            report => xray_node_verification_result("probe-failed", report),
+        })
+    })();
+
+    verification.unwrap_or_else(xray_node_verification_start_failure)
+}
+
+fn xray_node_verification_start_failure(_error: String) -> XrayNodeVerificationResult {
+    xray_node_verification_result("start-failed", None)
+}
+
+fn xray_node_verification_result(
+    code: &str,
+    report: Option<LocalProxyProbeReport>,
+) -> XrayNodeVerificationResult {
+    XrayNodeVerificationResult {
+        code: code.to_string(),
+        ok: code == "success",
+        report,
+    }
 }
 
 #[tauri::command]
@@ -9253,6 +9359,21 @@ mod tests {
     use std::io::copy;
     use std::net::TcpListener;
 
+    #[test]
+    fn xray_node_verification_start_failure_discards_sensitive_diagnostics() {
+        let secret = "subscription-private-key";
+        let result = xray_node_verification_start_failure(format!(
+            "Xray rejected password={secret} in a generated config"
+        ));
+        let serialized = serde_json::to_string(&result).unwrap();
+
+        assert_eq!(result.code, "start-failed");
+        assert!(!result.ok);
+        assert!(result.report.is_none());
+        assert!(!serialized.contains(secret));
+        assert!(!serialized.contains("password"));
+    }
+
     fn managed_xray_test_settings() -> RuntimeSettings {
         RuntimeSettings {
             xray_socks_listen: "127.0.0.1".to_string(),
@@ -13545,6 +13666,7 @@ pub fn run() {
             test_tcp_latency,
             test_xray_proxy,
             test_xray_local_proxies,
+            verify_xray_node,
             validate_xray_config,
             request_advanced_xray_authorization,
             commit_validated_xray_config,

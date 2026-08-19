@@ -784,6 +784,46 @@ def test_subscription(cdp: CDP, port: int) -> dict[str, Any]:
     return {"add": True, "fetchViaTauri": True, "refresh": True}
 
 
+def managed_freedom_config(settings: dict[str, Any], *, compact: bool = False) -> str:
+    config = {
+        "log": {"loglevel": "warning"},
+        "inbounds": [
+            {
+                "tag": "tachyon-socks",
+                "listen": settings["xraySocksListen"],
+                "port": settings["xraySocksPort"],
+                "protocol": "socks",
+                "settings": {"auth": "noauth", "udp": True},
+            },
+            {
+                "tag": "tachyon-http",
+                "listen": settings["xrayHttpListen"],
+                "port": settings["xrayHttpPort"],
+                "protocol": "http",
+                "settings": {"allowTransparent": False},
+            },
+        ],
+        "outbounds": [
+            {"tag": "tachyon-proxy", "protocol": "freedom"},
+            {"tag": "tachyon-direct", "protocol": "freedom"},
+            {"tag": "tachyon-block", "protocol": "blackhole"},
+        ],
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [
+                {
+                    "type": "field",
+                    "network": "tcp,udp",
+                    "outboundTag": "tachyon-proxy",
+                }
+            ],
+        },
+    }
+    if compact:
+        return json.dumps(config, separators=(",", ":"))
+    return json.dumps(config, ensure_ascii=False, indent=2) + "\n"
+
+
 def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     context = RunContext(output_dir, timeout)
@@ -799,11 +839,7 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
     failure: dict[str, Any] | None = None
     findings: list[str] = []
     secret = "TAURI_SMOKE_SECRET_9c0f"
-    valid_config = (
-        '{\n  "log": { "loglevel": "warning" },\n'
-        '  "inbounds": [],\n'
-        '  "outbounds": [ { "tag": "direct", "protocol": "freedom" } ]\n}\n'
-    )
+    valid_config = ""
     imported_config = (
         '{\n  "log": {"loglevel":"error"},\n'
         '  "inbounds": [],\n'
@@ -902,9 +938,16 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
             context.result["configPaths"] = paths
             settings = invoke(cdp, context, "runtime_settings")
             settings["xrayBinaryPath"] = str(xray)
+            xray_proxy_ports = {free_port(), free_port()}
+            while len(xray_proxy_ports) < 2:
+                xray_proxy_ports.add(free_port())
+            settings["xraySocksPort"], settings["xrayHttpPort"] = sorted(xray_proxy_ports)
+            settings["xrayStatsEnabled"] = False
+            settings["xrayEgressProbeUrl"] = ""
             settings["tachyonTunAutoRoute"] = False
             settings["tachyonTunDnsHijack"] = False
             saved_settings = invoke(cdp, context, "save_runtime_settings", {"settings": settings})
+            valid_config = managed_freedom_config(saved_settings)
             assert_true(not saved_settings["tachyonTunAutoRoute"], "TUN auto-route remained enabled")
             assert_true(not saved_settings["tachyonTunDnsHijack"], "TUN DNS hijack remained enabled")
             runtime_status = invoke(cdp, context, "runtime_status")
@@ -947,6 +990,37 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
                 findings.append("real IPC valid save failed because Xray could not infer the .tmp candidate format")
             first_read = invoke(cdp, context, "read_canonical_xray_config")
             assert_true(first_read == {"exists": True, "contents": valid_config}, "valid commit mismatch")
+
+            verification_config = managed_freedom_config(saved_settings, compact=True)
+            context.result["diagnostics"]["networkSafety"]["isolatedXrayVerificationInvoked"] = True
+            verification = invoke(
+                cdp,
+                context,
+                "verify_xray_node",
+                {
+                    "contents": verification_config,
+                    "targetUrl": f"http://127.0.0.1:{server_port}/",
+                    "timeoutMs": 5000,
+                },
+            )
+            assert_true(verification.get("code") == "success", f"node verification failed: {verification}")
+            assert_true(verification.get("ok"), f"node verification not successful: {verification}")
+            assert_true(verification["report"]["http"]["ok"], "HTTP explicit proxy probe failed")
+            assert_true(verification["report"]["socks"]["ok"], "SOCKS explicit proxy probe failed")
+            after_verification = invoke(cdp, context, "read_canonical_xray_config")
+            assert_true(after_verification == first_read, "isolated verification changed canonical config")
+            after_verification_runtime = invoke(cdp, context, "runtime_status")
+            assert_true(
+                after_verification_runtime["xray"]["state"] == "stopped",
+                f"temporary Xray remained active: {after_verification_runtime['xray']}",
+            )
+            context.result["ipc"]["isolatedNodeVerification"] = {
+                "status": "passed",
+                "http": True,
+                "socks": True,
+                "canonicalUnchanged": True,
+                "xrayStopped": True,
+            }
 
             invalid_error = invoke_failure(
                 cdp,

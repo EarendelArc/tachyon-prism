@@ -223,7 +223,11 @@ describe("buildXrayClientConfigDraft", () => {
     const generatedRouting = config.routing as Record<string, unknown>;
     const rules = generatedRouting.rules as Array<Record<string, unknown>>;
     expect(Object.keys(generatedRouting).sort()).toEqual(["domainStrategy", "rules"]);
-    expect(rules[0]).toEqual({ type: "field", outboundTag: "tachyon-proxy" });
+    expect(rules[0]).toEqual({
+      type: "field",
+      network: "tcp,udp",
+      outboundTag: "tachyon-proxy",
+    });
     const inboundTags = new Set(generatedInbounds.map((item) => item.tag));
     const outboundTags = new Set(generatedOutbounds.map((item) => item.tag));
     for (const rule of rules) {
@@ -309,6 +313,8 @@ describe("buildXrayClientConfigDraft", () => {
 
     expect(globalRule.outboundTag).toBe("tachyon-proxy");
     expect(directRule.outboundTag).toBe("tachyon-direct");
+    expect(globalRule.network).toBe("tcp,udp");
+    expect(directRule.network).toBe("tcp,udp");
     expect(globalRule).not.toHaveProperty("inboundTag");
     expect(directRule).not.toHaveProperty("inboundTag");
   });
@@ -349,6 +355,7 @@ describe("buildXrayClientConfigDraft", () => {
     expect(reversed.fallback.settings).toMatchObject({ address: "b.example.com" });
     expect(ordered.rules[ordered.rules.length - 1]).toEqual({
       type: "field",
+      network: "tcp,udp",
       outboundTag: "node-b",
     });
   });

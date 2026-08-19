@@ -1205,7 +1205,9 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
               const trafficRules = rules.filter((rule) => !isApiRule(rule));
               const isExplicitCatchAll = (rule) =>
                 Boolean(rule?.outboundTag)
-                && Object.keys(rule).every((key) => key === 'type' || key === 'outboundTag');
+                && Object.keys(rule).every(
+                  (key) => key === 'type' || key === 'network' || key === 'outboundTag',
+                );
               const catchAllRule = trafficRules.find(isExplicitCatchAll) ?? {};
               const outboundTagCounts = outbounds.reduce((counts, outbound) => {
                 const tag = typeof outbound?.tag === 'string' ? outbound.tag : '';
