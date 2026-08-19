@@ -7,7 +7,8 @@ if (( $# == 0 )); then
 fi
 
 readonly max_attempts=3
-readonly command_timeout_seconds=75
+readonly update_timeout_seconds=60
+readonly install_timeout_seconds=180
 readonly -a apt_options=(
   -o Acquire::Retries=2
   -o Acquire::http::Timeout=20
@@ -28,6 +29,7 @@ import re
 
 paths = [Path("/etc/apt/sources.list")]
 paths.extend(sorted(Path("/etc/apt/sources.list.d").glob("*")))
+paths.extend(sorted(Path("/etc/apt").glob("apt-mirrors*.txt")))
 hosts = set()
 for path in paths:
     if not path.is_file():
@@ -47,22 +49,32 @@ PY
   echo "::endgroup::"
 }
 
-for attempt in $(seq 1 "${max_attempts}"); do
-  echo "APT install attempt ${attempt}/${max_attempts}"
-  if sudo -n env DEBIAN_FRONTEND=noninteractive \
-      timeout --signal=TERM --kill-after=15s "${command_timeout_seconds}s" \
-      apt-get "${apt_options[@]}" update \
-    && sudo -n env DEBIAN_FRONTEND=noninteractive \
-      timeout --signal=TERM --kill-after=15s "${command_timeout_seconds}s" \
-      apt-get "${apt_options[@]}" install -y -- "$@"; then
-    exit 0
-  fi
+run_apt_with_retries() {
+  local phase="$1"
+  local timeout_seconds="$2"
+  local status
+  shift 2
 
-  apt_diagnostics
-  if (( attempt < max_attempts )); then
-    sleep $((attempt * 10))
-  fi
-done
+  for attempt in $(seq 1 "${max_attempts}"); do
+    echo "APT ${phase} attempt ${attempt}/${max_attempts}"
+    if sudo -n env DEBIAN_FRONTEND=noninteractive \
+        timeout --signal=TERM --kill-after=15s "${timeout_seconds}s" \
+        apt-get "${apt_options[@]}" "$@"; then
+      return 0
+    else
+      status=$?
+    fi
 
-echo "APT dependency installation failed after ${max_attempts} bounded attempts" >&2
-exit 1
+    echo "APT ${phase} attempt ${attempt} failed with exit status ${status}"
+    apt_diagnostics
+    if (( attempt < max_attempts )); then
+      sleep $((attempt * 10))
+    fi
+  done
+
+  echo "APT ${phase} failed after ${max_attempts} bounded attempts" >&2
+  return 1
+}
+
+run_apt_with_retries "index refresh" "${update_timeout_seconds}" update
+run_apt_with_retries "dependency install" "${install_timeout_seconds}" install -y -- "$@"

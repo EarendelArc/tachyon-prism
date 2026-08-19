@@ -199,7 +199,7 @@ jobs:
       - name: Install keyring test dependencies (Linux)
         if: runner.os == 'Linux'
         working-directory: .
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: bash .github/scripts/install-linux-packages.sh dbus-x11 gnome-keyring libayatana-appindicator3-dev libwebkit2gtk-4.1-dev librsvg2-dev
 
       - name: Credential Manager round trip (Windows)
@@ -348,7 +348,7 @@ jobs:
       - name: Install system deps (Linux)
         if: runner.os == 'Linux'
         working-directory: .
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: bash .github/scripts/install-linux-packages.sh libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
       - name: Check
