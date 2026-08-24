@@ -33,7 +33,6 @@ from prism_ui_smoke import (
     read_json,
     select_settings_section,
     start_server,
-    update_all_subscriptions,
     update_subscription_url,
     wait_for_shell,
     wait_json,
@@ -1093,27 +1092,111 @@ def exercise_native_editor(
     }
 
 
-def test_subscription(cdp: CDP, port: int) -> dict[str, Any]:
-    navigate_hash(cdp, "subscriptions")
-    add = click_add_subscription(cdp)
-    assert_true(add.get("activeTag") == "INPUT", f"subscription form did not focus: {add}")
-    text = update_subscription_url(
+def test_subscription(
+    cdp: CDP,
+    port: int,
+    context: RunContext,
+    *,
+    iterations: int = 20,
+) -> dict[str, Any]:
+    path = "/smoke-subscription"
+    source_url = f"http://127.0.0.1:{port}{path}"
+    native_error = invoke_failure(
         cdp,
-        "Native IPC Smoke",
-        f"http://127.0.0.1:{port}/smoke-subscription",
+        context,
+        "fetch_subscription_text",
+        {"sourceUrl": source_url},
     )
     assert_true(
-        "Could not fetch the subscription" in text,
-        "native loopback subscription rejection was not surfaced",
+        "forbidden (loopback)" in native_error,
+        f"native loopback rejection code mismatch: {native_error}",
+    )
+    expected_error = "Could not fetch the subscription; check the URL and network"
+    fixture_before = QuietHandler.request_count(path)
+    baseline_subscription_count: int | None = None
+    for iteration in range(1, iterations + 1):
+        navigate_hash(cdp, "subscriptions")
+        add = click_add_subscription(cdp)
+        assert_true(
+            add.get("activeTag") == "INPUT",
+            f"subscription form did not focus on iteration {iteration}: {add}",
+        )
+        state = update_subscription_url(
+            cdp,
+            f"Native IPC Smoke {iteration}",
+            source_url,
+        )
+        initial_subscription_count = int(state.get("initialSubscriptionCount", -1))
+        if baseline_subscription_count is None:
+            baseline_subscription_count = initial_subscription_count
+        assert_true(
+            initial_subscription_count == baseline_subscription_count,
+            f"subscription baseline changed before iteration {iteration}: {state}",
+        )
+        assert_true(
+            state.get("observedBusy") is True,
+            f"subscription IPC loading state was not observed on iteration {iteration}: {state}",
+        )
+        assert_true(
+            state.get("urlInvalid") is True
+            and state.get("errorId") == "subscription-url-error"
+            and state.get("errorText") == expected_error,
+            f"loopback subscription did not reach the exact URL error state on iteration {iteration}: {state}",
+        )
+        assert_true(
+            state.get("finalSubscriptionCount") == state.get("initialSubscriptionCount"),
+            f"rejected loopback subscription was added on iteration {iteration}: {state}",
+        )
+        text = str(state.get("bodyText", ""))
+        assert_true(
+            "Smoke URL VLESS" not in text and "Smoke URL Trojan" not in text,
+            f"rejected loopback subscription imported nodes on iteration {iteration}",
+        )
+        assert_true(
+            QuietHandler.request_count(path) == fixture_before,
+            f"loopback request reached the fixture on iteration {iteration}",
+        )
+    persisted = cdp.evaluate(
+        """
+        new Promise((resolve, reject) => {
+          const button = document.querySelector('[data-testid="subscription-update-all"]');
+          if (!button) throw new Error('update all subscription button missing');
+          button.click();
+          const deadline = Date.now() + 3000;
+          const poll = () => {
+            const error = document.querySelector('[data-testid="subscription-operation-error"]')
+              ?.textContent?.trim() ?? '';
+            if (!button.disabled && error === 'No remote subscriptions to update') {
+              resolve({ error, subscriptionCount: document.querySelectorAll('.subscription-card').length });
+              return;
+            }
+            if (Date.now() >= deadline) {
+              reject(new Error(`subscription persistence check did not settle: disabled=${button.disabled} error=${error}`));
+              return;
+            }
+            setTimeout(poll, 25);
+          };
+          poll();
+        })
+        """,
+        await_promise=True,
     )
     assert_true(
-        "Smoke URL VLESS" not in text and "Smoke URL Trojan" not in text,
-        "rejected loopback subscription imported nodes",
+        persisted.get("subscriptionCount") == baseline_subscription_count,
+        f"rejected subscription was persisted: {persisted}",
     )
-    text = update_all_subscriptions(cdp)
-    assert_true("No remote subscriptions" in text, "rejected subscription was persisted")
     assert_no_horizontal_overflow(cdp)
-    return {"add": True, "loopbackRejected": True, "rejectedSubscriptionNotPersisted": True}
+    return {
+        "status": "passed",
+        "add": True,
+        "iterations": iterations,
+        "loadingObservedEveryIteration": True,
+        "baselineSubscriptionCount": baseline_subscription_count,
+        "loopbackRejected": True,
+        "loopbackRejectionCode": "loopback",
+        "fixtureRequests": QuietHandler.request_count(path) - fixture_before,
+        "rejectedSubscriptionNotPersisted": True,
+    }
 
 
 def managed_freedom_config(settings: dict[str, Any], *, compact: bool = False) -> str:
@@ -1968,7 +2051,7 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
             time.sleep(0.3)
             cdp.screenshot(output_dir / "native-settings-xray-editor-800x540-en.png")
             try:
-                subscription = test_subscription(cdp, server_port)
+                subscription = test_subscription(cdp, server_port, context)
                 cdp.screenshot(output_dir / "native-subscriptions-loaded-800x540-en.png")
             except Exception as error:  # noqa: BLE001 - restart recovery must still run.
                 subscription = {"status": "failed", "error": str(error)}

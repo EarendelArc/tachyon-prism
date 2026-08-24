@@ -885,11 +885,10 @@ def import_subscription_payload(cdp: CDP, name: str, payload: str) -> str:
     )
 
 
-def update_subscription_url(cdp: CDP, name: str, source_url: str) -> str:
-    return str(
-        cdp.evaluate(
+def update_subscription_url(cdp: CDP, name: str, source_url: str) -> dict[str, Any]:
+    return cdp.evaluate(
             f"""
-            new Promise((resolve) => {{
+            new Promise((resolve, reject) => {{
               const setValue = (element, value) => {{
                 if (!element) throw new Error('subscription form element missing');
                 const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value');
@@ -904,15 +903,52 @@ def update_subscription_url(cdp: CDP, name: str, source_url: str) -> str:
               setValue(card.querySelector('textarea'), '');
               const button = card.querySelector('.row-actions button:first-child');
               if (!button) throw new Error('update button missing');
+              const updateAll = document.querySelector('[data-testid="subscription-update-all"]');
+              const initialSubscriptionCount = document.querySelectorAll('.subscription-card').length;
+              let observedBusy = false;
+              let finished = false;
+              const deadline = Date.now() + 5000;
+              const observe = () => {{
+                if (button.disabled || updateAll?.disabled) observedBusy = true;
+                const urlInput = card.querySelectorAll('input')[1];
+                const error = document.getElementById('subscription-url-error');
+                const idle = observedBusy && !button.disabled && !updateAll?.disabled;
+                if (idle && urlInput?.getAttribute('aria-invalid') === 'true' && error) {{
+                  finished = true;
+                  mutationObserver.disconnect();
+                  resolve({{
+                    bodyText: document.body.innerText,
+                    observedBusy,
+                    updateText: button.textContent?.trim() ?? '',
+                    updateAllText: updateAll?.textContent?.trim() ?? '',
+                    urlInvalid: true,
+                    errorId: error.id,
+                    errorText: error.textContent?.trim() ?? '',
+                    initialSubscriptionCount,
+                    finalSubscriptionCount: document.querySelectorAll('.subscription-card').length,
+                  }});
+                  return;
+                }}
+                if (Date.now() >= deadline) {{
+                  finished = true;
+                  mutationObserver.disconnect();
+                  reject(new Error(`subscription URL update did not reach an explicit idle error state: busy=${{observedBusy}} disabled=${{button.disabled}} error=${{error?.textContent?.trim() ?? ''}}`));
+                  return;
+                }}
+                setTimeout(observe, 25);
+              }};
+              const mutationObserver = new MutationObserver(() => {{
+                if (button.disabled || updateAll?.disabled) observedBusy = true;
+              }});
+              mutationObserver.observe(document.body, {{ attributes: true, childList: true, subtree: true }});
               setTimeout(() => {{
                 button.click();
-                setTimeout(() => resolve(document.body.innerText), 1000);
+                observe();
               }}, 50);
             }})
             """,
             await_promise=True,
-        ),
-    )
+        )
 
 
 def update_all_subscriptions(cdp: CDP) -> str:
@@ -1428,9 +1464,67 @@ def assert_advanced_xray_layout(cdp: CDP, language: str) -> None:
                   setTimeout(() => {
                     const editorRect = editor.getBoundingClientRect();
                     const finalContentRect = content.getBoundingClientRect();
+                    const panelRect = panel.getBoundingClientRect();
                     const controls = Array.from(
                       actions.querySelectorAll('button, .file-action-button')
                     );
+                    const selectorFor = (element) => {
+                      if (element.id) return `#${CSS.escape(element.id)}`;
+                      const parts = [];
+                      let current = element;
+                      while (current && current.nodeType === Node.ELEMENT_NODE && parts.length < 5) {
+                        let part = current.tagName.toLowerCase();
+                        if (current.classList.length) {
+                          part += `.${Array.from(current.classList).slice(0, 3).map(CSS.escape).join('.')}`;
+                        }
+                        const parent = current.parentElement;
+                        if (parent) {
+                          const siblings = Array.from(parent.children).filter(
+                            (item) => item.tagName === current.tagName
+                          );
+                          if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+                        }
+                        parts.unshift(part);
+                        current = parent;
+                      }
+                      return parts.join(' > ');
+                    };
+                    const overflowDiagnostics = Array.from(document.querySelectorAll('*'))
+                      .map((element) => {
+                        const rect = element.getBoundingClientRect();
+                        const style = getComputedStyle(element);
+                        const hasBox = rect.width > 0 && rect.height > 0;
+                        const scrollOverflow = element.scrollWidth > element.clientWidth + 1;
+                        const viewportOverflow = hasBox && (
+                          rect.left < -1 || rect.right > window.innerWidth + 1
+                        );
+                        const panelOverflow = panel.contains(element) && hasBox && (
+                          rect.left < panelRect.left - 1 || rect.right > panelRect.right + 1
+                        );
+                        if (!scrollOverflow && !viewportOverflow && !panelOverflow) return null;
+                        return {
+                          selector: selectorFor(element),
+                          text: (element.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 160),
+                          rect: {
+                            left: Math.round(rect.left * 100) / 100,
+                            right: Math.round(rect.right * 100) / 100,
+                            width: Math.round(rect.width * 100) / 100,
+                          },
+                          clientWidth: element.clientWidth,
+                          scrollWidth: element.scrollWidth,
+                          minWidth: style.minWidth,
+                          whiteSpace: style.whiteSpace,
+                          overflowX: style.overflowX,
+                          display: style.display,
+                          gridTemplateColumns: style.gridTemplateColumns,
+                          flexWrap: style.flexWrap,
+                          scrollOverflow,
+                          viewportOverflow,
+                          panelOverflow,
+                        };
+                      })
+                      .filter(Boolean)
+                      .slice(0, 40);
                     resolve({
                       actionLabels: controls.map((item) => item.textContent.trim()),
                       actionsReachable,
@@ -1443,6 +1537,16 @@ def assert_advanced_xray_layout(cdp: CDP, language: str) -> None:
                         document.documentElement.scrollWidth <= window.innerWidth &&
                         document.body.scrollWidth <= window.innerWidth &&
                         panel.scrollWidth <= panel.clientWidth,
+                      overflowMetrics: {
+                        viewportWidth: window.innerWidth,
+                        documentClientWidth: document.documentElement.clientWidth,
+                        documentScrollWidth: document.documentElement.scrollWidth,
+                        bodyClientWidth: document.body.clientWidth,
+                        bodyScrollWidth: document.body.scrollWidth,
+                        panelClientWidth: panel.clientWidth,
+                        panelScrollWidth: panel.scrollWidth,
+                      },
+                      overflowDiagnostics,
                       toggleLabel: toggle.closest('label')?.textContent.trim() ?? '',
                     });
                   }, 220);
