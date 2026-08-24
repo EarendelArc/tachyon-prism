@@ -380,7 +380,6 @@ def launch(
     context.checkpoint()
     webview_data = output_dir / "webview2-data"
     webview_data.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
     removed_proxy_variables = []
     for name in (
         "HTTP_PROXY",
@@ -390,11 +389,15 @@ def launch(
         "https_proxy",
         "all_proxy",
     ):
-        if env.pop(name, None) is not None:
+        if os.environ.pop(name, None) is not None:
             removed_proxy_variables.append(name)
-    env["NO_PROXY"] = "127.0.0.1,localhost"
-    env["no_proxy"] = "127.0.0.1,localhost"
-    context.result["diagnostics"]["networkSafety"]["removedProxyVariables"] = removed_proxy_variables
+    os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+    os.environ["no_proxy"] = "127.0.0.1,localhost"
+    env = os.environ.copy()
+    recorded = context.result["diagnostics"]["networkSafety"].setdefault(
+        "removedProxyVariables", []
+    )
+    recorded.extend(name for name in removed_proxy_variables if name not in recorded)
     env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
         f"--remote-debugging-address=127.0.0.1 --remote-debugging-port={debug_port} "
         "--remote-allow-origins=* --disable-background-networking"
