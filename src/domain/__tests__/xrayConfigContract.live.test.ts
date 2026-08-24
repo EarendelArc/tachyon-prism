@@ -85,6 +85,29 @@ describe("live Xray config contract", () => {
     15_000,
   );
 
+  itWithXray.each(["direct", "global", "rule"] as const)(
+    "accepts isolated selected-node routing when the UI mode is %s",
+    (routingMode) => {
+      const [node] = parseSubscription(fixturePayload("socks"));
+      const config = buildXrayClientConfigDraft(node, {
+        enableStats: true,
+        httpPort: 19201,
+        purpose: "node-verification",
+        routingMode,
+        socksPort: 19200,
+      });
+      const tempDir = mkdtempSync(join(tmpdir(), "tachyon-prism-xray-isolated-contract-"));
+      const configPath = join(tempDir, "xray-client.json");
+
+      try {
+        writeFileSync(configPath, stringifyDraft(config), "utf8");
+        xrayExecHelper(xrayBinaryPath!, configPath, ["socks-user", "socks-pass"]);
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   itWithXray("accepts a managed-tag merge from an imported multi-outbound config", () => {
     const payload = JSON.stringify({
       log: { loglevel: "warning" },

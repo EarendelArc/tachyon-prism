@@ -76,6 +76,7 @@ import {
   tachyonCorePreflightStartBlockReason,
   testXrayLocalProxies,
   testTcpLatency,
+  verifyXrayNode,
   validateTachyonCoreConfig,
   type ConfigValidationResult,
   type CoreReleaseDiagnostics,
@@ -173,6 +174,12 @@ import {
 import { localizeTelemetryError, TelemetryClient } from "./domain/telemetry";
 import type { TelemetryState } from "./domain/telemetry";
 import { invokeDesktop, isTauriRuntime } from "./domain/tauri";
+import {
+  createXrayNodeVerificationRequest,
+  verifySelectedXrayNode,
+  XrayNodeVerificationGate,
+  type XrayNodeVerificationCode,
+} from "./domain/xrayNodeVerification";
 
 type ConnectionState = "checking" | "connected" | "disconnected";
 type PrismView = "overview" | "configs" | "subscriptions" | "plugins" | "settings";
@@ -218,6 +225,12 @@ interface StopAllResult {
 
 interface XrayProbeStatus {
   error: string | null;
+  report: LocalProxyProbeReport | null;
+  state: ProbeState;
+}
+
+interface XrayNodeVerificationStatus {
+  code: XrayNodeVerificationCode | null;
   report: LocalProxyProbeReport | null;
   state: ProbeState;
 }
@@ -505,6 +518,14 @@ const zh = {
   proxyProbeNeedRunning: "请先启动 Xray，再测试当前节点",
   proxyProbeOk: "本地代理验证通过",
   proxyProbeRunning: "正在测试本地 HTTP/SOCKS 代理...",
+  xrayVerifyCleanupFailed: "节点验证结束，但临时 Xray 无法停止；请在核心设置中检查运行状态",
+  xrayVerifyNode: "隔离验证当前节点",
+  xrayVerifyProbeFailed: "当前节点未通过 HTTP/SOCKS 双入口验证",
+  xrayVerifyStartFailed: "无法生成、校验或启动当前节点的 Xray 配置",
+  xrayVerifySuccess: "当前节点验证通过，临时 Xray 已停止",
+  xrayVerifyUnsupported: "Web 预览不支持真实节点验证；请在 Prism 桌面应用中运行",
+  xrayVerifyRunning: "正在生成配置并通过临时 Xray 验证当前节点...",
+  xrayVerifyXrayBusy: "Xray 正在运行；请先停止当前会话再进行隔离验证",
   notConfigured: "未配置",
   notInstalled: "未安装",
   notProbed: "未探测；诊断不会执行已安装的核心",
@@ -951,6 +972,14 @@ const en: typeof zh = {
   proxyProbeNeedRunning: "Start Xray before testing the current node",
   proxyProbeOk: "Local proxy probe passed",
   proxyProbeRunning: "Testing local HTTP/SOCKS proxies...",
+  xrayVerifyCleanupFailed: "Node verification finished, but the temporary Xray process could not be stopped. Check Runtime in Core Settings.",
+  xrayVerifyNode: "Verify Selected Node",
+  xrayVerifyProbeFailed: "The selected node failed the HTTP/SOCKS dual-inbound check",
+  xrayVerifyStartFailed: "Could not generate, validate, or start the selected node's Xray config",
+  xrayVerifySuccess: "Selected node verified; the temporary Xray process has stopped",
+  xrayVerifyUnsupported: "Real node verification is unsupported in Web Preview. Run it in the Prism desktop app.",
+  xrayVerifyRunning: "Generating config and verifying the selected node with a temporary Xray process...",
+  xrayVerifyXrayBusy: "Xray is running. Stop the current session before isolated verification.",
   notConfigured: "Not configured",
   notInstalled: "Not installed",
   notProbed: "Not probed; diagnostics do not execute installed cores",
@@ -1283,6 +1312,31 @@ function proxyProbeMessage(report: LocalProxyProbeReport, ui: typeof zh): string
     report.socks.ok ? "" : `SOCKS: ${proxyProbeSummary(report.socks)}`,
   ].filter(Boolean);
   return `${ui.proxyProbeFailed}: ${failures.join(" / ")}`;
+}
+
+function xrayNodeVerificationMessage(
+  code: XrayNodeVerificationCode | null,
+  report: LocalProxyProbeReport | null,
+  ui: typeof zh,
+): string {
+  switch (code) {
+    case "cleanup-failed":
+      return ui.xrayVerifyCleanupFailed;
+    case "node-required":
+      return ui.proxyProbeNeedNode;
+    case "probe-failed":
+      return report ? proxyProbeMessage(report, ui) : ui.xrayVerifyProbeFailed;
+    case "start-failed":
+      return ui.xrayVerifyStartFailed;
+    case "success":
+      return report ? `${ui.xrayVerifySuccess}: ${proxyProbeMessage(report, ui)}` : ui.xrayVerifySuccess;
+    case "unsupported":
+      return ui.xrayVerifyUnsupported;
+    case "xray-busy":
+      return ui.xrayVerifyXrayBusy;
+    default:
+      return "";
+  }
 }
 
 function systemProxyLabel(status: SystemProxyState | null): string {
@@ -1639,22 +1693,7 @@ function draftText(
   }
 
   try {
-    if (!activeNode) {
-      throw new Error(ui.xraySelectNodeRequired);
-    }
-    xray = stringifyDraft(
-      buildXrayClientConfigDraft(activeNode, {
-        configMode: "managed",
-        enableStats: runtimeSettings.xrayStatsEnabled,
-        httpListen: runtimeSettings.xrayHttpListen,
-        httpPort: runtimeSettings.xrayHttpPort,
-        routingMode,
-        socksListen: runtimeSettings.xraySocksListen,
-        socksPort: runtimeSettings.xraySocksPort,
-        statsListen: runtimeSettings.xrayStatsListen,
-        statsPort: runtimeSettings.xrayStatsPort,
-      }),
-    );
+    xray = managedXrayDraftText(activeNode, routingMode, runtimeSettings, ui);
   } catch (error) {
     xrayError = error instanceof Error ? error.message : ui.xrayConfigGenerationFailed;
   }
@@ -1666,6 +1705,52 @@ function draftText(
     xray,
     xrayError,
   };
+}
+
+function managedXrayDraftText(
+  activeNode: ProxyNode | undefined,
+  routingMode: XrayRoutingMode,
+  runtimeSettings: RuntimeSettings,
+  ui: typeof zh,
+): string {
+  if (!activeNode) {
+    throw new Error(ui.xraySelectNodeRequired);
+  }
+  return stringifyDraft(
+    buildXrayClientConfigDraft(activeNode, {
+      configMode: "managed",
+      enableStats: runtimeSettings.xrayStatsEnabled,
+      httpListen: runtimeSettings.xrayHttpListen,
+      httpPort: runtimeSettings.xrayHttpPort,
+      routingMode,
+      socksListen: runtimeSettings.xraySocksListen,
+      socksPort: runtimeSettings.xraySocksPort,
+      statsListen: runtimeSettings.xrayStatsListen,
+      statsPort: runtimeSettings.xrayStatsPort,
+    }),
+  );
+}
+
+function isolatedXrayVerificationDraftText(
+  activeNode: ProxyNode | undefined,
+  routingMode: XrayRoutingMode,
+  runtimeSettings: RuntimeSettings,
+  ui: typeof zh,
+): string {
+  if (!activeNode) {
+    throw new Error(ui.xraySelectNodeRequired);
+  }
+  return stringifyDraft(
+    buildXrayClientConfigDraft(activeNode, {
+      configMode: "managed",
+      httpListen: runtimeSettings.xrayHttpListen,
+      httpPort: runtimeSettings.xrayHttpPort,
+      purpose: "node-verification",
+      routingMode,
+      socksListen: runtimeSettings.xraySocksListen,
+      socksPort: runtimeSettings.xraySocksPort,
+    }),
+  );
 }
 
 function parseLocalAddrs(value: string): string[] {
@@ -1841,6 +1926,10 @@ export function App() {
     report: null,
     state: "idle",
   });
+  const [xrayNodeVerification, setXrayNodeVerification] =
+    useState<XrayNodeVerificationStatus>({ code: null, report: null, state: "idle" });
+  const xrayNodeVerificationGateRef = useRef(new XrayNodeVerificationGate());
+  const xrayNodeVerificationAttemptRef = useRef<string | null>(null);
   const [trafficSamples, setTrafficSamples] = useState<TimedTrafficSample[]>([]);
   const previousTrafficRef = useRef<{ at: number; totals: TrafficTotals } | null>(null);
   const subscriptionNameInputRef = useRef<HTMLInputElement | null>(null);
@@ -1862,6 +1951,44 @@ export function App() {
     () => runtimeWithTachyonServer(runtimeInputs, currentTachyonServer),
     [currentTachyonServer, runtimeInputs],
   );
+  const isolatedXrayVerificationDraft = useMemo(() => {
+    try {
+      return isolatedXrayVerificationDraftText(
+        activeNode,
+        routingMode,
+        effectiveRuntimeInputs,
+        ui,
+      );
+    } catch {
+      return "";
+    }
+  }, [activeNode, effectiveRuntimeInputs, language, routingMode]);
+  const xrayNodeVerificationContext = useMemo(
+    () => JSON.stringify([
+      subscription.updatedAt,
+      activeNode?.id ?? "",
+      isolatedXrayVerificationDraft,
+      routingMode,
+      xrayAdvancedEditor.enabled,
+      xrayAdvancedEditor.mode,
+      xrayAdvancedEditor.text,
+    ]),
+    [
+      activeNode?.id,
+      isolatedXrayVerificationDraft,
+      routingMode,
+      subscription.updatedAt,
+      xrayAdvancedEditor.enabled,
+      xrayAdvancedEditor.mode,
+      xrayAdvancedEditor.text,
+    ],
+  );
+  const previousXrayNodeVerificationContextRef = useRef(xrayNodeVerificationContext);
+  if (previousXrayNodeVerificationContextRef.current !== xrayNodeVerificationContext) {
+    previousXrayNodeVerificationContextRef.current = xrayNodeVerificationContext;
+    xrayNodeVerificationGateRef.current.invalidate();
+    xrayNodeVerificationAttemptRef.current = null;
+  }
   const generatedDrafts = useMemo(
     () => draftText(activeNode, profiles, gameRoutes, launcherSettings, routingMode, effectiveRuntimeInputs, ui),
     [activeNode, effectiveRuntimeInputs, gameRoutes, launcherSettings, language, profiles, routingMode],
@@ -2509,6 +2636,7 @@ export function App() {
       await persistSubscriptionSnapshot(snapshot);
       setNodePickerOpen(false);
       setXrayProbe({ error: null, report: null, state: "idle" });
+      setXrayNodeVerification({ code: null, report: null, state: "idle" });
       setMessage(ui.nodeSelected);
     } catch (error) {
       const storageMessage = secureStorageFailureMessage(error, ui);
@@ -3248,6 +3376,7 @@ export function App() {
 
   async function probeXrayProxy() {
     try {
+      setXrayNodeVerification({ code: null, report: null, state: "idle" });
       if (!activeNode) {
         setXrayProbe({ error: ui.proxyProbeNeedNode, report: null, state: "error" });
         setMessage(ui.proxyProbeNeedNode);
@@ -3278,6 +3407,64 @@ export function App() {
       const message = error instanceof Error ? error.message : ui.proxyProbeFailed;
       setXrayProbe({ error: message, report: null, state: "error" });
       setMessage(message);
+    }
+  }
+
+  async function verifyCurrentXrayNode() {
+    if (xrayNodeVerification.state === "running") {
+      return;
+    }
+    if (!activeNode) {
+      setXrayNodeVerification({ code: "node-required", report: null, state: "error" });
+      setMessage(ui.proxyProbeNeedNode);
+      return;
+    }
+    const node = activeNode;
+    const requestToken = globalThis.crypto.randomUUID();
+    xrayNodeVerificationAttemptRef.current = requestToken;
+    xrayNodeVerificationGateRef.current.invalidate();
+    setXrayNodeVerification({ code: null, report: null, state: "running" });
+    setMessage(ui.xrayVerifyRunning);
+    try {
+      const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
+      setRuntimeInputs(settings);
+      const contents = isolatedXrayVerificationDraftText(node, routingMode, settings, ui);
+      const request = await createXrayNodeVerificationRequest(
+        node.id,
+        contents,
+        requestToken,
+      );
+      if (xrayNodeVerificationAttemptRef.current !== requestToken) {
+        return;
+      }
+      xrayNodeVerificationGateRef.current.begin(request);
+      const verification = await verifySelectedXrayNode({
+        hasSelectedNode: true,
+        request,
+        verify: verifyXrayNode,
+      });
+      if (
+        xrayNodeVerificationAttemptRef.current !== requestToken
+        || !xrayNodeVerificationGateRef.current.accepts(verification)
+      ) {
+        return;
+      }
+      setXrayNodeVerification({
+        code: verification.code,
+        report: verification.report,
+        state: verification.ok ? "ok" : "error",
+      });
+      setMessage(xrayNodeVerificationMessage(verification.code, verification.report, ui));
+    } catch {
+      if (xrayNodeVerificationAttemptRef.current !== requestToken) {
+        return;
+      }
+      setXrayNodeVerification({ code: "start-failed", report: null, state: "error" });
+      setMessage(ui.xrayVerifyStartFailed);
+    } finally {
+      if (xrayNodeVerificationAttemptRef.current === requestToken) {
+        await refreshRuntime();
+      }
     }
   }
 
@@ -3483,6 +3670,14 @@ export function App() {
   }
 
   useEffect(() => {
+    setXrayNodeVerification((current) =>
+      current.state === "idle"
+        ? current
+        : { code: null, report: null, state: "idle" },
+    );
+  }, [xrayNodeVerificationContext]);
+
+  useEffect(() => {
     let active = true;
     void initializeSecureStorage()
       .then((result) => {
@@ -3614,6 +3809,11 @@ export function App() {
         : "",
     );
   }, [currentSubscription]);
+
+  useEffect(() => {
+    setXrayProbe({ error: null, report: null, state: "idle" });
+    setXrayNodeVerification({ code: null, report: null, state: "idle" });
+  }, [activeNode?.id]);
 
   useEffect(() => {
     if (currentTachyonServer) {
@@ -3945,6 +4145,7 @@ export function App() {
               navigateView("settings");
             }}
             onProbeXray={() => void probeXrayProxy()}
+            onVerifyXrayNode={() => void verifyCurrentXrayNode()}
             onRoutingModeChange={changeRoutingMode}
             routingMode={routingMode}
             telemetry={telemetry}
@@ -3956,6 +4157,7 @@ export function App() {
             xrayStatsQueriedAt={xrayTrafficStats.queriedAt}
             xrayRunning={xrayRunning}
             xrayProbe={xrayProbe}
+            xrayNodeVerification={xrayNodeVerification}
             tachyonRunning={tachyonRunning}
             ui={ui}
           />
@@ -4160,6 +4362,7 @@ function OverviewView({
   onOpenNodePicker,
   onOpenCoreSettings,
   onProbeXray,
+  onVerifyXrayNode,
   onRoutingModeChange,
   routingMode,
   telemetry,
@@ -4168,6 +4371,7 @@ function OverviewView({
   trafficTotals,
   xrayRunning,
   xrayProbe,
+  xrayNodeVerification,
   xrayStatsEnabled,
   xrayStatsError,
   xrayStatsQueriedAt,
@@ -4181,6 +4385,7 @@ function OverviewView({
   onOpenNodePicker: () => void;
   onOpenCoreSettings: () => void;
   onProbeXray: () => void;
+  onVerifyXrayNode: () => void;
   onRoutingModeChange: (mode: XrayRoutingMode) => void;
   routingMode: XrayRoutingMode;
   telemetry: TelemetryState;
@@ -4189,6 +4394,7 @@ function OverviewView({
   trafficTotals: TrafficTotals;
   xrayRunning: boolean;
   xrayProbe: XrayProbeStatus;
+  xrayNodeVerification: XrayNodeVerificationStatus;
   xrayStatsEnabled: boolean;
   xrayStatsError: string | null;
   xrayStatsQueriedAt: number | null;
@@ -4270,6 +4476,22 @@ function OverviewView({
     value
       ? new Date(value).toLocaleTimeString([], { minute: "2-digit", second: "2-digit" })
       : "--:--";
+  const verificationVisible = xrayNodeVerification.state !== "idle";
+  const displayedProbe = verificationVisible ? xrayNodeVerification.report : xrayProbe.report;
+  const displayedProbeState = verificationVisible ? xrayNodeVerification.state : xrayProbe.state;
+  const displayedProbeMessage = verificationVisible
+    ? xrayNodeVerification.state === "running"
+      ? ui.xrayVerifyRunning
+      : xrayNodeVerificationMessage(
+          xrayNodeVerification.code,
+          xrayNodeVerification.report,
+          ui,
+        )
+    : xrayProbe.state === "running"
+      ? ui.proxyProbeRunning
+      : xrayProbe.state === "ok"
+        ? ui.proxyProbeOk
+        : xrayProbe.error || ui.proxyProbeIdle;
 
   return (
     <div className="overview-page page-enter">
@@ -4397,29 +4619,27 @@ function OverviewView({
             <em>⌄</em>
           </button>
 
-          <article className={`proxy-probe-panel ${xrayProbe.state}`}>
+          <article className={`proxy-probe-panel ${displayedProbeState}`}>
             <header>
               <div>
                 <strong>{ui.localProxyProbe}</strong>
-                <span>
-                  {xrayProbe.state === "running"
-                    ? ui.proxyProbeRunning
-                    : xrayProbe.state === "ok"
-                      ? ui.proxyProbeOk
-                      : xrayProbe.error || ui.proxyProbeIdle}
-                </span>
+                <span>{displayedProbeMessage}</span>
               </div>
               <button
-                disabled={!activeNode || !xrayRunning || xrayProbe.state === "running"}
+                disabled={
+                  !activeNode ||
+                  xrayProbe.state === "running" ||
+                  xrayNodeVerification.state === "running"
+                }
                 type="button"
-                onClick={onProbeXray}
+                onClick={xrayRunning ? onProbeXray : onVerifyXrayNode}
               >
-                {ui.runProxyProbe}
+                {xrayRunning ? ui.runProxyProbe : ui.xrayVerifyNode}
               </button>
             </header>
             <div className="proxy-probe-grid">
-              <ProxyProbeRow label="HTTP" result={xrayProbe.report?.http} />
-              <ProxyProbeRow label="SOCKS" result={xrayProbe.report?.socks} />
+              <ProxyProbeRow label="HTTP" result={displayedProbe?.http} />
+              <ProxyProbeRow label="SOCKS" result={displayedProbe?.socks} />
             </div>
           </article>
 

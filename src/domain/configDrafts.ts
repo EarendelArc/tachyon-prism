@@ -17,11 +17,13 @@ export interface XrayClientDraftOptions {
   socksPort?: number;
   statsListen?: string;
   statsPort?: number;
+  purpose?: XrayConfigPurpose;
   rawConfig?: Record<string, unknown>;
 }
 
 export type XrayRoutingMode = "direct" | "global" | "rule";
 export type XrayConfigMode = "managed" | "raw";
+export type XrayConfigPurpose = "runtime" | "node-verification";
 
 export type XrayConfigLanguage = "en" | "zh-CN";
 export type CanonicalXrayLoadState = "error" | "loaded" | "loading";
@@ -232,7 +234,8 @@ export function buildXrayClientConfigDraft(
   const blockTag = uniqueManagedTag("tachyon-block", usedTags);
   const socksTag = uniqueManagedTag("tachyon-socks", usedTags);
   const httpTag = uniqueManagedTag("tachyon-http", usedTags);
-  const statsEnabled = Boolean(options.enableStats);
+  const verificationPurpose = options.purpose === "node-verification";
+  const statsEnabled = verificationPurpose ? false : Boolean(options.enableStats);
   const apiTag = statsEnabled
     ? importedApiTag || uniqueManagedTag("tachyon-xray-api", usedTags)
     : "";
@@ -323,7 +326,17 @@ export function buildXrayClientConfigDraft(
   ];
   config.inbounds = inbounds;
   config.outbounds = outbounds;
-  const managedRouting = xrayRouting(options.routingMode ?? "rule", statsEnabled, {
+  const managedRouting = verificationPurpose
+    ? isolatedNodeVerificationRouting({
+        apiInboundTag,
+        apiTag,
+        blockTag,
+        directTag,
+        httpTag,
+        proxyTag,
+        socksTag,
+      })
+    : xrayRouting(options.routingMode ?? "rule", statsEnabled, {
     apiInboundTag,
     apiTag,
     blockTag,
@@ -331,7 +344,7 @@ export function buildXrayClientConfigDraft(
     httpTag,
     proxyTag,
     socksTag,
-  });
+      });
   const managedOutboundTags = new Set(
     outbounds.map((managedOutbound) => stringValue(managedOutbound.tag)).filter(Boolean),
   );
@@ -340,9 +353,9 @@ export function buildXrayClientConfigDraft(
   }
   validatePrismManagedRoutingTargets(managedRouting, managedOutboundTags);
   config.routing = mergeXrayRouting(
-    importedConfig.routing,
+    verificationPurpose ? undefined : importedConfig.routing,
     managedRouting,
-    options.routingMode ?? "rule",
+    verificationPurpose ? "global" : options.routingMode ?? "rule",
   );
   if (statsEnabled) {
     inbounds.push({
@@ -929,6 +942,20 @@ interface XrayManagedTags {
   socksTag: string;
 }
 
+function isolatedNodeVerificationRouting(tags: XrayManagedTags): Record<string, unknown> {
+  return {
+    domainStrategy: "AsIs",
+    rules: [
+      {
+        type: "field",
+        inboundTag: [tags.socksTag, tags.httpTag],
+        network: "tcp,udp",
+        outboundTag: tags.proxyTag,
+      },
+    ],
+  };
+}
+
 function xrayRouting(
   mode: XrayRoutingMode,
   enableStats: boolean,
@@ -951,6 +978,7 @@ function xrayRouting(
         ...apiRule,
         {
           type: "field",
+          network: "tcp,udp",
           outboundTag: mode === "direct" ? tags.directTag : tags.proxyTag,
         },
       ],
@@ -981,6 +1009,7 @@ function xrayRouting(
       },
       {
         type: "field",
+        network: "tcp,udp",
         outboundTag: tags.proxyTag,
       },
     ],

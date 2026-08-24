@@ -12,6 +12,7 @@ import {
   tachyonCorePreflightStartBlockReason,
   tachyonIpcBaseUrl,
   testXrayLocalProxies,
+  verifyXrayNode,
   type CoreReleaseDiagnostics,
   type TachyonCorePreflightResult,
 } from "../runtime";
@@ -201,6 +202,54 @@ describe("testXrayLocalProxies", () => {
     expect(report.socks.ok).toBe(true);
     expect(report.http.via).toContain("10809");
     expect(report.socks.via).toContain("10808");
+  });
+});
+
+describe("verifyXrayNode", () => {
+  it("fails explicitly as unsupported outside Tauri", async () => {
+    const request = {
+      configDigest: "a".repeat(64),
+      contents: "{}",
+      nodeId: "node-a",
+      requestToken: "request-a",
+    };
+
+    await expect(verifyXrayNode(request)).resolves.toEqual({
+      code: "unsupported",
+      configDigest: request.configDigest,
+      nodeId: request.nodeId,
+      ok: false,
+      report: null,
+      requestToken: request.requestToken,
+    });
+  });
+
+  it("passes node, canonical digest, and request token through native IPC", async () => {
+    root.isTauri = true;
+    const request = {
+      configDigest: "a".repeat(64),
+      contents: "{}",
+      nodeId: "node-a",
+      requestToken: "request-a",
+    };
+    const verification = {
+      code: "success",
+      configDigest: request.configDigest,
+      nodeId: request.nodeId,
+      ok: true,
+      report: null,
+      requestToken: request.requestToken,
+    };
+    invokeMock.mockResolvedValueOnce(verification);
+
+    await expect(verifyXrayNode(request, "http://probe.invalid/", 3210)).resolves.toEqual(
+      verification,
+    );
+    assertSensitiveInvocation(invokeMock.mock.calls, 0, "verify_xray_node", {
+      ...request,
+      targetUrl: "http://probe.invalid/",
+      timeoutMs: 3210,
+    });
   });
 });
 

@@ -323,6 +323,17 @@ struct LocalProxyProbeReport {
     socks: ProxyProbeResult,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct XrayNodeVerificationResult {
+    code: String,
+    config_digest: String,
+    node_id: String,
+    ok: bool,
+    report: Option<LocalProxyProbeReport>,
+    request_token: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConfigValidationResult {
@@ -440,6 +451,7 @@ struct RuntimeState {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum XrayConfigTrustMode {
     Managed,
+    Verification,
     Advanced,
 }
 
@@ -1153,6 +1165,37 @@ impl XrayCoordinator {
         binary_path: String,
         config_path: String,
     ) -> Result<ProcessStatus, String> {
+        self.apply_xray_with_identity(app, proxy, binary_path, config_path, None, false)
+    }
+
+    fn apply_xray_isolated(
+        &mut self,
+        app: &tauri::AppHandle,
+        proxy: &system_proxy::SystemProxyRuntime,
+        binary_path: String,
+        config_path: String,
+        node_id: String,
+        config_digest: String,
+    ) -> Result<ProcessStatus, String> {
+        self.apply_xray_with_identity(
+            app,
+            proxy,
+            binary_path,
+            config_path,
+            Some((node_id, config_digest)),
+            true,
+        )
+    }
+
+    fn apply_xray_with_identity(
+        &mut self,
+        app: &tauri::AppHandle,
+        proxy: &system_proxy::SystemProxyRuntime,
+        binary_path: String,
+        config_path: String,
+        verification_identity: Option<(String, String)>,
+        isolated: bool,
+    ) -> Result<ProcessStatus, String> {
         self.stop_proxy_watchdog();
         let binary = PathBuf::from(clean_path_input(&binary_path));
         let source = PathBuf::from(clean_path_input(&config_path));
@@ -1182,12 +1225,21 @@ impl XrayCoordinator {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let node_id = format!("managed-config-{}", &digest[..16]);
+        let (node_id, routing_revision) = verification_identity
+            .map(|(node_id, expected_digest)| {
+                if expected_digest != digest {
+                    Err("Xray verification identity changed before apply".to_string())
+                } else {
+                    Ok((node_id, expected_digest))
+                }
+            })
+            .transpose()?
+            .unwrap_or_else(|| (format!("managed-config-{}", &digest[..16]), digest.clone()));
         self.generations
             .select_desired_with_probe(
                 &config,
                 node_id,
-                digest,
+                routing_revision,
                 managed_listeners,
                 egress_probe_settings(&settings)?,
             )
@@ -1206,9 +1258,12 @@ impl XrayCoordinator {
             config_mode: authorization.mode,
             settings,
         };
-        generations
-            .execute_latest(&mut backend)
-            .map_err(generation_apply_error)?;
+        if isolated {
+            generations.execute_latest_isolated(&mut backend)
+        } else {
+            generations.execute_latest(&mut backend)
+        }
+        .map_err(generation_apply_error)?;
         Ok(processes.xray.status())
     }
 
@@ -1217,6 +1272,23 @@ impl XrayCoordinator {
         app: &tauri::AppHandle,
         proxy: &system_proxy::SystemProxyRuntime,
     ) -> Result<ProcessStatus, String> {
+        self.stop_xray_with_policy(app, proxy, false)
+    }
+
+    fn stop_xray_isolated(
+        &mut self,
+        app: &tauri::AppHandle,
+        proxy: &system_proxy::SystemProxyRuntime,
+    ) -> Result<ProcessStatus, String> {
+        self.stop_xray_with_policy(app, proxy, true)
+    }
+
+    fn stop_xray_with_policy(
+        &mut self,
+        app: &tauri::AppHandle,
+        proxy: &system_proxy::SystemProxyRuntime,
+        isolated: bool,
+    ) -> Result<ProcessStatus, String> {
         self.stop_proxy_watchdog();
         let process_status = self.processes.xray.status();
         let generation_status = self.generations.status();
@@ -1224,7 +1296,13 @@ impl XrayCoordinator {
             return Err("refusing to stop uncoordinated Xray process".to_string());
         }
         if generation_status.active.is_none() {
-            self.set_proxy_binding(app, proxy, false)?;
+            if !isolated {
+                self.set_proxy_binding(app, proxy, false)?;
+            } else {
+                self.generations
+                    .finish_isolated()
+                    .map_err(generation_apply_error)?;
+            }
             return Ok(process_status);
         }
         let settings = load_runtime_settings(app)?;
@@ -1253,9 +1331,14 @@ impl XrayCoordinator {
             config_mode,
             settings,
         };
-        generations
-            .stop_active(&mut backend)
-            .map_err(generation_apply_error)?;
+        if isolated {
+            generations
+                .stop_active_isolated(&mut backend)
+                .and_then(|_| generations.finish_isolated())
+        } else {
+            generations.stop_active(&mut backend)
+        }
+        .map_err(generation_apply_error)?;
         Ok(processes.xray.status())
     }
 
@@ -2210,6 +2293,166 @@ fn test_xray_local_proxies(
 }
 
 #[tauri::command]
+fn verify_xray_node(
+    app: tauri::AppHandle,
+    state: tauri::State<RuntimeState>,
+    proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
+    contents: String,
+    node_id: String,
+    config_digest: String,
+    request_token: String,
+    target_url: Option<String>,
+    timeout_ms: Option<u64>,
+) -> XrayNodeVerificationResult {
+    let identity = XrayNodeVerificationIdentity {
+        node_id,
+        config_digest,
+        request_token,
+    };
+    let verification = (|| {
+        validate_xray_node_verification_identity(&identity)?;
+        if sha256_hex(contents.as_bytes()) != identity.config_digest {
+            return Err("Xray verification config digest mismatch".to_string());
+        }
+        let settings = load_runtime_settings(&app)?;
+        let mut coordinator = state
+            .xray
+            .lock()
+            .map_err(|_| "lock Xray verification state failed".to_string())?;
+        if coordinator.processes.xray.status().state == "running"
+            || coordinator.generations.status().active.is_some()
+        {
+            return Ok(xray_node_verification_result("xray-busy", None, &identity));
+        }
+
+        if contents.len() > CANONICAL_XRAY_CONFIG_LIMIT_BYTES {
+            return Err("managed Xray verification config exceeds the size limit".to_string());
+        }
+        let authorization = authorize_xray_config(
+            contents.as_bytes(),
+            XrayConfigTrustMode::Verification,
+            &settings,
+        )?;
+        let paths = draft_paths(&app)?;
+        let canonical = PathBuf::from(paths.xray_config_path);
+        let candidate = SyncedTempFile::create(&canonical, &contents)?;
+        let binary = PathBuf::from(clean_path_input(&settings.xray_binary_path));
+        let validation = validate_xray_config_file(&binary, &candidate.path)?;
+        if !validation.ok {
+            return Err("managed Xray verification config was rejected".to_string());
+        }
+
+        let previous_authorization = coordinator.xray_config_authorization.clone();
+        coordinator.xray_config_authorization = Some(authorization);
+        if coordinator
+            .apply_xray_isolated(
+                &app,
+                &proxy_state,
+                settings.xray_binary_path.clone(),
+                path_string(&candidate.path),
+                identity.node_id.clone(),
+                identity.config_digest.clone(),
+            )
+            .is_err()
+        {
+            let cleanup_failed = coordinator.stop_xray_isolated(&app, &proxy_state).is_err();
+            if !cleanup_failed {
+                coordinator.xray_config_authorization = previous_authorization;
+            }
+            return Ok(xray_node_verification_result(
+                if cleanup_failed {
+                    "cleanup-failed"
+                } else {
+                    "start-failed"
+                },
+                None,
+                &identity,
+            ));
+        }
+
+        let url = target_url
+            .map(|value| clean_url_input(&value))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "http://cp.cloudflare.com/generate_204".to_string());
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(5000).clamp(500, 30000));
+        let report = probe_xray_local_proxies(&settings, &url, timeout).ok();
+        let cleanup_failed = coordinator.stop_xray_isolated(&app, &proxy_state).is_err();
+        if !cleanup_failed {
+            coordinator.xray_config_authorization = previous_authorization;
+        }
+        if cleanup_failed {
+            return Ok(xray_node_verification_result(
+                "cleanup-failed",
+                report,
+                &identity,
+            ));
+        }
+        Ok(match report {
+            Some(report) if report.ok => {
+                xray_node_verification_result("success", Some(report), &identity)
+            }
+            report => xray_node_verification_result("probe-failed", report, &identity),
+        })
+    })();
+
+    verification.unwrap_or_else(|error| xray_node_verification_start_failure(error, &identity))
+}
+
+struct XrayNodeVerificationIdentity {
+    config_digest: String,
+    node_id: String,
+    request_token: String,
+}
+
+fn validate_xray_node_verification_identity(
+    identity: &XrayNodeVerificationIdentity,
+) -> Result<(), String> {
+    let safe_opaque = |value: &str, min: usize, max: usize| {
+        (min..=max).contains(&value.len())
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    };
+    if !safe_opaque(&identity.node_id, 1, 256) {
+        return Err("Xray verification node identity is invalid".to_string());
+    }
+    if identity.config_digest.len() != 64
+        || !identity
+            .config_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("Xray verification config digest is invalid".to_string());
+    }
+    if !safe_opaque(&identity.request_token, 16, 128) {
+        return Err("Xray verification request token is invalid".to_string());
+    }
+    Ok(())
+}
+
+fn xray_node_verification_start_failure(
+    _error: String,
+    identity: &XrayNodeVerificationIdentity,
+) -> XrayNodeVerificationResult {
+    xray_node_verification_result("start-failed", None, identity)
+}
+
+fn xray_node_verification_result(
+    code: &str,
+    report: Option<LocalProxyProbeReport>,
+    identity: &XrayNodeVerificationIdentity,
+) -> XrayNodeVerificationResult {
+    XrayNodeVerificationResult {
+        code: code.to_string(),
+        config_digest: identity.config_digest.clone(),
+        node_id: identity.node_id.clone(),
+        ok: code == "success",
+        report,
+        request_token: identity.request_token.clone(),
+    }
+}
+
+#[tauri::command]
 fn validate_xray_config(
     app: tauri::AppHandle,
     binary_path: Option<String>,
@@ -2293,6 +2536,7 @@ fn commit_validated_xray_config(
     contents: String,
     authorization_ticket: Option<String>,
 ) -> Result<ConfigDraftPaths, String> {
+    ensure_canonical_xray_config_size(&contents)?;
     let settings = load_runtime_settings(&app)?;
     let paths = draft_paths(&app)?;
     let binary = PathBuf::from(clean_path_input(&settings.xray_binary_path));
@@ -2386,6 +2630,13 @@ fn system_proxy_query(
     state: tauri::State<system_proxy::SystemProxyRuntime>,
 ) -> Result<system_proxy::SystemProxyQuery, String> {
     system_proxy::query(&app, &state)
+}
+
+#[tauri::command]
+fn system_proxy_audit(
+    state: tauri::State<system_proxy::SystemProxyRuntime>,
+) -> system_proxy::SystemProxyAuditSnapshot {
+    state.audit_snapshot()
 }
 
 #[tauri::command]
@@ -7603,13 +7854,7 @@ where
     V: FnOnce(&Path) -> Result<ConfigValidationResult, String>,
     R: AtomicFileReplacer,
 {
-    let size_bytes = contents.len();
-    if size_bytes > CANONICAL_XRAY_CONFIG_LIMIT_BYTES {
-        return Err(format!(
-            "canonical Xray config is {size_bytes} UTF-8 bytes and exceeds the {}-byte UTF-8 limit; no candidate was written or validated",
-            CANONICAL_XRAY_CONFIG_LIMIT_BYTES
-        ));
-    }
+    ensure_canonical_xray_config_size(contents)?;
     let candidate = SyncedTempFile::create(canonical, contents)?;
     let validation = match validate(&candidate.path) {
         Ok(validation) => validation,
@@ -7632,6 +7877,17 @@ where
         return Err(candidate.cleanup_after_failure(error));
     }
     Ok(validation)
+}
+
+fn ensure_canonical_xray_config_size(contents: &str) -> Result<(), String> {
+    let size_bytes = contents.len();
+    if size_bytes > CANONICAL_XRAY_CONFIG_LIMIT_BYTES {
+        return Err(format!(
+            "canonical Xray config is {size_bytes} UTF-8 bytes and exceeds the {}-byte UTF-8 limit; no candidate was written or validated",
+            CANONICAL_XRAY_CONFIG_LIMIT_BYTES
+        ));
+    }
+    Ok(())
 }
 
 fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
@@ -7886,6 +8142,13 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    sha256_bytes(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn issue_advanced_xray_authorization(
     state: &mut AdvancedXrayAuthorizations,
     config_digest: [u8; 32],
@@ -7950,10 +8213,83 @@ fn validate_xray_config_value(
     let object = config
         .as_object()
         .ok_or_else(|| "Xray config must be a JSON object".to_string())?;
-    if mode == XrayConfigTrustMode::Advanced {
-        return Ok(());
+    match mode {
+        XrayConfigTrustMode::Advanced => Ok(()),
+        XrayConfigTrustMode::Managed => validate_prism_managed_xray_config(object, settings),
+        XrayConfigTrustMode::Verification => {
+            validate_prism_isolated_xray_verification_config(object, settings)
+        }
     }
-    validate_prism_managed_xray_config(object, settings)
+}
+
+fn validate_prism_isolated_xray_verification_config(
+    config: &serde_json::Map<String, Value>,
+    settings: &RuntimeSettings,
+) -> Result<(), String> {
+    use std::collections::HashSet;
+
+    let mut verification_settings = settings.clone();
+    verification_settings.xray_stats_enabled = false;
+    validate_prism_managed_xray_config(config, &verification_settings)?;
+
+    let inbounds = config
+        .get("inbounds")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "isolated Xray verification requires explicit inbounds".to_string())?;
+    let inbound_tags = inbounds
+        .iter()
+        .filter_map(|inbound| inbound.get("tag").and_then(Value::as_str))
+        .collect::<HashSet<_>>();
+    let routing = config
+        .get("routing")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "isolated Xray verification requires explicit routing".to_string())?;
+    if routing.get("domainStrategy").and_then(Value::as_str) != Some("AsIs") {
+        return Err("isolated Xray verification requires AsIs routing".to_string());
+    }
+    let rules = routing
+        .get("rules")
+        .and_then(Value::as_array)
+        .filter(|rules| rules.len() == 1)
+        .ok_or_else(|| "isolated Xray verification requires one routing rule".to_string())?;
+    let rule = rules[0]
+        .as_object()
+        .ok_or_else(|| "isolated Xray verification routing rule is invalid".to_string())?;
+    if rule.len() != 4
+        || rule.get("type").and_then(Value::as_str) != Some("field")
+        || rule.get("network").and_then(Value::as_str) != Some("tcp,udp")
+    {
+        return Err("isolated Xray verification routing rule is not explicit".to_string());
+    }
+    let routed_inbounds = rule
+        .get("inboundTag")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "isolated Xray verification is missing inbound tags".to_string())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<HashSet<_>>();
+    if routed_inbounds != inbound_tags || routed_inbounds.len() != 2 {
+        return Err("isolated Xray verification must route both explicit inbounds".to_string());
+    }
+    let target = rule
+        .get("outboundTag")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "isolated Xray verification is missing its node target".to_string())?;
+    let target_protocol = config
+        .get("outbounds")
+        .and_then(Value::as_array)
+        .and_then(|outbounds| {
+            outbounds.iter().find_map(|outbound| {
+                (outbound.get("tag").and_then(Value::as_str) == Some(target))
+                    .then(|| outbound.get("protocol").and_then(Value::as_str))
+                    .flatten()
+            })
+        })
+        .ok_or_else(|| "isolated Xray verification target is missing".to_string())?;
+    if matches!(target_protocol, "freedom" | "blackhole") {
+        return Err("isolated Xray verification target is not a subscription node".to_string());
+    }
+    Ok(())
 }
 
 fn validate_prism_managed_xray_config(
@@ -8230,6 +8566,7 @@ fn validate_prism_managed_routing(
                 "ip",
                 "domain",
                 "protocol",
+                "network",
             ]
             .contains(&key.as_str())
         }) || rule.get("type").and_then(Value::as_str) != Some("field")
@@ -8263,6 +8600,12 @@ fn validate_prism_managed_routing(
                     return Err("managed Xray routing contains an invalid matcher".to_string());
                 }
             }
+        }
+        if rule
+            .get("network")
+            .is_some_and(|network| network.as_str() != Some("tcp,udp"))
+        {
+            return Err("managed Xray routing contains an invalid network matcher".to_string());
         }
     }
     Ok(())
@@ -8870,11 +9213,16 @@ impl ManagedProcess {
     }
 
     fn stop(&mut self, label: &str) -> Result<ProcessStatus, String> {
+        let child_was_tracked = self.child.is_some();
         self.refresh(label)?;
         let Some(mut child) = self.child.take() else {
+            if child_was_tracked {
+                self.last_error = None;
+                self.stop_method = Some("alreadyExited".to_string());
+            }
             return Ok(self.snapshot());
         };
-        let graceful_request = request_graceful_stop(&child);
+        let _graceful_request = request_graceful_stop(&child);
         let deadline = Instant::now() + GRACEFUL_STOP_TIMEOUT;
         let mut forced = false;
         loop {
@@ -8940,7 +9288,7 @@ impl ManagedProcess {
         }
         self.finish_log_readers();
         self.started_at = None;
-        self.last_error = graceful_request.err().filter(|_| forced);
+        self.last_error = None;
         self.stop_method = Some(if forced {
             "forcedAfterTimeout".to_string()
         } else {
@@ -9253,6 +9601,30 @@ mod tests {
     use std::io::copy;
     use std::net::TcpListener;
 
+    #[test]
+    fn xray_node_verification_start_failure_discards_sensitive_diagnostics() {
+        let secret = "subscription-private-key";
+        let identity = XrayNodeVerificationIdentity {
+            config_digest: "a".repeat(64),
+            node_id: "node-a".to_string(),
+            request_token: "request-token-a".to_string(),
+        };
+        let result = xray_node_verification_start_failure(
+            format!("Xray rejected password={secret} in a generated config"),
+            &identity,
+        );
+        let serialized = serde_json::to_string(&result).unwrap();
+
+        assert_eq!(result.code, "start-failed");
+        assert!(!result.ok);
+        assert!(result.report.is_none());
+        assert_eq!(result.node_id, identity.node_id);
+        assert_eq!(result.config_digest, identity.config_digest);
+        assert_eq!(result.request_token, identity.request_token);
+        assert!(!serialized.contains(secret));
+        assert!(!serialized.contains("password"));
+    }
+
     fn managed_xray_test_settings() -> RuntimeSettings {
         RuntimeSettings {
             xray_socks_listen: "127.0.0.1".to_string(),
@@ -9294,9 +9666,32 @@ mod tests {
             ],
             "routing": {
                 "domainStrategy": "IPIfNonMatch",
-                "rules": [{ "type": "field", "outboundTag": "tachyon-proxy" }]
+                "rules": [{
+                    "type": "field",
+                    "network": "tcp,udp",
+                    "outboundTag": "tachyon-proxy"
+                }]
             }
         })
+    }
+
+    fn isolated_xray_verification_test_config() -> Value {
+        let mut config = managed_xray_test_config();
+        config["routing"] = serde_json::json!({
+            "domainStrategy": "AsIs",
+            "rules": [{
+                "type": "field",
+                "inboundTag": ["tachyon-socks", "tachyon-http"],
+                "network": "tcp,udp",
+                "outboundTag": "tachyon-proxy"
+            }]
+        });
+        config["outbounds"][0] = serde_json::json!({
+            "tag": "tachyon-proxy",
+            "protocol": "socks",
+            "settings": { "servers": [{ "address": "127.0.0.1", "port": 18080 }] }
+        });
+        config
     }
 
     #[test]
@@ -9309,6 +9704,81 @@ mod tests {
             validate_xray_apply_plan(&plan, XrayConfigTrustMode::Managed, &settings).is_ok(),
             "valid Prism-managed apply plan was rejected"
         );
+    }
+
+    #[test]
+    fn isolated_xray_verification_requires_both_inbounds_to_one_node_outbound() {
+        let mut settings = managed_xray_test_settings();
+        settings.xray_stats_enabled = true;
+        let config = isolated_xray_verification_test_config();
+        let bytes = serde_json::to_vec(&config).expect("serialize isolated config");
+        let plan = xray_generation::apply_plan_for_test(bytes);
+
+        assert!(
+            validate_xray_apply_plan(&plan, XrayConfigTrustMode::Verification, &settings,).is_ok()
+        );
+    }
+
+    #[test]
+    fn isolated_xray_verification_rejects_user_routing_and_safety_outbounds() {
+        let settings = managed_xray_test_settings();
+        let base = isolated_xray_verification_test_config();
+        let mut cases = Vec::new();
+
+        let mut direct = base.clone();
+        direct["routing"]["rules"][0]["outboundTag"] = serde_json::json!("tachyon-direct");
+        cases.push(direct);
+
+        let mut global = base.clone();
+        global["routing"]["rules"][0]
+            .as_object_mut()
+            .expect("global rule")
+            .remove("inboundTag");
+        cases.push(global);
+
+        let mut rule = base;
+        rule["routing"]["rules"]
+            .as_array_mut()
+            .expect("rules")
+            .insert(
+                0,
+                serde_json::json!({
+                    "type": "field",
+                    "inboundTag": ["tachyon-socks", "tachyon-http"],
+                    "ip": ["geoip:private"],
+                    "outboundTag": "tachyon-direct"
+                }),
+            );
+        cases.push(rule);
+
+        for config in cases {
+            let bytes = serde_json::to_vec(&config).expect("serialize rejected config");
+            let plan = xray_generation::apply_plan_for_test(bytes);
+            assert!(
+                validate_xray_apply_plan(&plan, XrayConfigTrustMode::Verification, &settings,)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn xray_verification_identity_requires_exact_canonical_digest_and_opaque_token() {
+        let identity = XrayNodeVerificationIdentity {
+            config_digest: sha256_hex(b"{}"),
+            node_id: "node-a".to_string(),
+            request_token: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
+        };
+        assert!(validate_xray_node_verification_identity(&identity).is_ok());
+
+        let mut wrong_digest = XrayNodeVerificationIdentity {
+            config_digest: identity.config_digest.to_ascii_uppercase(),
+            node_id: identity.node_id.clone(),
+            request_token: identity.request_token.clone(),
+        };
+        assert!(validate_xray_node_verification_identity(&wrong_digest).is_err());
+        wrong_digest.config_digest = "a".repeat(64);
+        wrong_digest.request_token = "short".to_string();
+        assert!(validate_xray_node_verification_identity(&wrong_digest).is_err());
     }
 
     #[test]
@@ -9337,6 +9807,10 @@ mod tests {
             .expect("inbounds")
             .push(duplicate);
         cases.push(duplicate_listener);
+
+        let mut partial_network_matcher = base.clone();
+        partial_network_matcher["routing"]["rules"][0]["network"] = serde_json::json!("tcp");
+        cases.push(partial_network_matcher);
 
         for (field, value) in [
             (
@@ -10913,12 +11387,155 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         let port = port.parse::<u16>().expect("watchdog fixture port");
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
             .expect("fixture must own the requested TCP port");
-        fs::write(&ready_path, format!("{}\n{}\n", std::process::id(), port))
-            .expect("publish fixture PID");
+        publish_watchdog_fixture_ready(&ready_path, std::process::id(), port)
+            .expect("publish fixture PID atomically");
         std::mem::forget(listener);
         loop {
             thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    fn publish_watchdog_fixture_ready(path: &Path, pid: u32, port: u16) -> io::Result<()> {
+        static READY_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = READY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("ready");
+        let temporary = path.with_file_name(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            sequence
+        ));
+        let result = (|| {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(&temporary)?;
+            file.write_all(format!("{pid}\n{port}\n").as_bytes())?;
+            file.flush()?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temporary, path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    fn parse_watchdog_fixture_ready(raw: &str) -> Option<(u32, u16)> {
+        let mut lines = raw.lines();
+        let pid = lines.next()?.parse::<u32>().ok()?;
+        let port = lines.next()?.parse::<u16>().ok()?;
+        if lines.next().is_some() {
+            return None;
+        }
+        Some((pid, port))
+    }
+
+    fn wait_watchdog_fixture_ready(child: &mut Child, ready: &Path, port: u16) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut last_observation = "ready file absent".to_string();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => panic!(
+                    "real TCP fixture exited before readiness: status={status}, last={last_observation}"
+                ),
+                Ok(None) => {}
+                Err(error) => panic!("query real TCP fixture liveness: {error}"),
+            }
+            match fs::read_to_string(ready) {
+                Ok(raw) => match parse_watchdog_fixture_ready(&raw) {
+                    Some((pid, reported_port)) if reported_port == port => {
+                        if owned_tcp_listener_table(pid)
+                            .map(|table| {
+                                listeners_owned_by_pid(
+                                    &table,
+                                    &[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)],
+                                    pid,
+                                )
+                            })
+                            .unwrap_or(false)
+                        {
+                            return pid;
+                        }
+                        last_observation =
+                            format!("parsed pid={pid}, port={port}, listener not owned yet");
+                    }
+                    Some((pid, reported_port)) => {
+                        last_observation = format!(
+                            "parsed pid={pid}, unexpected port={reported_port}, expected={port}"
+                        );
+                    }
+                    None => {
+                        last_observation = format!("incomplete ready payload: {raw:?}");
+                    }
+                },
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    last_observation = "ready file absent".to_string();
+                }
+                Err(error) => {
+                    last_observation = format!("read ready file: {error}");
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "real TCP fixture did not become owned: {last_observation}"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    fn watchdog_ready_publication_is_atomic_under_high_concurrency() {
+        const ROUNDS: usize = 128;
+        let directory = unique_temp_dir("tachyon-test-watchdog-ready-atomic");
+        fs::create_dir_all(&directory).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(ROUNDS + 1));
+        let mut writers = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let barrier = Arc::clone(&barrier);
+            let path = directory.join(format!("round-{round}.ready"));
+            writers.push(thread::spawn(move || {
+                barrier.wait();
+                publish_watchdog_fixture_ready(&path, 10_000 + round as u32, 20_000 + round as u16)
+                    .unwrap();
+            }));
+        }
+        barrier.wait();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut observed = vec![false; ROUNDS];
+        while observed.iter().any(|value| !value) {
+            for (round, seen) in observed.iter_mut().enumerate() {
+                if *seen {
+                    continue;
+                }
+                let path = directory.join(format!("round-{round}.ready"));
+                match fs::read_to_string(path) {
+                    Ok(raw) => {
+                        assert_eq!(
+                            parse_watchdog_fixture_ready(&raw),
+                            Some((10_000 + round as u32, 20_000 + round as u16)),
+                            "an observable ready file must always contain a complete payload"
+                        );
+                        *seen = true;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("read concurrent ready file: {error}"),
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "concurrent ready publication timed out"
+            );
+            thread::yield_now();
+        }
+        for writer in writers {
+            writer.join().expect("ready writer thread");
+        }
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -10943,43 +11560,8 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
                 .env("TACHYON_WATCHDOG_FIXTURE_READY", ready);
             process_spawn::spawn(&mut command).expect("spawn real TCP fixture")
         };
-        let wait_ready = |ready: &Path| -> u32 {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                if let Ok(raw) = fs::read_to_string(ready) {
-                    let mut lines = raw.lines();
-                    let pid = lines
-                        .next()
-                        .and_then(|value| value.parse::<u32>().ok())
-                        .expect("fixture PID");
-                    let reported_port = lines
-                        .next()
-                        .and_then(|value| value.parse::<u16>().ok())
-                        .expect("fixture port");
-                    assert_eq!(reported_port, port);
-                    if owned_tcp_listener_table(pid)
-                        .map(|table| {
-                            listeners_owned_by_pid(
-                                &table,
-                                &[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)],
-                                pid,
-                            )
-                        })
-                        .unwrap_or(false)
-                    {
-                        return pid;
-                    }
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "real TCP fixture did not become owned"
-                );
-                thread::sleep(Duration::from_millis(25));
-            }
-        };
-
         let mut first = spawn_fixture(&ready_a);
-        let first_pid = wait_ready(&ready_a);
+        let first_pid = wait_watchdog_fixture_ready(&mut first, &ready_a, port);
         let generation_id = {
             let mut runtime = xray_generation::GenerationRuntime::default();
             runtime
@@ -11048,7 +11630,7 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         first.kill().unwrap();
         first.wait().unwrap();
         let mut second = spawn_fixture(&ready_b);
-        let second_pid = wait_ready(&ready_b);
+        let second_pid = wait_watchdog_fixture_ready(&mut second, &ready_b, port);
         assert_ne!(first_pid, second_pid);
         let first_listener_owned = owned_tcp_listener_table(first_pid)
             .map(|table| listeners_owned_by_pid(&table, &[listener], first_pid))
@@ -12334,8 +12916,55 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         assert!(process.stop("injected").is_err());
         assert!(process.child.is_some());
         process.stop_fault = None;
-        process.stop("injected").unwrap();
+        let status = process.stop("injected").unwrap();
         assert!(process.child.is_none());
+        assert_eq!(status.state, "stopped");
+        assert!(status.last_error.is_none());
+    }
+
+    #[test]
+    fn managed_process_stop_clears_error_after_reaping_prior_exit() {
+        let child = if cfg!(target_os = "windows") {
+            let mut command =
+                Command::new(std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into()));
+            command.args(["/C", "exit 7"]);
+            process_spawn::spawn(&mut command).unwrap()
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 7"]);
+            process_spawn::spawn(&mut command).unwrap()
+        };
+        let mut process = ManagedProcess {
+            child: Some(ManagedChild::Standard(child)),
+            last_error: Some("earlier stop attempt failed".to_string()),
+            ..ManagedProcess::default()
+        };
+        thread::sleep(Duration::from_millis(150));
+
+        let status = process.stop("exited fixture").unwrap();
+
+        assert!(process.child.is_none());
+        assert_eq!(status.state, "stopped");
+        assert_eq!(status.exit_code, Some(7));
+        assert_eq!(status.stop_method.as_deref(), Some("alreadyExited"));
+        assert!(status.last_error.is_none());
+    }
+
+    #[test]
+    fn managed_process_stop_preserves_failure_without_tracked_child() {
+        let mut process = ManagedProcess {
+            last_error: Some("start failed before child creation".to_string()),
+            ..ManagedProcess::default()
+        };
+
+        let status = process.stop("missing fixture").unwrap();
+
+        assert_eq!(status.state, "failed");
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("start failed before child creation")
+        );
+        assert!(status.stop_method.is_none());
     }
 
     #[test]
@@ -13506,8 +14135,27 @@ pub fn run() {
                 .find(|window| window.label == "main")
                 .ok_or_else(|| "missing main window config".to_string())?;
 
-            let window =
-                tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?.build()?;
+            let window_builder =
+                tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?;
+            #[cfg(all(target_os = "windows", feature = "native-e2e"))]
+            let window_builder = {
+                let data_directory = std::env::var_os(
+                    "TACHYON_PRISM_NATIVE_E2E_WEBVIEW_DATA_DIRECTORY",
+                )
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .ok_or_else(|| {
+                    "native-e2e requires an absolute TACHYON_PRISM_NATIVE_E2E_WEBVIEW_DATA_DIRECTORY"
+                        .to_string()
+                })?;
+                window_builder
+                    .additional_browser_args(
+                        "--remote-debugging-address=127.0.0.1 --remote-debugging-port=0 \
+                         --remote-allow-origins=* --disable-background-networking",
+                    )
+                    .data_directory(data_directory)
+            };
+            let window = window_builder.build()?;
             let _ = window;
             Ok(())
         })
@@ -13545,6 +14193,7 @@ pub fn run() {
             test_tcp_latency,
             test_xray_proxy,
             test_xray_local_proxies,
+            verify_xray_node,
             validate_xray_config,
             request_advanced_xray_authorization,
             commit_validated_xray_config,
@@ -13552,6 +14201,7 @@ pub fn run() {
             tachyon_core_preflight,
             system_proxy_capability,
             system_proxy_query,
+            system_proxy_audit,
             system_proxy_apply,
             system_proxy_restore,
             system_proxy_status,

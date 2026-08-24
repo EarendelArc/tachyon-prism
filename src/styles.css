@@ -1836,6 +1836,8 @@ p,
   margin: 0 auto;
   max-width: 1110px;
   min-height: 0;
+  min-width: 0;
+  width: 100%;
 }
 
 .settings-sidebar {
@@ -1857,12 +1859,15 @@ p,
 }
 
 .settings-content {
+  max-width: 100%;
   min-width: 0;
 }
 
 .settings-card {
   display: grid;
   gap: 16px;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .core-control-card {
@@ -2020,6 +2025,9 @@ p,
   display: grid;
   gap: 10px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-width: 100%;
+  min-width: 0;
+  width: 100%;
 }
 
 .game-route-form {
@@ -2183,8 +2191,11 @@ p,
 }
 
 .config-grid textarea {
+  max-width: 100%;
   min-height: 300px;
+  min-width: 0;
   white-space: pre;
+  width: 100%;
 }
 
 .config-editor-pane {
@@ -2203,14 +2214,18 @@ p,
 .config-editor-heading {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   justify-content: space-between;
+  max-width: 100%;
   min-width: 0;
 }
 
 .config-editor-heading .mini-check {
   flex: 0 1 auto;
+  max-width: 100%;
   min-width: 0;
+  overflow-wrap: anywhere;
   white-space: normal;
 }
 
@@ -2219,6 +2234,7 @@ p,
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  max-width: 100%;
   min-width: 0;
 }
 
@@ -2416,6 +2432,10 @@ p,
 }
 
 @media (max-width: 850px) and (min-width: 761px) {
+  .config-grid {
+    grid-template-columns: 1fr;
+  }
+
   .quick-strip {
     gap: 6px;
     grid-template-columns: minmax(156px, 0.9fr) minmax(164px, 0.9fr) minmax(166px, 1fr) auto;

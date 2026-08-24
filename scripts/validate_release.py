@@ -142,8 +142,10 @@ def validate_workflows() -> None:
     latest_response_parser_path = ROOT / ".github" / "scripts" / "parse-latest-release-response.py"
     core_contract_test_path = ROOT / "src" / "domain" / "__tests__" / "coreConfigContract.live.test.ts"
     package_path = ROOT / "package.json"
+    cargo_path = ROOT / "src-tauri" / "Cargo.toml"
     tauri_config_path = ROOT / "src-tauri" / "tauri.conf.json"
     bundle_verifier_path = ROOT / "scripts" / "verify_production_bundle.py"
+    dmg_diagnostics_path = ROOT / ".github" / "scripts" / "run-tauri-dmg-bundle.sh"
     release_matrix = extract_matrix(release_path, "build")
     ci_matrix = extract_matrix(ci_path, "rust")
     if release_matrix != EXPECTED_MATRIX:
@@ -163,8 +165,10 @@ def validate_workflows() -> None:
     latest_response_parser = latest_response_parser_path.read_text(encoding="utf-8")
     core_contract_test = core_contract_test_path.read_text(encoding="utf-8")
     package = json.loads(package_path.read_text(encoding="utf-8"))
+    cargo = cargo_path.read_text(encoding="utf-8")
     tauri_config = json.loads(tauri_config_path.read_text(encoding="utf-8"))
     bundle_verifier = bundle_verifier_path.read_text(encoding="utf-8")
+    dmg_diagnostics = dmg_diagnostics_path.read_text(encoding="utf-8")
     core_contract = json.loads((ROOT / "core-contract.json").read_text(encoding="utf-8"))
     core_repository = str(core_contract["repository"])
     core_commit = str(core_contract["commit"])
@@ -240,6 +244,39 @@ def validate_workflows() -> None:
         fail("web:build does not fail closed on the production bundle scan")
     if tauri_config.get("build", {}).get("beforeBuildCommand") != "npm run web:build":
         fail("Tauri release builds bypass the production bundle scan")
+    native_e2e_build = str(package.get("scripts", {}).get("build:native-e2e", ""))
+    if native_e2e_build != "tauri build --features custom-protocol,native-e2e":
+        fail("native E2E build does not enable its compile-time-only feature")
+    if "native-e2e = []" not in cargo:
+        fail("Cargo native-e2e compile-time feature is missing")
+    native_e2e_ci_guards = [
+        "npm run build:native-e2e -- --no-bundle",
+        'if ($result.ipc.status -ne "passed" -or $result.ui.status -ne "passed")',
+        'if ($safety.systemProxyAudit.status -ne "captured")',
+    ]
+    missing_native_e2e_guards = [guard for guard in native_e2e_ci_guards if guard not in ci]
+    if missing_native_e2e_guards:
+        fail("CI native E2E compile-time/result guards are missing: " + ", ".join(missing_native_e2e_guards))
+    dmg_ci_guards = [
+        "run-tauri-dmg-bundle.sh",
+        "Upload macOS DMG failure diagnostics",
+        "tachyon-prism-dmg-failure-${{ matrix.asset_name }}-${{ github.sha }}",
+    ]
+    missing_dmg_ci_guards = [guard for guard in dmg_ci_guards if guard not in ci]
+    if missing_dmg_ci_guards:
+        fail("CI macOS DMG diagnostics are missing: " + ", ".join(missing_dmg_ci_guards))
+    dmg_script_guards = [
+        "TAURI_DMG_HDIUTIL",
+        "TAURI_DMG_OSASCRIPT",
+        "shell-trace.log",
+        "hdiutil.stderr.log",
+        "osascript.stderr.log",
+        "bundle_dmg.sh",
+        "macos-disk-image-system.log",
+    ]
+    missing_dmg_script_guards = [guard for guard in dmg_script_guards if guard not in dmg_diagnostics]
+    if missing_dmg_script_guards:
+        fail("macOS DMG diagnostic wrapper is incomplete: " + ", ".join(missing_dmg_script_guards))
     scanner_guards = [
         "tachyon.prism.uiSmokeVault.v1",
         "secureStorageBackend.ui-smoke",

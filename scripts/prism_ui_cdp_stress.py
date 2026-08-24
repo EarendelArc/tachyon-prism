@@ -64,7 +64,12 @@ def run_iteration(edge: Path, output_dir: Path, index: int) -> dict[str, Any]:
         stop_tree(process)
         raise RuntimeError(f"stress iteration {index} exceeded the hard timeout") from error
     if return_code != 0:
-        raise RuntimeError(f"stress iteration {index} exited with code {return_code}")
+        error_path = output_dir / "ERROR.json"
+        detail = ""
+        if error_path.is_file():
+            detail = sanitize_diagnostic_text(error_path.read_text(encoding="utf-8"))
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(f"stress iteration {index} exited with code {return_code}{suffix}")
     result = json.loads((output_dir / "RESULT.json").read_text(encoding="utf-8"))
     if result.get("status") != "passed" or result.get("scope") != "startup-cdp-stress":
         raise RuntimeError(f"stress iteration {index} returned invalid status")

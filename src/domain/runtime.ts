@@ -1,5 +1,9 @@
 import { invokeDesktop, isTauriRuntime } from "./tauri";
 import type { ConfigDraftPaths } from "./desktopConfig";
+import type {
+  XrayNodeVerificationRequest,
+  XrayNodeVerificationResult,
+} from "./xrayNodeVerification";
 
 export type ProcessState = "failed" | "running" | "stopped";
 
@@ -488,6 +492,31 @@ export async function testXrayLocalProxies(
     return previewLocalProxyProbe(targetUrl);
   }
   return invokeDesktop<LocalProxyProbeReport>("test_xray_local_proxies", {
+    targetUrl,
+    timeoutMs,
+  });
+}
+
+export async function verifyXrayNode(
+  request: XrayNodeVerificationRequest,
+  targetUrl = "http://cp.cloudflare.com/generate_204",
+  timeoutMs = 5000,
+): Promise<XrayNodeVerificationResult> {
+  if (!isTauriRuntime()) {
+    return {
+      code: "unsupported",
+      configDigest: request.configDigest,
+      nodeId: request.nodeId,
+      ok: false,
+      report: null,
+      requestToken: request.requestToken,
+    };
+  }
+  return invokeDesktop<XrayNodeVerificationResult>("verify_xray_node", {
+    configDigest: request.configDigest,
+    contents: request.contents,
+    nodeId: request.nodeId,
+    requestToken: request.requestToken,
     targetUrl,
     timeoutMs,
   });

@@ -41,6 +41,8 @@ CDP_CONNECT_TIMEOUT_SECONDS = 30.0
 CDP_COMMAND_TIMEOUT_SECONDS = 20.0
 SHELL_READY_TIMEOUT_SECONDS = 30.0
 DIAGNOSTIC_LOG_BYTES = 8192
+TRAFFIC_SAMPLE_ATTEMPTS = 8
+TRAFFIC_SAMPLE_SETTLE_SECONDS = 0.15
 
 
 class CDPTimeout(RuntimeError):
@@ -53,9 +55,19 @@ class QuietHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
-        if path in {"/smoke-subscription", "/smoke-subscription-slow", "/smoke-subscription-error"}:
+        if path in {
+            "/generate_204",
+            "/smoke-subscription",
+            "/smoke-subscription-slow",
+            "/smoke-subscription-error",
+        }:
             with self.request_counts_lock:
                 self.request_counts[path] = self.request_counts.get(path, 0) + 1
+        if path == "/generate_204":
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            return
         if path == "/smoke-subscription-error":
             self.send_response(502)
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -696,27 +708,42 @@ def assert_desktop_interaction_polish(cdp: CDP) -> None:
         raise AssertionError(f"custom scrollbar style rule missing: {polish}")
 
 
-def inject_dual_core_traffic(cdp: CDP) -> None:
-    cdp.evaluate(
+def inject_dual_core_traffic(cdp: CDP) -> dict[str, int]:
+    return cdp.evaluate(
         """
-        new Promise((resolve) => {
-          const send = (tachyonUp, tachyonDown, xrayUp, xrayDown) =>
-            window.dispatchEvent(new CustomEvent('tachyon-prism:test-traffic', {
-              detail: { tachyonUp, tachyonDown, xrayUp, xrayDown }
-            }));
-          send(1000, 2000, 3000, 4000);
-          setTimeout(() => {
-            send(7000, 10000, 14000, 19000);
-            setTimeout(resolve, 250);
-          }, 150);
-        })
+        (() => {
+          const previous = window.__tachyonPrismTrafficFixture ?? {
+            sequence: 0,
+            tachyonUp: 1000,
+            tachyonDown: 2000,
+            xrayUp: 3000,
+            xrayDown: 4000
+          };
+          const next = previous.sequence === 0 ? previous : {
+            sequence: previous.sequence,
+            tachyonUp: previous.tachyonUp + 6000,
+            tachyonDown: previous.tachyonDown + 8000,
+            xrayUp: previous.xrayUp + 11000,
+            xrayDown: previous.xrayDown + 15000
+          };
+          next.sequence += 1;
+          window.__tachyonPrismTrafficFixture = next;
+          window.dispatchEvent(new CustomEvent('tachyon-prism:test-traffic', {
+            detail: {
+              tachyonUp: next.tachyonUp,
+              tachyonDown: next.tachyonDown,
+              xrayUp: next.xrayUp,
+              xrayDown: next.xrayDown
+            }
+          }));
+          return next;
+        })()
         """,
-        await_promise=True,
     )
 
 
-def assert_dual_core_chart(cdp: CDP) -> None:
-    chart = cdp.evaluate(
+def dual_core_chart_snapshot(cdp: CDP) -> dict[str, Any]:
+    return cdp.evaluate(
         """
         (() => ({
           legend: Array.from(document.querySelectorAll('.legend-item'))
@@ -731,6 +758,23 @@ def assert_dual_core_chart(cdp: CDP) -> None:
         }))()
         """,
     )
+
+
+def assert_dual_core_chart(cdp: CDP) -> None:
+    attempts: list[dict[str, Any]] = []
+    chart: dict[str, Any] = {}
+    for attempt in range(1, TRAFFIC_SAMPLE_ATTEMPTS + 1):
+        sent = inject_dual_core_traffic(cdp)
+        time.sleep(TRAFFIC_SAMPLE_SETTLE_SECONDS)
+        chart = dual_core_chart_snapshot(cdp)
+        attempts.append({"attempt": attempt, "sent": sent, "chart": chart})
+        if (
+            len(chart["rates"]) == 4
+            and not chart["emptyText"]
+            and all(not rate.startswith("0 ") for rate in chart["rates"])
+        ):
+            break
+
     labels = " ".join(chart["legend"])
     if len(chart["legend"]) != 4:
         raise AssertionError(f"dual-core traffic chart must expose four series: {chart}")
@@ -745,7 +789,10 @@ def assert_dual_core_chart(cdp: CDP) -> None:
     if len(chart["points"]) != 4 or any(not points for points in chart["points"]):
         raise AssertionError(f"four real SVG traffic lines were not rendered: {chart}")
     if any(rate.startswith("0 ") for rate in chart["rates"]):
-        raise AssertionError(f"dual-core rates did not become non-zero: {chart}")
+        raise AssertionError(
+            "dual-core rates did not become non-zero after bounded monotonic telemetry "
+            f"samples: {attempts}"
+        )
 
 
 def assert_visible_custom_scrollbar(cdp: CDP) -> None:
@@ -838,11 +885,10 @@ def import_subscription_payload(cdp: CDP, name: str, payload: str) -> str:
     )
 
 
-def update_subscription_url(cdp: CDP, name: str, source_url: str) -> str:
-    return str(
-        cdp.evaluate(
+def update_subscription_url(cdp: CDP, name: str, source_url: str) -> dict[str, Any]:
+    return cdp.evaluate(
             f"""
-            new Promise((resolve) => {{
+            new Promise((resolve, reject) => {{
               const setValue = (element, value) => {{
                 if (!element) throw new Error('subscription form element missing');
                 const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value');
@@ -857,13 +903,52 @@ def update_subscription_url(cdp: CDP, name: str, source_url: str) -> str:
               setValue(card.querySelector('textarea'), '');
               const button = card.querySelector('.row-actions button:first-child');
               if (!button) throw new Error('update button missing');
-              button.click();
-              setTimeout(() => resolve(document.body.innerText), 1000);
+              const updateAll = document.querySelector('[data-testid="subscription-update-all"]');
+              const initialSubscriptionCount = document.querySelectorAll('.subscription-card').length;
+              let observedBusy = false;
+              let finished = false;
+              const deadline = Date.now() + 5000;
+              const observe = () => {{
+                if (button.disabled || updateAll?.disabled) observedBusy = true;
+                const urlInput = card.querySelectorAll('input')[1];
+                const error = document.getElementById('subscription-url-error');
+                const idle = observedBusy && !button.disabled && !updateAll?.disabled;
+                if (idle && urlInput?.getAttribute('aria-invalid') === 'true' && error) {{
+                  finished = true;
+                  mutationObserver.disconnect();
+                  resolve({{
+                    bodyText: document.body.innerText,
+                    observedBusy,
+                    updateText: button.textContent?.trim() ?? '',
+                    updateAllText: updateAll?.textContent?.trim() ?? '',
+                    urlInvalid: true,
+                    errorId: error.id,
+                    errorText: error.textContent?.trim() ?? '',
+                    initialSubscriptionCount,
+                    finalSubscriptionCount: document.querySelectorAll('.subscription-card').length,
+                  }});
+                  return;
+                }}
+                if (Date.now() >= deadline) {{
+                  finished = true;
+                  mutationObserver.disconnect();
+                  reject(new Error(`subscription URL update did not reach an explicit idle error state: busy=${{observedBusy}} disabled=${{button.disabled}} error=${{error?.textContent?.trim() ?? ''}}`));
+                  return;
+                }}
+                setTimeout(observe, 25);
+              }};
+              const mutationObserver = new MutationObserver(() => {{
+                if (button.disabled || updateAll?.disabled) observedBusy = true;
+              }});
+              mutationObserver.observe(document.body, {{ attributes: true, childList: true, subtree: true }});
+              setTimeout(() => {{
+                button.click();
+                observe();
+              }}, 50);
             }})
             """,
             await_promise=True,
-        ),
-    )
+        )
 
 
 def update_all_subscriptions(cdp: CDP) -> str:
@@ -1205,7 +1290,9 @@ def xray_routing_summary(cdp: CDP) -> dict[str, Any]:
               const trafficRules = rules.filter((rule) => !isApiRule(rule));
               const isExplicitCatchAll = (rule) =>
                 Boolean(rule?.outboundTag)
-                && Object.keys(rule).every((key) => key === 'type' || key === 'outboundTag');
+                && Object.keys(rule).every(
+                  (key) => key === 'type' || key === 'network' || key === 'outboundTag',
+                );
               const catchAllRule = trafficRules.find(isExplicitCatchAll) ?? {};
               const outboundTagCounts = outbounds.reduce((counts, outbound) => {
                 const tag = typeof outbound?.tag === 'string' ? outbound.tag : '';
@@ -1377,9 +1464,67 @@ def assert_advanced_xray_layout(cdp: CDP, language: str) -> None:
                   setTimeout(() => {
                     const editorRect = editor.getBoundingClientRect();
                     const finalContentRect = content.getBoundingClientRect();
+                    const panelRect = panel.getBoundingClientRect();
                     const controls = Array.from(
                       actions.querySelectorAll('button, .file-action-button')
                     );
+                    const selectorFor = (element) => {
+                      if (element.id) return `#${CSS.escape(element.id)}`;
+                      const parts = [];
+                      let current = element;
+                      while (current && current.nodeType === Node.ELEMENT_NODE && parts.length < 5) {
+                        let part = current.tagName.toLowerCase();
+                        if (current.classList.length) {
+                          part += `.${Array.from(current.classList).slice(0, 3).map(CSS.escape).join('.')}`;
+                        }
+                        const parent = current.parentElement;
+                        if (parent) {
+                          const siblings = Array.from(parent.children).filter(
+                            (item) => item.tagName === current.tagName
+                          );
+                          if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+                        }
+                        parts.unshift(part);
+                        current = parent;
+                      }
+                      return parts.join(' > ');
+                    };
+                    const overflowDiagnostics = Array.from(document.querySelectorAll('*'))
+                      .map((element) => {
+                        const rect = element.getBoundingClientRect();
+                        const style = getComputedStyle(element);
+                        const hasBox = rect.width > 0 && rect.height > 0;
+                        const scrollOverflow = element.scrollWidth > element.clientWidth + 1;
+                        const viewportOverflow = hasBox && (
+                          rect.left < -1 || rect.right > window.innerWidth + 1
+                        );
+                        const panelOverflow = panel.contains(element) && hasBox && (
+                          rect.left < panelRect.left - 1 || rect.right > panelRect.right + 1
+                        );
+                        if (!scrollOverflow && !viewportOverflow && !panelOverflow) return null;
+                        return {
+                          selector: selectorFor(element),
+                          text: (element.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 160),
+                          rect: {
+                            left: Math.round(rect.left * 100) / 100,
+                            right: Math.round(rect.right * 100) / 100,
+                            width: Math.round(rect.width * 100) / 100,
+                          },
+                          clientWidth: element.clientWidth,
+                          scrollWidth: element.scrollWidth,
+                          minWidth: style.minWidth,
+                          whiteSpace: style.whiteSpace,
+                          overflowX: style.overflowX,
+                          display: style.display,
+                          gridTemplateColumns: style.gridTemplateColumns,
+                          flexWrap: style.flexWrap,
+                          scrollOverflow,
+                          viewportOverflow,
+                          panelOverflow,
+                        };
+                      })
+                      .filter(Boolean)
+                      .slice(0, 40);
                     resolve({
                       actionLabels: controls.map((item) => item.textContent.trim()),
                       actionsReachable,
@@ -1392,6 +1537,16 @@ def assert_advanced_xray_layout(cdp: CDP, language: str) -> None:
                         document.documentElement.scrollWidth <= window.innerWidth &&
                         document.body.scrollWidth <= window.innerWidth &&
                         panel.scrollWidth <= panel.clientWidth,
+                      overflowMetrics: {
+                        viewportWidth: window.innerWidth,
+                        documentClientWidth: document.documentElement.clientWidth,
+                        documentScrollWidth: document.documentElement.scrollWidth,
+                        bodyClientWidth: document.body.clientWidth,
+                        bodyScrollWidth: document.body.scrollWidth,
+                        panelClientWidth: panel.clientWidth,
+                        panelScrollWidth: panel.scrollWidth,
+                      },
+                      overflowDiagnostics,
                       toggleLabel: toggle.closest('label')?.textContent.trim() ?? '',
                     });
                   }, 220);
@@ -1613,13 +1768,76 @@ def assert_local_proxy_probe_panel(cdp: CDP) -> None:
         """,
         await_promise=True,
     )
-    if "Local Proxy Probe" not in state["text"] or "Test Node" not in state["text"]:
+    if "Local Proxy Probe" not in state["text"] or "Verify Selected Node" not in state["text"]:
         raise AssertionError(f"local proxy probe panel missing: {state}")
-    if not state["disabled"]:
-        raise AssertionError(f"local proxy probe should be disabled while Xray is stopped: {state}")
+    if state["disabled"]:
+        raise AssertionError(
+            f"isolated node verification should be available while Xray is stopped: {state}"
+        )
     rows = state["rows"]
     if len(rows) != 2 or not any("HTTP" in row for row in rows) or not any("SOCKS" in row for row in rows):
         raise AssertionError(f"local proxy probe rows missing: {state}")
+    english = cdp.evaluate(
+        """
+        new Promise((resolve) => {
+          document.querySelector('.proxy-probe-panel header button')?.click();
+          setTimeout(() => resolve({
+            className: document.querySelector('.proxy-probe-panel')?.className ?? '',
+            text: document.querySelector('.proxy-probe-panel')?.textContent ?? ''
+          }), 350);
+        })
+        """,
+        await_promise=True,
+    )
+    if " error" not in english["className"] or (
+        "Real node verification is unsupported in Web Preview" not in english["text"]
+    ):
+        raise AssertionError(f"Web Preview verification was not explicitly unsupported in English: {english}")
+
+    chinese = cdp.evaluate(
+        """
+        new Promise((resolve) => {
+          location.hash = 'settings';
+          setTimeout(() => {
+            document.querySelectorAll('.settings-sidebar button')[0]?.click();
+            setTimeout(() => {
+              const language = Array.from(document.querySelectorAll('button'))
+                .find((button) => button.textContent.trim() === '简体中文');
+              if (!language) throw new Error('Chinese language button missing');
+              language.click();
+              setTimeout(() => {
+                location.hash = 'overview';
+                setTimeout(() => {
+                  document.querySelector('.proxy-probe-panel header button')?.click();
+                  setTimeout(() => resolve({
+                    className: document.querySelector('.proxy-probe-panel')?.className ?? '',
+                    text: document.querySelector('.proxy-probe-panel')?.textContent ?? ''
+                  }), 350);
+                }, 350);
+              }, 350);
+            }, 350);
+          }, 350);
+        })
+        """,
+        await_promise=True,
+    )
+    if " error" not in chinese["className"] or (
+        "Web 预览不支持真实节点验证" not in chinese["text"]
+    ):
+        raise AssertionError(f"Web Preview verification was not explicitly unsupported in Chinese: {chinese}")
+    cdp.evaluate(
+        """
+        new Promise((resolve) => {
+          location.hash = 'settings';
+          setTimeout(() => {
+            document.querySelectorAll('.settings-sidebar button')[0]?.click();
+            setTimeout(resolve, 300);
+          }, 300);
+        })
+        """,
+        await_promise=True,
+    )
+    switch_to_english(cdp)
 
 
 def assert_key_pages_at_viewports(cdp: CDP, output_dir: Path) -> None:
@@ -2185,6 +2403,7 @@ def run(
                 "--disable-background-networking",
                 "--disable-breakpad",
                 "--disable-crash-reporter",
+                "--edge-skip-compat-layer-relaunch",
                 "--disable-extensions",
                 "--disable-gpu",
                 "--disable-gpu-sandbox",
@@ -2223,7 +2442,6 @@ def run(
         assert_custom_window_chrome(cdp)
         assert_desktop_interaction_polish(cdp)
         assert_focus_visible(cdp)
-        inject_dual_core_traffic(cdp)
         assert_dual_core_chart(cdp)
         cdp.screenshot(output_dir / "overview-desktop.png")
         if startup_only:

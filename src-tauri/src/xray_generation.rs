@@ -924,10 +924,31 @@ impl GenerationRuntime {
         &mut self,
         backend: &mut B,
     ) -> Result<GenerationStatus, ApplyFailure> {
+        self.execute_latest_with_proxy(backend, true)
+    }
+
+    pub fn execute_latest_isolated<B: ApplyBackend>(
+        &mut self,
+        backend: &mut B,
+    ) -> Result<GenerationStatus, ApplyFailure> {
+        self.execute_latest_with_proxy(backend, false)
+    }
+
+    fn execute_latest_with_proxy<B: ApplyBackend>(
+        &mut self,
+        backend: &mut B,
+        allow_proxy_mutation: bool,
+    ) -> Result<GenerationStatus, ApplyFailure> {
         let mut plan = self.begin_apply()?;
-        plan.proxy_snapshot = match backend.capture_proxy_snapshot() {
-            Ok(snapshot) => snapshot,
-            Err(_) => return self.finish_proxy_uncertain(plan, ApplyFailure::ProxyRestoreFailed),
+        plan.proxy_snapshot = if allow_proxy_mutation {
+            match backend.capture_proxy_snapshot() {
+                Ok(snapshot) => snapshot,
+                Err(_) => {
+                    return self.finish_proxy_uncertain(plan, ApplyFailure::ProxyRestoreFailed)
+                }
+            }
+        } else {
+            None
         };
         let config_lease = match self.store.stage(&plan) {
             Ok(lease) => lease,
@@ -995,17 +1016,31 @@ impl GenerationRuntime {
             return self.cleanup_candidate_and_rollback(plan, backend, candidate, failure, false);
         }
         self.set_desired_readiness(&plan, ReadinessLevel::ListenerReady)?;
-        let egress_verified = backend
-            .confirm_egress_ready(
-                plan.generation_id(),
-                &candidate,
-                plan.managed_listener_addresses(),
-                &plan.desired.egress_probe,
-            )
-            .map_err(|failure| match failure {
-                BackendFailure::Cancelled => ApplyFailure::Cancelled,
-                BackendFailure::Failed => ApplyFailure::EgressReadinessFailed,
-            })?;
+        let egress_verified = match backend.confirm_egress_ready(
+            plan.generation_id(),
+            &candidate,
+            plan.managed_listener_addresses(),
+            &plan.desired.egress_probe,
+        ) {
+            Ok(verified) => verified,
+            Err(failure) => {
+                let failure = match failure {
+                    BackendFailure::Cancelled => ApplyFailure::Cancelled,
+                    BackendFailure::Failed => ApplyFailure::EgressReadinessFailed,
+                };
+                return self
+                    .cleanup_candidate_and_rollback(plan, backend, candidate, failure, false);
+            }
+        };
+        if !egress_verified && plan.desired.egress_probe.is_configured() {
+            return self.cleanup_candidate_and_rollback(
+                plan,
+                backend,
+                candidate,
+                ApplyFailure::EgressReadinessFailed,
+                false,
+            );
+        }
         if egress_verified {
             let post_egress_failure = self
                 .require_current(&plan)
@@ -1067,12 +1102,45 @@ impl GenerationRuntime {
         &mut self,
         backend: &mut B,
     ) -> Result<GenerationStatus, ApplyFailure> {
+        self.stop_active_with_proxy(backend, true)
+    }
+
+    pub fn stop_active_isolated<B: ApplyBackend>(
+        &mut self,
+        backend: &mut B,
+    ) -> Result<GenerationStatus, ApplyFailure> {
+        self.stop_active_with_proxy(backend, false)
+    }
+
+    pub fn finish_isolated(&mut self) -> Result<GenerationStatus, ApplyFailure> {
+        if self.in_flight_transaction.is_some()
+            || self.active_handle.is_some()
+            || self.active.is_some()
+            || self.proxy_generation.is_some()
+        {
+            return Err(ApplyFailure::Busy);
+        }
+        self.desired = None;
+        self.phase = GenerationPhase::Idle;
+        self.last_error_code = None;
+        Ok(self.status())
+    }
+
+    fn stop_active_with_proxy<B: ApplyBackend>(
+        &mut self,
+        backend: &mut B,
+        allow_proxy_mutation: bool,
+    ) -> Result<GenerationStatus, ApplyFailure> {
         if self.in_flight_transaction.is_some() {
             return Err(ApplyFailure::Busy);
         }
-        let snapshot = backend
-            .capture_proxy_snapshot()
-            .map_err(|_| ApplyFailure::ProxyRestoreFailed)?;
+        let snapshot = if allow_proxy_mutation {
+            backend
+                .capture_proxy_snapshot()
+                .map_err(|_| ApplyFailure::ProxyRestoreFailed)?
+        } else {
+            None
+        };
         if let Some(snapshot) = snapshot {
             if !matches!(
                 backend.restore_proxy_snapshot(&snapshot),
@@ -3486,6 +3554,144 @@ mod tests {
             .position(|event| event.starts_with("rollback:"))
             .unwrap();
         assert!(stop < exit && exit < rollback);
+    }
+
+    #[test]
+    fn egress_error_cleans_candidate_transaction_and_temporary_config() {
+        let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let mut backend = FakeBackend {
+            egress_failure: Some(BackendFailure::Failed),
+            ..FakeBackend::default()
+        };
+        select(&mut runtime, "B", 2);
+
+        assert_eq!(
+            runtime.execute_latest(&mut backend),
+            Err(ApplyFailure::EgressReadinessFailed)
+        );
+        let status = runtime.status();
+        assert!(status.active.is_none());
+        assert!(status.proxy_generation.is_none());
+        assert_eq!(status.phase, GenerationPhase::Degraded);
+        assert!(runtime.active_handle.is_none());
+        assert!(runtime.in_flight_transaction.is_none());
+        assert!(backend.live.is_empty());
+        assert!(generation_files(&runtime.store.root).is_empty());
+        let egress = backend
+            .events
+            .iter()
+            .position(|event| event == "egressReady")
+            .unwrap();
+        let stop = backend
+            .events
+            .iter()
+            .position(|event| event.starts_with("stopCandidate:"))
+            .unwrap();
+        let exit = backend
+            .events
+            .iter()
+            .position(|event| event.starts_with("confirmExit:candidate:"))
+            .unwrap();
+        assert!(egress < stop && stop < exit);
+
+        backend.egress_failure = None;
+        let retry = runtime.execute_latest(&mut backend).unwrap();
+        assert!(retry.active.is_some());
+        assert!(runtime.active_handle.is_some());
+        assert_eq!(backend.live.len(), 1);
+        runtime.stop_active(&mut backend).unwrap();
+        assert!(runtime.active_handle.is_none());
+        assert!(backend.live.is_empty());
+    }
+
+    #[test]
+    fn configured_false_egress_cleans_candidate_transaction_and_temporary_config() {
+        let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let mut backend = FakeBackend {
+            egress_verified: false,
+            ..FakeBackend::default()
+        };
+        select(&mut runtime, "B", 2);
+
+        assert_eq!(
+            runtime.execute_latest(&mut backend),
+            Err(ApplyFailure::EgressReadinessFailed)
+        );
+        let status = runtime.status();
+        assert!(status.active.is_none());
+        assert!(status.proxy_generation.is_none());
+        assert_eq!(status.phase, GenerationPhase::Degraded);
+        assert!(runtime.active_handle.is_none());
+        assert!(runtime.in_flight_transaction.is_none());
+        assert!(backend.live.is_empty());
+        assert!(generation_files(&runtime.store.root).is_empty());
+        assert!(backend
+            .events
+            .iter()
+            .any(|event| event.starts_with("stopCandidate:")));
+        assert!(backend
+            .events
+            .iter()
+            .any(|event| event.starts_with("confirmExit:candidate:")));
+    }
+
+    #[test]
+    fn isolated_apply_and_stop_preserve_three_system_proxy_initial_states() {
+        let cases = [
+            (false, ProxyReadback::Restored),
+            (true, ProxyReadback::Restored),
+            (true, ProxyReadback::Unknown),
+        ];
+        for (proxy_enabled, restore_readback) in cases {
+            let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            let mut backend = FakeBackend {
+                proxy_enabled,
+                restore_readback: restore_readback.clone(),
+                ..FakeBackend::default()
+            };
+            select(&mut runtime, "B", 2);
+
+            let status = runtime.execute_latest_isolated(&mut backend).unwrap();
+            assert!(status.active.is_some());
+            assert!(status.proxy_generation.is_none());
+            assert!(!status.proxy_ready);
+            assert_eq!(backend.proxy_enabled, proxy_enabled);
+            assert_eq!(backend.restore_readback, restore_readback);
+            assert!(!backend.events.iter().any(|event| {
+                matches!(
+                    event.as_str(),
+                    "captureProxy" | "restoreProxy" | "bindProxy"
+                )
+            }));
+
+            runtime.stop_active_isolated(&mut backend).unwrap();
+            let status = runtime.finish_isolated().unwrap();
+            assert!(status.desired.is_none());
+            assert!(status.active.is_none());
+            assert_eq!(status.phase, GenerationPhase::Idle);
+            assert!(runtime.active_handle.is_none());
+            assert!(backend.live.is_empty());
+            assert_eq!(backend.proxy_enabled, proxy_enabled);
+            assert_eq!(backend.restore_readback, restore_readback);
+            assert!(!backend.events.iter().any(|event| {
+                matches!(
+                    event.as_str(),
+                    "captureProxy" | "restoreProxy" | "bindProxy"
+                )
+            }));
+        }
+    }
+
+    #[test]
+    fn isolated_finish_refuses_to_hide_a_live_generation() {
+        let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let mut backend = FakeBackend::default();
+        select(&mut runtime, "B", 2);
+        runtime.execute_latest_isolated(&mut backend).unwrap();
+
+        assert_eq!(runtime.finish_isolated(), Err(ApplyFailure::Busy));
+        assert!(runtime.status().active.is_some());
+        assert_eq!(backend.live.len(), 1);
     }
 
     #[test]
