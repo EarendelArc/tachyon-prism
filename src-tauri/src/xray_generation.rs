@@ -1112,6 +1112,20 @@ impl GenerationRuntime {
         self.stop_active_with_proxy(backend, false)
     }
 
+    pub fn finish_isolated(&mut self) -> Result<GenerationStatus, ApplyFailure> {
+        if self.in_flight_transaction.is_some()
+            || self.active_handle.is_some()
+            || self.active.is_some()
+            || self.proxy_generation.is_some()
+        {
+            return Err(ApplyFailure::Busy);
+        }
+        self.desired = None;
+        self.phase = GenerationPhase::Idle;
+        self.last_error_code = None;
+        Ok(self.status())
+    }
+
     fn stop_active_with_proxy<B: ApplyBackend>(
         &mut self,
         backend: &mut B,
@@ -3651,7 +3665,10 @@ mod tests {
             }));
 
             runtime.stop_active_isolated(&mut backend).unwrap();
-            assert!(runtime.status().active.is_none());
+            let status = runtime.finish_isolated().unwrap();
+            assert!(status.desired.is_none());
+            assert!(status.active.is_none());
+            assert_eq!(status.phase, GenerationPhase::Idle);
             assert!(runtime.active_handle.is_none());
             assert!(backend.live.is_empty());
             assert_eq!(backend.proxy_enabled, proxy_enabled);
@@ -3663,6 +3680,18 @@ mod tests {
                 )
             }));
         }
+    }
+
+    #[test]
+    fn isolated_finish_refuses_to_hide_a_live_generation() {
+        let mut runtime = runtime("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let mut backend = FakeBackend::default();
+        select(&mut runtime, "B", 2);
+        runtime.execute_latest_isolated(&mut backend).unwrap();
+
+        assert_eq!(runtime.finish_isolated(), Err(ApplyFailure::Busy));
+        assert!(runtime.status().active.is_some());
+        assert_eq!(backend.live.len(), 1);
     }
 
     #[test]

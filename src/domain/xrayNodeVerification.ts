@@ -6,6 +6,7 @@ export type XrayNodeVerificationCode =
   | "probe-failed"
   | "start-failed"
   | "success"
+  | "unsupported"
   | "xray-busy";
 
 export interface XrayNodeVerificationResult {

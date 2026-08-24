@@ -94,6 +94,24 @@ describe("isolated Xray node verification", () => {
     expect(subject.verify).toHaveBeenCalledOnce();
   });
 
+  it("preserves an unsupported Web Preview result", async () => {
+    const subject = operations({
+      verify: vi.fn(async () => ({
+        ...success(),
+        code: "unsupported" as const,
+        ok: false,
+        report: null,
+      })),
+    });
+
+    await expect(verifySelectedXrayNode(subject)).resolves.toEqual({
+      ...success(),
+      code: "unsupported",
+      ok: false,
+      report: null,
+    });
+  });
+
   it("preserves a failed native probe report", async () => {
     const failed = {
       ...passedReport,

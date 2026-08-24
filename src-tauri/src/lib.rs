@@ -1298,6 +1298,10 @@ impl XrayCoordinator {
         if generation_status.active.is_none() {
             if !isolated {
                 self.set_proxy_binding(app, proxy, false)?;
+            } else {
+                self.generations
+                    .finish_isolated()
+                    .map_err(generation_apply_error)?;
             }
             return Ok(process_status);
         }
@@ -1328,7 +1332,9 @@ impl XrayCoordinator {
             settings,
         };
         if isolated {
-            generations.stop_active_isolated(&mut backend)
+            generations
+                .stop_active_isolated(&mut backend)
+                .and_then(|_| generations.finish_isolated())
         } else {
             generations.stop_active(&mut backend)
         }
@@ -2349,8 +2355,7 @@ fn verify_xray_node(
             )
             .is_err()
         {
-            let cleanup_failed = coordinator.processes.xray.status().state == "running"
-                && coordinator.stop_xray_isolated(&app, &proxy_state).is_err();
+            let cleanup_failed = coordinator.stop_xray_isolated(&app, &proxy_state).is_err();
             if !cleanup_failed {
                 coordinator.xray_config_authorization = previous_authorization;
             }

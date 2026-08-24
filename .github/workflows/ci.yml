@@ -151,6 +151,99 @@ jobs:
           compression-level: 0
           retention-days: 14
 
+  native-e2e:
+    name: Native Xray E2E (windows-x64)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      XRAY_VERSION: v26.3.27
+      XRAY_WINDOWS_SHA256: d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.3
+
+      - name: Setup Node
+        uses: actions/setup-node@v5.0.0
+        with:
+          node-version: "26.4.0"
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.96.1
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install application and E2E dependencies
+        run: |
+          npm ci
+          python -m pip install --disable-pip-version-check pillow websocket-client
+
+      - name: Install pinned and checksummed Xray
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archive = Join-Path $env:RUNNER_TEMP "Xray-windows-64.zip"
+          $digestFile = "$archive.dgst"
+          $installDir = Join-Path $env:GITHUB_WORKSPACE "artifacts/xray-live-cache/$env:XRAY_VERSION/extracted"
+          $releaseUrl = "https://github.com/XTLS/Xray-core/releases/download/$env:XRAY_VERSION"
+          curl.exe --fail --location --retry 3 --retry-all-errors --connect-timeout 10 --max-time 120 --output $archive "$releaseUrl/Xray-windows-64.zip"
+          curl.exe --fail --location --retry 3 --retry-all-errors --connect-timeout 10 --max-time 60 --output $digestFile "$releaseUrl/Xray-windows-64.zip.dgst"
+          $digestLine = Get-Content -LiteralPath $digestFile | Where-Object { $_ -match '^SHA2-256= [0-9a-fA-F]{64}$' } | Select-Object -First 1
+          if (-not $digestLine) { throw "official Xray SHA2-256 digest missing" }
+          $expected = ($digestLine -split '= ', 2)[1].ToLowerInvariant()
+          $pinned = $env:XRAY_WINDOWS_SHA256.ToLowerInvariant()
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($expected -ne $pinned) { throw "official Xray checksum differs from pinned CI contract" }
+          if ($actual -ne $pinned) { throw "Xray checksum mismatch: expected=$pinned actual=$actual" }
+          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+          Expand-Archive -LiteralPath $archive -DestinationPath $installDir -Force
+          $xray = Join-Path $installDir "xray.exe"
+          & $xray version
+          "TACHYON_XRAY_BINARY_PATH=$xray" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build real Prism release executable
+        timeout-minutes: 15
+        run: npm run build -- --no-bundle
+
+      - name: Run native subscription-to-dual-proxy E2E
+        timeout-minutes: 6
+        shell: pwsh
+        run: python scripts/prism_tauri_integration_smoke.py --timeout 270 --xray "$env:TACHYON_XRAY_BINARY_PATH"
+
+      - name: Assert native E2E result contract
+        if: always()
+        shell: pwsh
+        run: |
+          $resultPath = "artifacts/tauri-integration-smoke/RESULT.json"
+          if (-not (Test-Path -LiteralPath $resultPath)) { throw "native E2E RESULT.json missing" }
+          $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+          if ($result.status -ne "passed") { throw "native E2E did not pass: $($result.failure.message)" }
+          if ($result.head -ne $env:GITHUB_SHA) { throw "RESULT head $($result.head) != GITHUB_SHA $env:GITHUB_SHA" }
+          $verification = $result.ipc.isolatedNodeVerification
+          if ($verification.selectedUpstreamIngress.delta -ne 2) { throw "selected upstream ingress delta != 2" }
+          if ($verification.fixtureRequests -ne 2) { throw "fixture delta != 2" }
+          if (-not $verification.negativeControl.verificationFailed) { throw "negative control did not fail" }
+          if ($verification.negativeControl.fixtureDelta -ne 0) { throw "negative control bypassed selected upstream" }
+          if (-not $verification.negativeControl.recovery.generationIdle -or -not $verification.negativeControl.recovery.processStopped -or -not $verification.negativeControl.recovery.portsClosed -or -not $verification.negativeControl.recovery.tempClean -or -not $verification.negativeControl.recovery.systemProxyUnchanged) { throw "failed verification did not fully recover" }
+          if (-not $verification.retrySucceeded) { throw "post-failure retry did not succeed" }
+          if (-not $verification.successfulRecovery.generationIdle -or -not $verification.successfulRecovery.processStopped -or -not $verification.successfulRecovery.portsClosed -or -not $verification.successfulRecovery.tempClean -or -not $verification.successfulRecovery.systemProxyUnchanged) { throw "successful verification did not fully recover" }
+          $safety = $result.diagnostics.networkSafety
+          if ($safety.proxyCommandsInvoked -or $safety.tunAutoRouteRequested -or $safety.tunDnsHijackRequested) { throw "native E2E attempted system proxy or TUN mutation" }
+
+      - name: Upload native E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: tachyon-prism-native-e2e-${{ github.sha }}
+          path: artifacts/tauri-integration-smoke/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
   core-contract:
     name: Core contract (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
@@ -414,6 +507,7 @@ jobs:
       - typecheck
       - xray-contract
       - ui-evidence
+      - native-e2e
       - core-contract
       - system-keyring-live
       - rust
@@ -425,6 +519,7 @@ jobs:
           TYPECHECK_RESULT: ${{ needs.typecheck.result }}
           XRAY_CONTRACT_RESULT: ${{ needs.xray-contract.result }}
           UI_EVIDENCE_RESULT: ${{ needs.ui-evidence.result }}
+          NATIVE_E2E_RESULT: ${{ needs.native-e2e.result }}
           CORE_CONTRACT_RESULT: ${{ needs.core-contract.result }}
           SYSTEM_KEYRING_RESULT: ${{ needs.system-keyring-live.result }}
           RUST_RESULT: ${{ needs.rust.result }}
@@ -437,6 +532,7 @@ jobs:
               "typecheck": os.environ["TYPECHECK_RESULT"],
               "xray-contract": os.environ["XRAY_CONTRACT_RESULT"],
               "ui-evidence": os.environ["UI_EVIDENCE_RESULT"],
+              "native-e2e": os.environ["NATIVE_E2E_RESULT"],
               "core-contract": os.environ["CORE_CONTRACT_RESULT"],
               "system-keyring-live": os.environ["SYSTEM_KEYRING_RESULT"],
               "rust": os.environ["RUST_RESULT"],

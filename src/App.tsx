@@ -523,6 +523,7 @@ const zh = {
   xrayVerifyProbeFailed: "当前节点未通过 HTTP/SOCKS 双入口验证",
   xrayVerifyStartFailed: "无法生成、校验或启动当前节点的 Xray 配置",
   xrayVerifySuccess: "当前节点验证通过，临时 Xray 已停止",
+  xrayVerifyUnsupported: "Web 预览不支持真实节点验证；请在 Prism 桌面应用中运行",
   xrayVerifyRunning: "正在生成配置并通过临时 Xray 验证当前节点...",
   xrayVerifyXrayBusy: "Xray 正在运行；请先停止当前会话再进行隔离验证",
   notConfigured: "未配置",
@@ -976,6 +977,7 @@ const en: typeof zh = {
   xrayVerifyProbeFailed: "The selected node failed the HTTP/SOCKS dual-inbound check",
   xrayVerifyStartFailed: "Could not generate, validate, or start the selected node's Xray config",
   xrayVerifySuccess: "Selected node verified; the temporary Xray process has stopped",
+  xrayVerifyUnsupported: "Real node verification is unsupported in Web Preview. Run it in the Prism desktop app.",
   xrayVerifyRunning: "Generating config and verifying the selected node with a temporary Xray process...",
   xrayVerifyXrayBusy: "Xray is running. Stop the current session before isolated verification.",
   notConfigured: "Not configured",
@@ -1328,6 +1330,8 @@ function xrayNodeVerificationMessage(
       return ui.xrayVerifyStartFailed;
     case "success":
       return report ? `${ui.xrayVerifySuccess}: ${proxyProbeMessage(report, ui)}` : ui.xrayVerifySuccess;
+    case "unsupported":
+      return ui.xrayVerifyUnsupported;
     case "xray-busy":
       return ui.xrayVerifyXrayBusy;
     default:

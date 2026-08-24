@@ -206,6 +206,24 @@ describe("testXrayLocalProxies", () => {
 });
 
 describe("verifyXrayNode", () => {
+  it("fails explicitly as unsupported outside Tauri", async () => {
+    const request = {
+      configDigest: "a".repeat(64),
+      contents: "{}",
+      nodeId: "node-a",
+      requestToken: "request-a",
+    };
+
+    await expect(verifyXrayNode(request)).resolves.toEqual({
+      code: "unsupported",
+      configDigest: request.configDigest,
+      nodeId: request.nodeId,
+      ok: false,
+      report: null,
+      requestToken: request.requestToken,
+    });
+  });
+
   it("passes node, canonical digest, and request token through native IPC", async () => {
     root.isTauri = true;
     const request = {

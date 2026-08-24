@@ -824,18 +824,52 @@ def wait_for_tcp_listener(process: subprocess.Popen[Any], port: int, timeout: fl
     raise RuntimeError(f"Xray upstream did not listen on 127.0.0.1:{port}: {last_error}")
 
 
+def tcp_listener_open(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def xray_access_lines(path: Path) -> list[str]:
+    try:
+        return [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except FileNotFoundError:
+        return []
+
+
+def request_fixture_direct(port: int) -> None:
+    with socket.create_connection(("127.0.0.1", port), timeout=2) as connection:
+        connection.sendall(
+            b"GET /generate_204 HTTP/1.1\r\nHost: fixture.invalid\r\nConnection: close\r\n\r\n"
+        )
+        response = b""
+        while b"\r\n" not in response:
+            chunk = connection.recv(4096)
+            if not chunk:
+                break
+            response += chunk
+    assert_true(
+        response.startswith(b"HTTP/1.0 204") or response.startswith(b"HTTP/1.1 204"),
+        f"fixture direct control was not reachable: {response[:120]!r}",
+    )
+
+
 def start_xray_socks_upstream(
     xray: Path,
     port: int,
     target_port: int,
     output_dir: Path,
     context: RunContext,
-) -> subprocess.Popen[Any]:
+) -> tuple[subprocess.Popen[Any], Path]:
     config_path = output_dir / "xray-selected-node-upstream.json"
+    access_log = output_dir / "xray-selected-node.access.log"
+    access_log.unlink(missing_ok=True)
     config_path.write_text(
         json.dumps(
             {
-                "log": {"loglevel": "warning"},
+                "log": {"access": str(access_log), "loglevel": "warning"},
                 "inbounds": [
                     {
                         "tag": "selected-node-inbound",
@@ -872,7 +906,105 @@ def start_xray_socks_upstream(
     context.owned_processes.append(process)
     wait_for_tcp_listener(process, port)
     context.log(f"SELECTED NODE XRAY READY pid={process.pid} socks=127.0.0.1:{port}")
-    return process
+    return process, access_log
+
+
+def run_ui_node_verification(cdp: CDP, context: RunContext, label: str) -> dict[str, Any]:
+    before = str(
+        cdp.evaluate("document.querySelector('.proxy-probe-panel')?.textContent ?? ''")
+    )
+    click = cdp.evaluate(
+        """
+        (() => {
+          const button = document.querySelector('.proxy-probe-panel header button');
+          if (!button) return { clicked: false, reason: 'verification button missing' };
+          if (button.disabled) return { clicked: false, reason: 'verification button disabled' };
+          button.click();
+          return { clicked: true, label: button.textContent?.trim() ?? '' };
+        })()
+        """
+    )
+    assert_true(click.get("clicked"), f"{label} did not start: {click}")
+
+    deadline = time.monotonic() + 35
+    state = None
+    while time.monotonic() < deadline:
+        context.check_deadline(label)
+        state = cdp.evaluate(
+            """
+            (() => ({
+              buttonDisabled: Boolean(document.querySelector('.proxy-probe-panel header button')?.disabled),
+              panelClass: document.querySelector('.proxy-probe-panel')?.className ?? '',
+              text: document.querySelector('.proxy-probe-panel')?.textContent ?? '',
+              rows: Array.from(document.querySelectorAll('.proxy-probe-row')).map((row) => ({
+                className: row.className,
+                text: row.textContent ?? ''
+              }))
+            }))()
+            """
+        )
+        terminal = " ok" in state["panelClass"] or " error" in state["panelClass"]
+        if terminal and not state["buttonDisabled"] and state["text"] != before:
+            return state
+        time.sleep(0.2)
+    raise AssertionError(f"{label} did not reach a new terminal UI state: {state}")
+
+
+def verification_temp_residue(config_dir: Path, canonical_path: Path) -> list[str]:
+    generation_dir = config_dir / "xray-generations"
+    residue = [str(path) for path in generation_dir.glob("generation-*.json")]
+    for name in ("orphan-journal.json", "orphan-recovery-failed.json"):
+        path = generation_dir / name
+        if path.exists():
+            residue.append(str(path))
+    residue.extend(
+        str(path)
+        for path in canonical_path.parent.glob(f".{canonical_path.stem}.*.tmp{canonical_path.suffix}")
+    )
+    return sorted(residue)
+
+
+def assert_isolated_verification_recovered(
+    cdp: CDP,
+    context: RunContext,
+    *,
+    canonical_path: Path,
+    config_dir: Path,
+    listener_ports: tuple[int, int],
+    proxy_before: dict[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    generation = invoke(cdp, context, "xray_generation_status")
+    runtime = invoke(cdp, context, "runtime_status")
+    proxy_after = system_proxy_mutation_snapshot(invoke(cdp, context, "system_proxy_query"))
+    residue = verification_temp_residue(config_dir, canonical_path)
+    open_ports = [port for port in listener_ports if tcp_listener_open(port)]
+    assert_true(
+        generation.get("desired") is None
+        and generation.get("active") is None
+        and generation.get("proxyGeneration") is None
+        and generation.get("phase") == "idle"
+        and generation.get("proxyReady") is False
+        and generation.get("lastErrorCode") is None,
+        f"{label} left generation state: {generation}",
+    )
+    assert_true(
+        runtime["xray"]["state"] == "stopped" and runtime["xray"].get("pid") is None,
+        f"{label} left the product Xray process active: {runtime['xray']}",
+    )
+    assert_true(not open_ports, f"{label} left product listeners open: {open_ports}")
+    assert_true(not residue, f"{label} left verification temp files: {residue}")
+    assert_true(
+        proxy_after == proxy_before,
+        f"{label} mutated system proxy: before={proxy_before}, after={proxy_after}",
+    )
+    return {
+        "generationIdle": True,
+        "processStopped": True,
+        "portsClosed": True,
+        "systemProxyUnchanged": True,
+        "tempClean": True,
+    }
 
 
 def system_proxy_mutation_snapshot(query: dict[str, Any]) -> dict[str, Any]:
@@ -890,7 +1022,13 @@ def system_proxy_mutation_snapshot(query: dict[str, Any]) -> dict[str, Any]:
 def verify_selected_local_xray_node(
     cdp: CDP,
     context: RunContext,
+    xray: Path,
     upstream_port: int,
+    fixture_port: int,
+    output_dir: Path,
+    config_dir: Path,
+    canonical_path: Path,
+    listener_ports: tuple[int, int],
 ) -> dict[str, Any]:
     navigate_hash(cdp, "subscriptions")
     add = click_add_subscription(cdp)
@@ -996,84 +1134,82 @@ def verify_selected_local_xray_node(
     assert_true(bool(selected_node_id), f"secure vault did not persist selected node: {vault}")
     navigate_hash(cdp, "overview")
     proxy_before = system_proxy_mutation_snapshot(invoke(cdp, context, "system_proxy_query"))
-    fixture_before = QuietHandler.request_count("/generate_204")
-    click = cdp.evaluate(
-        """
-        (() => {
-          const button = document.querySelector('.proxy-probe-panel header button');
-          if (!button) return { clicked: false, reason: 'verification button missing' };
-          if (button.disabled) return { clicked: false, reason: 'verification button disabled' };
-          button.click();
-          return { clicked: true, label: button.textContent?.trim() ?? '' };
-        })()
-        """
+    assert_true(
+        not tcp_listener_open(upstream_port),
+        f"negative-control selected upstream unexpectedly reachable: 127.0.0.1:{upstream_port}",
     )
-    assert_true(click.get("clicked"), f"UI node verification did not start: {click}")
+    request_fixture_direct(fixture_port)
+    fixture_before_failure = QuietHandler.request_count("/generate_204")
+    failed_state = run_ui_node_verification(cdp, context, "negative-control node verification")
+    assert_true(
+        " error" in failed_state["panelClass"] and " ok" not in failed_state["panelClass"],
+        f"unreachable selected upstream did not fail verification: {failed_state}",
+    )
+    fixture_after_failure = QuietHandler.request_count("/generate_204")
+    assert_true(
+        fixture_after_failure == fixture_before_failure,
+        "negative verification reached the directly available fixture without its selected upstream",
+    )
+    failed_recovery = assert_isolated_verification_recovered(
+        cdp,
+        context,
+        canonical_path=canonical_path,
+        config_dir=config_dir,
+        listener_ports=listener_ports,
+        proxy_before=proxy_before,
+        label="failed isolated verification",
+    )
 
-    deadline = time.monotonic() + 35
-    ui_state = None
-    while time.monotonic() < deadline:
-        context.check_deadline("UI selected-node verification")
-        ui_state = cdp.evaluate(
-            """
-            (() => ({
-              panelClass: document.querySelector('.proxy-probe-panel')?.className ?? '',
-              text: document.querySelector('.proxy-probe-panel')?.textContent ?? '',
-              rows: Array.from(document.querySelectorAll('.proxy-probe-row')).map((row) => ({
-                className: row.className,
-                text: row.textContent ?? ''
-              }))
-            }))()
-            """
-        )
-        if " ok" in ui_state["panelClass"] or " error" in ui_state["panelClass"]:
-            break
-        time.sleep(0.2)
-    assert_true(ui_state is not None, "UI verification state was unavailable")
-    if " ok" not in ui_state["panelClass"]:
+    upstream_process, access_log = start_xray_socks_upstream(
+        xray, upstream_port, fixture_port, output_dir, context
+    )
+    ingress_before = len(xray_access_lines(access_log))
+    fixture_before = QuietHandler.request_count("/generate_204")
+    passed_state = run_ui_node_verification(cdp, context, "retry node verification")
+    if " ok" not in passed_state["panelClass"]:
         diagnostic = {
-            "ui": ui_state,
+            "ui": passed_state,
             "managedConfig": managed_config,
             "generation": invoke(cdp, context, "xray_generation_status"),
             "runtime": invoke(cdp, context, "runtime_status"),
             "logs": invoke(cdp, context, "runtime_process_logs", {"kind": "xray"}),
         }
-        raise AssertionError(f"UI verification failed: {diagnostic}")
+        raise AssertionError(f"retry UI verification failed: {diagnostic}")
     assert_true(
-        len(ui_state["rows"]) == 2
-        and all(" ok" in row["className"] for row in ui_state["rows"]),
-        f"HTTP/SOCKS rows were not both successful: {ui_state}",
+        len(passed_state["rows"]) == 2
+        and all(" ok" in row["className"] for row in passed_state["rows"]),
+        f"HTTP/SOCKS rows were not both successful: {passed_state}",
     )
     fixture_after = QuietHandler.request_count("/generate_204")
     assert_true(
-        fixture_after - fixture_before >= 2,
-        f"dual proxies did not both reach the fixture: before={fixture_before}, after={fixture_after}",
+        fixture_after - fixture_before == 2,
+        f"fixture delta was not exactly +2: before={fixture_before}, after={fixture_after}",
     )
-
-    generation = invoke(cdp, context, "xray_generation_status")
-    desired = generation.get("desired") or {}
-    digest = str(desired.get("configSha256") or "")
-    assert_true(desired.get("nodeId") == selected_node_id, f"generation node identity mismatch: {generation}")
+    deadline = time.monotonic() + 4
+    ingress_after = len(xray_access_lines(access_log))
+    while ingress_after - ingress_before < 2 and time.monotonic() < deadline:
+        time.sleep(0.1)
+        ingress_after = len(xray_access_lines(access_log))
     assert_true(
-        len(digest) == 64 and desired.get("routingRevision") == digest,
-        f"generation config identity mismatch: {generation}",
+        ingress_after - ingress_before == 2,
+        f"selected Xray SOCKS ingress delta was not exactly +2: before={ingress_before}, after={ingress_after}",
     )
-    assert_true(
-        generation.get("active") is None
-        and generation.get("proxyGeneration") is None
-        and generation.get("proxyReady") is False,
-        f"isolated verification left runtime state: {generation}",
+    passed_recovery = assert_isolated_verification_recovered(
+        cdp,
+        context,
+        canonical_path=canonical_path,
+        config_dir=config_dir,
+        listener_ports=listener_ports,
+        proxy_before=proxy_before,
+        label="successful isolated verification",
     )
-
-    proxy_after = system_proxy_mutation_snapshot(invoke(cdp, context, "system_proxy_query"))
-    assert_true(
-        proxy_after == proxy_before,
-        f"isolated verification mutated system proxy state: before={proxy_before}, after={proxy_after}",
-    )
+    new_access_lines = xray_access_lines(access_log)[ingress_before:ingress_after]
+    ingress_digest = hashlib.sha256("\n".join(new_access_lines).encode("utf-8")).hexdigest()
+    stop_process(upstream_process, context, "selected upstream evidence complete")
+    assert_true(not tcp_listener_open(upstream_port), "selected upstream did not stop after evidence")
     return {
         "status": "passed",
         "nodeId": selected_node_id,
-        "configDigest": digest,
         "requestTokenBound": True,
         "routingMode": "direct",
         "selectedOutbound": "socks",
@@ -1081,6 +1217,22 @@ def verify_selected_local_xray_node(
         "http": True,
         "socks": True,
         "fixtureRequests": fixture_after - fixture_before,
+        "negativeControl": {
+            "directFixtureReachable": True,
+            "selectedUpstreamReachable": False,
+            "verificationFailed": True,
+            "fixtureDelta": fixture_after_failure - fixture_before_failure,
+            "recovery": failed_recovery,
+        },
+        "selectedUpstreamIngress": {
+            "before": ingress_before,
+            "after": ingress_after,
+            "delta": ingress_after - ingress_before,
+            "evidenceSha256": ingress_digest,
+            "source": access_log.name,
+        },
+        "retrySucceeded": True,
+        "successfulRecovery": passed_recovery,
         "systemProxyUnchanged": True,
     }
 
@@ -1115,6 +1267,13 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
                 raise FileNotFoundError(f"Xray executable not found: {xray}")
             head = current_head()
             context.result["head"] = head
+            expected_head = os.environ.get("GITHUB_SHA", "").strip()
+            context.result["expectedHead"] = expected_head or None
+            if expected_head:
+                assert_true(
+                    head == expected_head,
+                    f"native E2E HEAD mismatch: result={head}, GITHUB_SHA={expected_head}",
+                )
             executable_stat = executable.stat()
             xray_stat = xray.stat()
             context.result["buildExecutable"].update(
@@ -1262,12 +1421,17 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
             assert_true(first_read == {"exists": True, "contents": valid_config}, "valid commit mismatch")
 
             selected_node_port = free_port()
-            start_xray_socks_upstream(xray, selected_node_port, server_port, output_dir, context)
             context.result["diagnostics"]["networkSafety"]["isolatedXrayVerificationInvoked"] = True
             verification_e2e = verify_selected_local_xray_node(
                 cdp,
                 context,
+                xray,
                 selected_node_port,
+                server_port,
+                output_dir,
+                Path(paths["configDir"]),
+                canonical_path,
+                (saved_settings["xraySocksPort"], saved_settings["xrayHttpPort"]),
             )
             after_verification = invoke(cdp, context, "read_canonical_xray_config")
             assert_true(after_verification == first_read, "isolated verification changed canonical config")

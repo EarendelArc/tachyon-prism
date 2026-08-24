@@ -1673,6 +1673,67 @@ def assert_local_proxy_probe_panel(cdp: CDP) -> None:
     rows = state["rows"]
     if len(rows) != 2 or not any("HTTP" in row for row in rows) or not any("SOCKS" in row for row in rows):
         raise AssertionError(f"local proxy probe rows missing: {state}")
+    english = cdp.evaluate(
+        """
+        new Promise((resolve) => {
+          document.querySelector('.proxy-probe-panel header button')?.click();
+          setTimeout(() => resolve({
+            className: document.querySelector('.proxy-probe-panel')?.className ?? '',
+            text: document.querySelector('.proxy-probe-panel')?.textContent ?? ''
+          }), 350);
+        })
+        """,
+        await_promise=True,
+    )
+    if " error" not in english["className"] or (
+        "Real node verification is unsupported in Web Preview" not in english["text"]
+    ):
+        raise AssertionError(f"Web Preview verification was not explicitly unsupported in English: {english}")
+
+    chinese = cdp.evaluate(
+        """
+        new Promise((resolve) => {
+          location.hash = 'settings';
+          setTimeout(() => {
+            document.querySelectorAll('.settings-sidebar button')[0]?.click();
+            setTimeout(() => {
+              const language = Array.from(document.querySelectorAll('button'))
+                .find((button) => button.textContent.trim() === '简体中文');
+              if (!language) throw new Error('Chinese language button missing');
+              language.click();
+              setTimeout(() => {
+                location.hash = 'overview';
+                setTimeout(() => {
+                  document.querySelector('.proxy-probe-panel header button')?.click();
+                  setTimeout(() => resolve({
+                    className: document.querySelector('.proxy-probe-panel')?.className ?? '',
+                    text: document.querySelector('.proxy-probe-panel')?.textContent ?? ''
+                  }), 350);
+                }, 350);
+              }, 350);
+            }, 350);
+          }, 350);
+        })
+        """,
+        await_promise=True,
+    )
+    if " error" not in chinese["className"] or (
+        "Web 预览不支持真实节点验证" not in chinese["text"]
+    ):
+        raise AssertionError(f"Web Preview verification was not explicitly unsupported in Chinese: {chinese}")
+    cdp.evaluate(
+        """
+        new Promise((resolve) => {
+          location.hash = 'settings';
+          setTimeout(() => {
+            document.querySelectorAll('.settings-sidebar button')[0]?.click();
+            setTimeout(resolve, 300);
+          }, 300);
+        })
+        """,
+        await_promise=True,
+    )
+    switch_to_english(cdp)
 
 
 def assert_key_pages_at_viewports(cdp: CDP, output_dir: Path) -> None:

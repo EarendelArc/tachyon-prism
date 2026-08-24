@@ -504,11 +504,11 @@ export async function verifyXrayNode(
 ): Promise<XrayNodeVerificationResult> {
   if (!isTauriRuntime()) {
     return {
-      code: "success",
+      code: "unsupported",
       configDigest: request.configDigest,
       nodeId: request.nodeId,
-      ok: true,
-      report: previewLocalProxyProbe(targetUrl),
+      ok: false,
+      report: null,
       requestToken: request.requestToken,
     };
   }
