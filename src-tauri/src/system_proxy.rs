@@ -7,14 +7,105 @@ use super::{
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::Manager;
 
 const JOURNAL_FILE_NAME: &str = "system-proxy-transaction.json";
 
-#[derive(Default)]
 pub(crate) struct SystemProxyRuntime {
     transaction: Mutex<()>,
+    audit: SystemProxyAudit,
+}
+
+impl Default for SystemProxyRuntime {
+    fn default() -> Self {
+        Self {
+            transaction: Mutex::new(()),
+            audit: SystemProxyAudit::default(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct SystemProxyAudit {
+    sequence: AtomicU64,
+    capture_count: AtomicU64,
+    restore_count: AtomicU64,
+    bind_count: AtomicU64,
+    mutation_count: AtomicU64,
+    events: Mutex<Vec<SystemProxyAuditEvent>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystemProxyAuditEvent {
+    sequence: u64,
+    operation: String,
+    mutation: bool,
+    at_epoch_seconds: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystemProxyAuditSnapshot {
+    capture_count: u64,
+    restore_count: u64,
+    bind_count: u64,
+    mutation_count: u64,
+    events: Vec<SystemProxyAuditEvent>,
+}
+
+impl SystemProxyRuntime {
+    fn record_platform_call(&self, operation: &str, mutation: bool) {
+        match operation {
+            "capture" => {
+                self.audit.capture_count.fetch_add(1, Ordering::SeqCst);
+            }
+            "restore" => {
+                self.audit.restore_count.fetch_add(1, Ordering::SeqCst);
+            }
+            "bind" => {
+                self.audit.bind_count.fetch_add(1, Ordering::SeqCst);
+            }
+            _ => {}
+        }
+        if mutation {
+            self.audit.mutation_count.fetch_add(1, Ordering::SeqCst);
+        }
+        let event = SystemProxyAuditEvent {
+            sequence: self.audit.sequence.fetch_add(1, Ordering::SeqCst) + 1,
+            operation: operation.to_string(),
+            mutation,
+            at_epoch_seconds: now_epoch_seconds(),
+        };
+        if let Ok(mut events) = self.audit.events.lock() {
+            const MAX_AUDIT_EVENTS: usize = 128;
+            if events.len() == MAX_AUDIT_EVENTS {
+                events.remove(0);
+            }
+            events.push(event);
+        }
+    }
+
+    pub(crate) fn audit_snapshot(&self) -> SystemProxyAuditSnapshot {
+        let _transaction = self
+            .transaction
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        SystemProxyAuditSnapshot {
+            capture_count: self.audit.capture_count.load(Ordering::SeqCst),
+            restore_count: self.audit.restore_count.load(Ordering::SeqCst),
+            bind_count: self.audit.bind_count.load(Ordering::SeqCst),
+            mutation_count: self.audit.mutation_count.load(Ordering::SeqCst),
+            events: self
+                .audit
+                .events
+                .lock()
+                .map(|events| events.clone())
+                .unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -201,6 +292,37 @@ pub(crate) trait RegistryOps {
 
 struct PlatformProxyBackend;
 
+struct AuditedRegistryOps<'a, B> {
+    runtime: &'a SystemProxyRuntime,
+    backend: B,
+}
+
+impl<B: RegistryOps> RegistryOps for AuditedRegistryOps<'_, B> {
+    fn capability(&self) -> SystemProxyCapability {
+        self.backend.capability()
+    }
+
+    fn snapshot(&self) -> Result<PlatformProxySnapshot, String> {
+        self.runtime.record_platform_call("capture", false);
+        self.backend.snapshot()
+    }
+
+    fn query(&self, settings: &RuntimeSettings) -> Result<SystemProxyState, String> {
+        self.backend.query(settings)
+    }
+
+    fn apply(&self, settings: &RuntimeSettings, enabled: bool) -> Result<(), String> {
+        self.runtime
+            .record_platform_call(if enabled { "bind" } else { "unbind" }, true);
+        self.backend.apply(settings, enabled)
+    }
+
+    fn restore(&self, snapshot: &PlatformProxySnapshot) -> Result<(), String> {
+        self.runtime.record_platform_call("restore", true);
+        self.backend.restore(snapshot)
+    }
+}
+
 pub(crate) fn capability() -> SystemProxyCapability {
     PlatformProxyBackend.capability()
 }
@@ -240,12 +362,11 @@ pub(crate) fn apply_with_settings(
         .lock()
         .map_err(|error| format!("lock system proxy transaction: {error}"))?;
     validate_desired_settings(settings, enabled)?;
-    apply_transaction(
-        &PlatformProxyBackend,
-        settings,
-        &journal_path(app)?,
-        enabled,
-    )
+    let backend = AuditedRegistryOps {
+        runtime,
+        backend: PlatformProxyBackend,
+    };
+    apply_transaction(&backend, settings, &journal_path(app)?, enabled)
 }
 
 pub(crate) fn query_with_settings(
@@ -285,7 +406,11 @@ pub(crate) fn restore_if_pending(
         return Ok(false);
     }
     let settings = load_runtime_settings(app).or_else(|_| default_runtime_settings(app))?;
-    restore_if_pending_at_path(&PlatformProxyBackend, &settings, &path)
+    let backend = AuditedRegistryOps {
+        runtime,
+        backend: PlatformProxyBackend,
+    };
+    restore_if_pending_at_path(&backend, &settings, &path)
 }
 
 fn restore_if_pending_at_path<B: RegistryOps>(
@@ -946,6 +1071,45 @@ mod tests {
         ));
         let _ = fs::remove_file(&path);
         path
+    }
+
+    #[test]
+    fn audit_counts_real_registry_boundaries_without_changing_transactions() {
+        let runtime = SystemProxyRuntime::default();
+        let backend = AuditedRegistryOps {
+            runtime: &runtime,
+            backend: InMemoryRegistryOps::new(original_snapshot(), FailureMode::None),
+        };
+        let path = journal_path("audit-boundaries");
+
+        let before = runtime.audit_snapshot();
+        assert_eq!(before.capture_count, 0);
+        assert_eq!(before.restore_count, 0);
+        assert_eq!(before.bind_count, 0);
+        assert_eq!(before.mutation_count, 0);
+        assert!(before.events.is_empty());
+
+        let applied = apply_transaction(&backend, &settings(), &path, true).unwrap();
+        restore_transaction(&backend, &settings(), &path, Some(&applied.transaction_id)).unwrap();
+
+        let after = runtime.audit_snapshot();
+        assert_eq!(after.capture_count, 2);
+        assert_eq!(after.restore_count, 1);
+        assert_eq!(after.bind_count, 1);
+        assert_eq!(after.mutation_count, 2);
+        assert_eq!(
+            after
+                .events
+                .iter()
+                .map(|event| event.operation.as_str())
+                .collect::<Vec<_>>(),
+            ["capture", "bind", "restore", "capture"]
+        );
+        assert_eq!(
+            runtime.audit_snapshot().mutation_count,
+            after.mutation_count
+        );
+        let _ = fs::remove_file(path);
     }
 
     #[test]

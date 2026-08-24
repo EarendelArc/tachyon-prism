@@ -29,6 +29,8 @@ from prism_ui_smoke import (
     free_port,
     import_subscription_payload,
     navigate_hash,
+    parse_devtools_active_port,
+    read_json,
     select_settings_section,
     start_server,
     update_all_subscriptions,
@@ -55,6 +57,31 @@ CREATE_NO_WINDOW = 0x08000000
 WS_CAPTION = 0x00C00000
 WS_THICKFRAME = 0x00040000
 GWL_STYLE = -16
+TH32CS_SNAPPROCESS = 0x00000002
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+
+class PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * 260),
+    ]
+
+
+class UNICODE_STRING(ctypes.Structure):
+    _fields_ = [
+        ("Length", wintypes.USHORT),
+        ("MaximumLength", wintypes.USHORT),
+        ("Buffer", wintypes.LPWSTR),
+    ]
 
 
 def timestamp() -> str:
@@ -130,7 +157,8 @@ class RunContext:
                 "restoration": [],
                 "networkSafety": {
                     "proxyEnvironmentRemoved": True,
-                    "proxyCommandsInvoked": False,
+                    "proxyCommandsInvoked": None,
+                    "systemProxyAudit": {"status": "not-captured"},
                     "runtimeStartCommandsInvoked": False,
                     "tunAutoRouteRequested": False,
                     "tunDnsHijackRequested": False,
@@ -359,26 +387,202 @@ def stop_process(
     )
 
 
+def windows_process_tree(root_pid: int) -> dict[str, Any]:
+    if os.name != "nt":
+        return {"status": "unsupported", "rootPid": root_pid, "processes": []}
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot == INVALID_HANDLE_VALUE:
+        return {
+            "status": "failed",
+            "rootPid": root_pid,
+            "error": f"CreateToolhelp32Snapshot: {ctypes.WinError(ctypes.get_last_error())}",
+            "processes": [],
+        }
+    entries: dict[int, dict[str, Any]] = {}
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        current = bool(kernel32.Process32FirstW(snapshot, ctypes.byref(entry)))
+        while current:
+            pid = int(entry.th32ProcessID)
+            entries[pid] = {
+                "pid": pid,
+                "parentPid": int(entry.th32ParentProcessID),
+                "name": entry.szExeFile,
+                "commandLine": None,
+            }
+            current = bool(kernel32.Process32NextW(snapshot, ctypes.byref(entry)))
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+    descendants = {root_pid}
+    changed = True
+    while changed:
+        changed = False
+        for pid, entry in entries.items():
+            if pid not in descendants and entry["parentPid"] in descendants:
+                descendants.add(pid)
+                changed = True
+    processes = [entries[pid] for pid in sorted(descendants) if pid in entries]
+    command_line_errors = []
+    for entry in processes:
+        try:
+            entry["commandLine"] = windows_process_command_line(entry["pid"])
+        except OSError as error:
+            command_line_errors.append(f"pid={entry['pid']}: {error}")
+    return {
+        "status": "captured",
+        "rootPid": root_pid,
+        "commandLineErrors": command_line_errors,
+        "processes": processes,
+    }
+
+
+def windows_process_command_line(pid: int) -> str:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    ntdll.NtQueryInformationProcess.argtypes = [
+        wintypes.HANDLE,
+        wintypes.ULONG,
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        ctypes.POINTER(wintypes.ULONG),
+    ]
+    ntdll.NtQueryInformationProcess.restype = ctypes.c_long
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        required = wintypes.ULONG()
+        ntdll.NtQueryInformationProcess(handle, 60, None, 0, ctypes.byref(required))
+        if required.value < ctypes.sizeof(UNICODE_STRING):
+            raise OSError("process command line size unavailable")
+        buffer = ctypes.create_string_buffer(required.value)
+        status = ntdll.NtQueryInformationProcess(
+            handle, 60, buffer, required.value, ctypes.byref(required)
+        )
+        if status < 0:
+            raise OSError(f"NtQueryInformationProcess status=0x{status & 0xFFFFFFFF:08x}")
+        value = UNICODE_STRING.from_buffer(buffer)
+        if not value.Buffer or value.Length == 0:
+            return ""
+        return ctypes.wstring_at(value.Buffer, value.Length // ctypes.sizeof(ctypes.c_wchar))
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def tcp_listener_owners(port: int) -> list[int]:
+    completed = subprocess.run(
+        ["netstat", "-ano", "-p", "tcp"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=8,
+        creationflags=CREATE_NO_WINDOW,
+    )
+    owners: set[int] = set()
+    for raw in completed.stdout.splitlines():
+        fields = raw.split()
+        if len(fields) < 5 or fields[0].upper() != "TCP" or fields[3].upper() != "LISTENING":
+            continue
+        local = fields[1].rsplit(":", 1)
+        if len(local) == 2 and local[1] == str(port):
+            try:
+                owners.add(int(fields[4]))
+            except ValueError:
+                continue
+    return sorted(owners)
+
+
+def text_tail(path: Path, limit: int = 8_192) -> str:
+    try:
+        return path.read_bytes()[-limit:].decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def webview_runtime_versions(webview_data: Path) -> list[dict[str, str]]:
+    versions = []
+    for path in sorted(webview_data.rglob("Last Version")):
+        try:
+            versions.append(
+                {"path": str(path.relative_to(webview_data)), "version": path.read_text().strip()}
+            )
+        except OSError:
+            continue
+    return versions
+
+
+def webview_launch_snapshot(
+    process: subprocess.Popen[Any],
+    webview_data: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    port: int | None = None,
+) -> dict[str, Any]:
+    tree = windows_process_tree(process.pid)
+    processes = tree.get("processes") or []
+    webviews = [
+        entry for entry in processes if str(entry.get("name", "")).lower() == "msedgewebview2.exe"
+    ]
+    owner_pids = tcp_listener_owners(port) if port is not None else []
+    descendant_pids = {int(entry["pid"]) for entry in processes}
+    return {
+        "prismPid": process.pid,
+        "prismExitCode": process.poll(),
+        "webViewRuntimeVersions": webview_runtime_versions(webview_data),
+        "processTree": tree,
+        "webViewProcessCount": len(webviews),
+        "browserArgumentsObserved": any(
+            "--remote-debugging-port=0" in str(entry.get("commandLine") or "")
+            for entry in webviews
+        ),
+        "port": port,
+        "portOwnerPids": owner_pids,
+        "portOwnedByProcessTree": bool(owner_pids)
+        and all(owner in descendant_pids for owner in owner_pids),
+        "stdoutTail": text_tail(stdout_path),
+        "stderrTail": text_tail(stderr_path),
+    }
+
+
 def launch(
     executable: Path,
     output_dir: Path,
     context: RunContext,
 ) -> tuple[subprocess.Popen[Any], CDP, int]:
     context.check_deadline("launch")
-    debug_port = free_port()
-    devtools_url = f"http://127.0.0.1:{debug_port}/json/list"
+    launch_index = len(context.result["diagnostics"]["devTools"]) + 1
     devtools: dict[str, Any] = {
         "timestamp": timestamp(),
-        "port": debug_port,
-        "url": devtools_url,
+        "requestedPort": 0,
+        "port": None,
+        "url": None,
         "status": "waiting",
         "error": None,
         "tabs": [],
     }
     context.result["diagnostics"]["devTools"].append(devtools)
-    context.log(f"DEVTOOLS PORT allocated={debug_port} url={devtools_url}")
+    context.log("DEVTOOLS PORT requested=auto via exclusive WebView2 profile")
     context.checkpoint()
-    webview_data = output_dir / "webview2-data"
+    webview_data = (
+        output_dir
+        / "webview2-data"
+        / f"launch-{launch_index}-{os.getpid()}-{time.time_ns()}"
+    )
     webview_data.mkdir(parents=True, exist_ok=True)
     removed_proxy_variables = []
     for name in (
@@ -399,7 +603,7 @@ def launch(
     )
     recorded.extend(name for name in removed_proxy_variables if name not in recorded)
     env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
-        f"--remote-debugging-address=127.0.0.1 --remote-debugging-port={debug_port} "
+        "--remote-debugging-address=127.0.0.1 --remote-debugging-port=0 "
         "--remote-allow-origins=* --disable-background-networking"
     )
     env["WEBVIEW2_USER_DATA_FOLDER"] = str(webview_data)
@@ -416,34 +620,102 @@ def launch(
         )
     context.owned_processes.append(process)
     context.log(f"PROCESS START pid={process.pid} executable={executable}")
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 45
     last_error: Exception | None = None
     tabs: list[dict[str, Any]] = []
+    debug_port: int | None = None
+    active_port_path: Path | None = None
     while time.monotonic() < deadline:
         context.check_deadline("DevTools discovery")
         if process.poll() is not None:
             error = f"Prism exited before DevTools was ready: exit code {process.returncode}"
-            devtools.update(status="failed", error=error, finishedAt=timestamp())
+            devtools.update(
+                status="failed",
+                error=error,
+                launch=webview_launch_snapshot(
+                    process, webview_data, stdout_path, stderr_path, debug_port
+                ),
+                finishedAt=timestamp(),
+            )
+            context.checkpoint()
             raise RuntimeError(error)
-        try:
-            tabs = wait_json(devtools_url, timeout=1.5)
-            if tabs:
-                break
-        except Exception as error:  # noqa: BLE001 - bounded readiness loop.
-            last_error = error
+        candidates = sorted(webview_data.rglob("DevToolsActivePort"))
+        if not candidates:
+            last_error = RuntimeError("WebView2 DevToolsActivePort not published yet")
+        for candidate in candidates:
+            try:
+                candidate_port, browser_path = parse_devtools_active_port(candidate)
+                version = read_json(f"http://127.0.0.1:{candidate_port}/json/version", timeout=1.0)
+                browser_url = str(version.get("webSocketDebuggerUrl", ""))
+                if not browser_url.endswith(browser_path):
+                    raise RuntimeError("WebView2 browser endpoint did not match its ready file")
+                candidate_tabs = read_json(
+                    f"http://127.0.0.1:{candidate_port}/json/list", timeout=1.0
+                )
+                snapshot = webview_launch_snapshot(
+                    process, webview_data, stdout_path, stderr_path, candidate_port
+                )
+                owner_pids = snapshot["portOwnerPids"]
+                process_by_pid = {
+                    int(item["pid"]): str(item.get("name", "")).lower()
+                    for item in snapshot["processTree"].get("processes", [])
+                }
+                if not owner_pids or not snapshot["portOwnedByProcessTree"]:
+                    raise RuntimeError(
+                        f"DevTools port {candidate_port} is not owned by the Prism process tree: {owner_pids}"
+                    )
+                if not all(process_by_pid.get(pid) == "msedgewebview2.exe" for pid in owner_pids):
+                    raise RuntimeError(
+                        f"DevTools port {candidate_port} owner is not WebView2: {owner_pids}"
+                    )
+                if not snapshot["webViewRuntimeVersions"] or snapshot["webViewProcessCount"] < 1:
+                    raise RuntimeError("WebView2 runtime did not become observable")
+                if not snapshot["browserArgumentsObserved"]:
+                    raise RuntimeError("WebView2 command line omitted remote-debugging-port=0")
+                if candidate_tabs:
+                    debug_port = candidate_port
+                    active_port_path = candidate
+                    tabs = candidate_tabs
+                    devtools["version"] = {
+                        "browser": version.get("Browser"),
+                        "protocolVersion": version.get("Protocol-Version"),
+                    }
+                    devtools["launch"] = snapshot
+                    break
+            except Exception as error:  # noqa: BLE001 - bounded readiness loop.
+                last_error = error
+        if tabs:
+            break
         time.sleep(0.2)
     if not tabs:
-        error = (
-            "Prism WebView2 remote debugging unavailable after 30s "
-            f"on port {debug_port}: {last_error}"
+        launch_snapshot = webview_launch_snapshot(
+            process, webview_data, stdout_path, stderr_path, debug_port
         )
-        devtools.update(status="failed", error=error, finishedAt=timestamp())
-        context.log(f"DEVTOOLS FAIL port={debug_port}: {error}")
+        error = (
+            "Prism WebView2 remote debugging unavailable after 45s: "
+            f"{last_error}; exeAlive={process.poll() is None}; "
+            f"webViewProcesses={launch_snapshot['webViewProcessCount']}; "
+            f"runtimeVersions={launch_snapshot['webViewRuntimeVersions']}"
+        )
+        devtools.update(
+            status="failed", error=error, launch=launch_snapshot, finishedAt=timestamp()
+        )
+        context.log(f"DEVTOOLS FAIL: {error}")
         context.checkpoint()
         stop_process(process, context, "DevTools unavailable")
         raise RuntimeError(error)
-    devtools.update(status="ready", tabs=tabs, finishedAt=timestamp())
-    context.log(f"DEVTOOLS READY port={debug_port} tabs={len(tabs)}")
+    devtools_url = f"http://127.0.0.1:{debug_port}/json/list"
+    devtools.update(
+        status="ready",
+        port=debug_port,
+        url=devtools_url,
+        activePortPath=str(active_port_path.relative_to(webview_data)),
+        tabs=tabs,
+        finishedAt=timestamp(),
+    )
+    context.log(
+        f"DEVTOOLS READY port={debug_port} owner={devtools['launch']['portOwnerPids']} tabs={len(tabs)}"
+    )
     context.checkpoint()
     page = next(
         (
@@ -967,6 +1239,45 @@ def verification_temp_residue(config_dir: Path, canonical_path: Path) -> list[st
     return sorted(residue)
 
 
+PROXY_AUDIT_FIELDS = ("captureCount", "restoreCount", "bindCount", "mutationCount")
+
+
+def system_proxy_audit_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    counts = {
+        field.removesuffix("Count"): int(after.get(field, 0)) - int(before.get(field, 0))
+        for field in PROXY_AUDIT_FIELDS
+    }
+    baseline_sequence = max(
+        (int(event.get("sequence", 0)) for event in before.get("events") or []), default=0
+    )
+    events = [
+        event
+        for event in after.get("events") or []
+        if int(event.get("sequence", 0)) > baseline_sequence
+    ]
+    return {**counts, "events": events}
+
+
+def assert_no_system_proxy_calls(
+    before: dict[str, Any], after: dict[str, Any], label: str
+) -> dict[str, Any]:
+    delta = system_proxy_audit_delta(before, after)
+    assert_true(
+        all(delta[name] == 0 for name in ("capture", "restore", "bind", "mutation"))
+        and not delta["events"],
+        f"{label} crossed a Rust system-proxy boundary: {delta}",
+    )
+    return delta
+
+
+def assert_system_proxy_audit_zero(snapshot: dict[str, Any], label: str) -> None:
+    assert_true(
+        all(int(snapshot.get(field, 0)) == 0 for field in PROXY_AUDIT_FIELDS)
+        and not snapshot.get("events"),
+        f"{label} observed prior Rust system-proxy boundary calls: {snapshot}",
+    )
+
+
 def assert_isolated_verification_recovered(
     cdp: CDP,
     context: RunContext,
@@ -975,11 +1286,14 @@ def assert_isolated_verification_recovered(
     config_dir: Path,
     listener_ports: tuple[int, int],
     proxy_before: dict[str, Any],
+    audit_before: dict[str, Any],
     label: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     generation = invoke(cdp, context, "xray_generation_status")
     runtime = invoke(cdp, context, "runtime_status")
     proxy_after = system_proxy_mutation_snapshot(invoke(cdp, context, "system_proxy_query"))
+    audit_after = invoke(cdp, context, "system_proxy_audit")
+    audit_delta = assert_no_system_proxy_calls(audit_before, audit_after, label)
     residue = verification_temp_residue(config_dir, canonical_path)
     open_ports = [port for port in listener_ports if tcp_listener_open(port)]
     assert_true(
@@ -1006,8 +1320,9 @@ def assert_isolated_verification_recovered(
         "processStopped": True,
         "portsClosed": True,
         "systemProxyUnchanged": True,
+        "systemProxyAudit": audit_delta,
         "tempClean": True,
-    }
+    }, audit_after
 
 
 def system_proxy_mutation_snapshot(query: dict[str, Any]) -> dict[str, Any]:
@@ -1137,6 +1452,8 @@ def verify_selected_local_xray_node(
     assert_true(bool(selected_node_id), f"secure vault did not persist selected node: {vault}")
     navigate_hash(cdp, "overview")
     proxy_before = system_proxy_mutation_snapshot(invoke(cdp, context, "system_proxy_query"))
+    audit_before = invoke(cdp, context, "system_proxy_audit")
+    assert_system_proxy_audit_zero(audit_before, "isolated verification baseline")
     assert_true(
         not tcp_listener_open(upstream_port),
         f"negative-control selected upstream unexpectedly reachable: 127.0.0.1:{upstream_port}",
@@ -1153,15 +1470,17 @@ def verify_selected_local_xray_node(
         fixture_after_failure == fixture_before_failure,
         "negative verification reached the directly available fixture without its selected upstream",
     )
-    failed_recovery = assert_isolated_verification_recovered(
+    failed_recovery, audit_after_failure = assert_isolated_verification_recovered(
         cdp,
         context,
         canonical_path=canonical_path,
         config_dir=config_dir,
         listener_ports=listener_ports,
         proxy_before=proxy_before,
+        audit_before=audit_before,
         label="failed isolated verification",
     )
+    assert_system_proxy_audit_zero(audit_after_failure, "negative-control completion")
 
     upstream_process, access_log = start_xray_socks_upstream(
         xray, upstream_port, fixture_port, output_dir, context
@@ -1197,15 +1516,17 @@ def verify_selected_local_xray_node(
         ingress_after - ingress_before == 2,
         f"selected Xray SOCKS ingress delta was not exactly +2: before={ingress_before}, after={ingress_after}",
     )
-    passed_recovery = assert_isolated_verification_recovered(
+    passed_recovery, audit_after_success = assert_isolated_verification_recovered(
         cdp,
         context,
         canonical_path=canonical_path,
         config_dir=config_dir,
         listener_ports=listener_ports,
         proxy_before=proxy_before,
+        audit_before=audit_after_failure,
         label="successful isolated verification",
     )
+    assert_system_proxy_audit_zero(audit_after_success, "retry-success completion")
     new_access_lines = xray_access_lines(access_log)[ingress_before:ingress_after]
     ingress_digest = hashlib.sha256("\n".join(new_access_lines).encode("utf-8")).hexdigest()
     stop_process(upstream_process, context, "selected upstream evidence complete")
@@ -1237,6 +1558,16 @@ def verify_selected_local_xray_node(
         "retrySucceeded": True,
         "successfulRecovery": passed_recovery,
         "systemProxyUnchanged": True,
+        "systemProxyAudit": {
+            "baseline": audit_before,
+            "afterNegativeControl": audit_after_failure,
+            "afterRetrySuccess": audit_after_success,
+            "negativeControlDelta": failed_recovery["systemProxyAudit"],
+            "retrySuccessDelta": passed_recovery["systemProxyAudit"],
+            "totalDelta": assert_no_system_proxy_calls(
+                audit_before, audit_after_success, "complete isolated verification"
+            ),
+        },
     }
 
 
@@ -1436,6 +1767,15 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
                 canonical_path,
                 (saved_settings["xraySocksPort"], saved_settings["xrayHttpPort"]),
             )
+            proxy_audit = verification_e2e["systemProxyAudit"]
+            context.result["diagnostics"]["networkSafety"]["systemProxyAudit"] = {
+                "status": "captured",
+                **proxy_audit,
+            }
+            context.result["diagnostics"]["networkSafety"]["proxyCommandsInvoked"] = any(
+                int(proxy_audit["afterRetrySuccess"].get(field, 0)) != 0
+                for field in PROXY_AUDIT_FIELDS
+            ) or bool(proxy_audit["afterRetrySuccess"].get("events"))
             after_verification = invoke(cdp, context, "read_canonical_xray_config")
             assert_true(after_verification == first_read, "isolated verification changed canonical config")
             after_verification_runtime = invoke(cdp, context, "runtime_status")

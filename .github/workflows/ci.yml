@@ -232,7 +232,20 @@ jobs:
           if (-not $verification.retrySucceeded) { throw "post-failure retry did not succeed" }
           if (-not $verification.successfulRecovery.generationIdle -or -not $verification.successfulRecovery.processStopped -or -not $verification.successfulRecovery.portsClosed -or -not $verification.successfulRecovery.tempClean -or -not $verification.successfulRecovery.systemProxyUnchanged) { throw "successful verification did not fully recover" }
           $safety = $result.diagnostics.networkSafety
-          if ($safety.proxyCommandsInvoked -or $safety.tunAutoRouteRequested -or $safety.tunDnsHijackRequested) { throw "native E2E attempted system proxy or TUN mutation" }
+          if ($safety.proxyCommandsInvoked -ne $false -or $safety.tunAutoRouteRequested -or $safety.tunDnsHijackRequested) { throw "native E2E attempted system proxy or TUN mutation" }
+          if ($safety.systemProxyAudit.status -ne "captured") { throw "native E2E system proxy audit missing" }
+          foreach ($snapshotName in @("baseline", "afterNegativeControl", "afterRetrySuccess")) {
+            $snapshot = $safety.systemProxyAudit.$snapshotName
+            if ($snapshot.captureCount -ne 0 -or $snapshot.restoreCount -ne 0 -or $snapshot.bindCount -ne 0 -or $snapshot.mutationCount -ne 0 -or @($snapshot.events).Count -ne 0) {
+              throw "native E2E Rust system proxy audit was nonzero at $snapshotName"
+            }
+          }
+          foreach ($phase in @("negativeControlDelta", "retrySuccessDelta", "totalDelta")) {
+            $audit = $safety.systemProxyAudit.$phase
+            if ($audit.capture -ne 0 -or $audit.restore -ne 0 -or $audit.bind -ne 0 -or $audit.mutation -ne 0 -or @($audit.events).Count -ne 0) {
+              throw "native E2E crossed Rust system proxy boundary during $phase"
+            }
+          }
 
       - name: Upload native E2E evidence
         if: always()

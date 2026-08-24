@@ -2633,6 +2633,13 @@ fn system_proxy_query(
 }
 
 #[tauri::command]
+fn system_proxy_audit(
+    state: tauri::State<system_proxy::SystemProxyRuntime>,
+) -> system_proxy::SystemProxyAuditSnapshot {
+    state.audit_snapshot()
+}
+
+#[tauri::command]
 fn system_proxy_apply(
     app: tauri::AppHandle,
     runtime_state: tauri::State<RuntimeState>,
@@ -11380,12 +11387,155 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         let port = port.parse::<u16>().expect("watchdog fixture port");
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
             .expect("fixture must own the requested TCP port");
-        fs::write(&ready_path, format!("{}\n{}\n", std::process::id(), port))
-            .expect("publish fixture PID");
+        publish_watchdog_fixture_ready(&ready_path, std::process::id(), port)
+            .expect("publish fixture PID atomically");
         std::mem::forget(listener);
         loop {
             thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    fn publish_watchdog_fixture_ready(path: &Path, pid: u32, port: u16) -> io::Result<()> {
+        static READY_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = READY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("ready");
+        let temporary = path.with_file_name(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            sequence
+        ));
+        let result = (|| {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(&temporary)?;
+            file.write_all(format!("{pid}\n{port}\n").as_bytes())?;
+            file.flush()?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temporary, path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    fn parse_watchdog_fixture_ready(raw: &str) -> Option<(u32, u16)> {
+        let mut lines = raw.lines();
+        let pid = lines.next()?.parse::<u32>().ok()?;
+        let port = lines.next()?.parse::<u16>().ok()?;
+        if lines.next().is_some() {
+            return None;
+        }
+        Some((pid, port))
+    }
+
+    fn wait_watchdog_fixture_ready(child: &mut Child, ready: &Path, port: u16) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut last_observation = "ready file absent".to_string();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => panic!(
+                    "real TCP fixture exited before readiness: status={status}, last={last_observation}"
+                ),
+                Ok(None) => {}
+                Err(error) => panic!("query real TCP fixture liveness: {error}"),
+            }
+            match fs::read_to_string(ready) {
+                Ok(raw) => match parse_watchdog_fixture_ready(&raw) {
+                    Some((pid, reported_port)) if reported_port == port => {
+                        if owned_tcp_listener_table(pid)
+                            .map(|table| {
+                                listeners_owned_by_pid(
+                                    &table,
+                                    &[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)],
+                                    pid,
+                                )
+                            })
+                            .unwrap_or(false)
+                        {
+                            return pid;
+                        }
+                        last_observation =
+                            format!("parsed pid={pid}, port={port}, listener not owned yet");
+                    }
+                    Some((pid, reported_port)) => {
+                        last_observation = format!(
+                            "parsed pid={pid}, unexpected port={reported_port}, expected={port}"
+                        );
+                    }
+                    None => {
+                        last_observation = format!("incomplete ready payload: {raw:?}");
+                    }
+                },
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    last_observation = "ready file absent".to_string();
+                }
+                Err(error) => {
+                    last_observation = format!("read ready file: {error}");
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "real TCP fixture did not become owned: {last_observation}"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    fn watchdog_ready_publication_is_atomic_under_high_concurrency() {
+        const ROUNDS: usize = 128;
+        let directory = unique_temp_dir("tachyon-test-watchdog-ready-atomic");
+        fs::create_dir_all(&directory).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(ROUNDS + 1));
+        let mut writers = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let barrier = Arc::clone(&barrier);
+            let path = directory.join(format!("round-{round}.ready"));
+            writers.push(thread::spawn(move || {
+                barrier.wait();
+                publish_watchdog_fixture_ready(&path, 10_000 + round as u32, 20_000 + round as u16)
+                    .unwrap();
+            }));
+        }
+        barrier.wait();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut observed = vec![false; ROUNDS];
+        while observed.iter().any(|value| !value) {
+            for (round, seen) in observed.iter_mut().enumerate() {
+                if *seen {
+                    continue;
+                }
+                let path = directory.join(format!("round-{round}.ready"));
+                match fs::read_to_string(path) {
+                    Ok(raw) => {
+                        assert_eq!(
+                            parse_watchdog_fixture_ready(&raw),
+                            Some((10_000 + round as u32, 20_000 + round as u16)),
+                            "an observable ready file must always contain a complete payload"
+                        );
+                        *seen = true;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("read concurrent ready file: {error}"),
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "concurrent ready publication timed out"
+            );
+            thread::yield_now();
+        }
+        for writer in writers {
+            writer.join().expect("ready writer thread");
+        }
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -11410,43 +11560,8 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
                 .env("TACHYON_WATCHDOG_FIXTURE_READY", ready);
             process_spawn::spawn(&mut command).expect("spawn real TCP fixture")
         };
-        let wait_ready = |ready: &Path| -> u32 {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                if let Ok(raw) = fs::read_to_string(ready) {
-                    let mut lines = raw.lines();
-                    let pid = lines
-                        .next()
-                        .and_then(|value| value.parse::<u32>().ok())
-                        .expect("fixture PID");
-                    let reported_port = lines
-                        .next()
-                        .and_then(|value| value.parse::<u16>().ok())
-                        .expect("fixture port");
-                    assert_eq!(reported_port, port);
-                    if owned_tcp_listener_table(pid)
-                        .map(|table| {
-                            listeners_owned_by_pid(
-                                &table,
-                                &[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)],
-                                pid,
-                            )
-                        })
-                        .unwrap_or(false)
-                    {
-                        return pid;
-                    }
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "real TCP fixture did not become owned"
-                );
-                thread::sleep(Duration::from_millis(25));
-            }
-        };
-
         let mut first = spawn_fixture(&ready_a);
-        let first_pid = wait_ready(&ready_a);
+        let first_pid = wait_watchdog_fixture_ready(&mut first, &ready_a, port);
         let generation_id = {
             let mut runtime = xray_generation::GenerationRuntime::default();
             runtime
@@ -11515,7 +11630,7 @@ escaped=https:\/\/bob:escaped-password@example.test/path"#;
         first.kill().unwrap();
         first.wait().unwrap();
         let mut second = spawn_fixture(&ready_b);
-        let second_pid = wait_ready(&ready_b);
+        let second_pid = wait_watchdog_fixture_ready(&mut second, &ready_b, port);
         assert_ne!(first_pid, second_pid);
         let first_listener_owned = owned_tcp_listener_table(first_pid)
             .map(|table| listeners_owned_by_pid(&table, &[listener], first_pid))
@@ -14067,6 +14182,7 @@ pub fn run() {
             tachyon_core_preflight,
             system_proxy_capability,
             system_proxy_query,
+            system_proxy_audit,
             system_proxy_apply,
             system_proxy_restore,
             system_proxy_status,
