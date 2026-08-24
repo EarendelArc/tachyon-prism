@@ -3585,6 +3585,9 @@ mod tests {
         assert!(retry.active.is_some());
         assert!(runtime.active_handle.is_some());
         assert_eq!(backend.live.len(), 1);
+        runtime.stop_active(&mut backend).unwrap();
+        assert!(runtime.active_handle.is_none());
+        assert!(backend.live.is_empty());
     }
 
     #[test]
