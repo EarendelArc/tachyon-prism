@@ -2416,6 +2416,10 @@ p,
 }
 
 @media (max-width: 850px) and (min-width: 761px) {
+  .config-grid {
+    grid-template-columns: 1fr;
+  }
+
   .quick-strip {
     gap: 6px;
     grid-template-columns: minmax(156px, 0.9fr) minmax(164px, 0.9fr) minmax(166px, 1fr) auto;
