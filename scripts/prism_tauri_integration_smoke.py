@@ -53,6 +53,16 @@ DEFAULT_XRAY = (
 DEFAULT_ARTIFACTS = ROOT / "artifacts" / "tauri-integration-smoke"
 DEFAULT_HARD_TIMEOUT_SECONDS = 270
 MAX_HARD_TIMEOUT_SECONDS = 285
+WORKER_STEP_NAMES = (
+    "verify HEAD, release executable, and official Xray cache",
+    "start local subscription fixture",
+    "launch release executable and discover native window/DevTools",
+    "capture zh-CN and en native 800x540 screenshots",
+    "discover IPC paths, back up user state, and disable TUN settings",
+    "validate real Xray and exercise IPC save/rollback/redaction",
+    "exercise native editor and subscription IPC",
+    "restart release executable and verify canonical recovery",
+)
 CREATE_NO_WINDOW = 0x08000000
 WS_CAPTION = 0x00C00000
 WS_THICKFRAME = 0x00040000
@@ -146,10 +156,22 @@ class RunContext:
                 "zh-CN": {"status": "not-run", "files": [], "error": None},
                 "en": {"status": "not-run", "files": [], "error": None},
             },
-            "ipc": {},
-            "ui": {},
+            "ipc": {
+                "status": "not-run",
+                "isolatedNodeVerification": {"status": "not-run"},
+            },
+            "ui": {"status": "not-run"},
             "diagnostics": {
-                "steps": [],
+                "steps": [
+                    {
+                        "name": name,
+                        "status": "not-run",
+                        "startedAt": None,
+                        "finishedAt": None,
+                        "durationSeconds": None,
+                    }
+                    for name in WORKER_STEP_NAMES
+                ],
                 "windowDiscovery": [],
                 "devTools": [],
                 "ipcErrors": [],
@@ -185,8 +207,15 @@ class RunContext:
     @contextmanager
     def step(self, name: str) -> Iterator[None]:
         self.check_deadline(name)
-        record: dict[str, Any] = {"name": name, "startedAt": timestamp(), "status": "running"}
-        self.result["diagnostics"]["steps"].append(record)
+        record = next(
+            (item for item in self.result["diagnostics"]["steps"] if item["name"] == name),
+            None,
+        )
+        if record is None:
+            raise RuntimeError(f"unregistered native E2E step: {name}")
+        if record["status"] != "not-run":
+            raise RuntimeError(f"native E2E step entered twice: {name}")
+        record.update(startedAt=timestamp(), status="running")
         started = time.monotonic()
         self.log(f"STEP START {name}")
         try:
@@ -219,6 +248,19 @@ class RunContext:
         self.checkpoint()
 
     def finish(self, status: str, failure: dict[str, Any] | None = None) -> None:
+        for record in self.result["diagnostics"]["steps"]:
+            if record["status"] == "running":
+                record.update(
+                    status="failed",
+                    finishedAt=timestamp(),
+                    error=(failure or {}).get("message", "worker stopped during step"),
+                )
+        for section in ("ipc", "ui"):
+            if self.result[section].get("status") == "running":
+                self.result[section]["status"] = "failed"
+        isolated = self.result["ipc"].get("isolatedNodeVerification")
+        if isinstance(isolated, dict) and isolated.get("status") == "running":
+            isolated["status"] = "failed"
         self.result["status"] = status
         self.result["failure"] = failure
         self.result["finishedAt"] = timestamp()
@@ -602,11 +644,11 @@ def launch(
         "removedProxyVariables", []
     )
     recorded.extend(name for name in removed_proxy_variables if name not in recorded)
-    env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
-        "--remote-debugging-address=127.0.0.1 --remote-debugging-port=0 "
-        "--remote-allow-origins=* --disable-background-networking"
-    )
-    env["WEBVIEW2_USER_DATA_FOLDER"] = str(webview_data)
+    # Prove the compile-time Tauri builder path is responsible for CDP. Standard
+    # WebView2 environment overrides must not make an ordinary build testable.
+    env.pop("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", None)
+    env.pop("WEBVIEW2_USER_DATA_FOLDER", None)
+    env["TACHYON_PRISM_NATIVE_E2E_WEBVIEW_DATA_DIRECTORY"] = str(webview_data)
     stdout_path = output_dir / "prism.stdout.log"
     stderr_path = output_dir / "prism.stderr.log"
     with stdout_path.open("ab") as stdout, stderr_path.open("ab") as stderr:
@@ -625,6 +667,7 @@ def launch(
     tabs: list[dict[str, Any]] = []
     debug_port: int | None = None
     active_port_path: Path | None = None
+    browser_arguments_verified = False
     while time.monotonic() < deadline:
         context.check_deadline("DevTools discovery")
         if process.poll() is not None:
@@ -639,6 +682,35 @@ def launch(
             )
             context.checkpoint()
             raise RuntimeError(error)
+        if not browser_arguments_verified:
+            launch_snapshot = webview_launch_snapshot(
+                process, webview_data, stdout_path, stderr_path, None
+            )
+            if launch_snapshot["webViewProcessCount"] < 1:
+                last_error = RuntimeError("WebView2 child process not observable yet")
+                time.sleep(0.1)
+                continue
+            if not launch_snapshot["browserArgumentsObserved"]:
+                error = "WebView2 child command line omitted remote-debugging-port=0"
+                devtools.update(
+                    status="failed",
+                    error=error,
+                    launch=launch_snapshot,
+                    finishedAt=timestamp(),
+                )
+                context.log(
+                    "DEVTOOLS ARGUMENT FAIL processTree="
+                    + json.dumps(launch_snapshot["processTree"], ensure_ascii=False)
+                )
+                context.checkpoint()
+                stop_process(process, context, "WebView2 remote-debugging argument missing")
+                raise RuntimeError(error)
+            browser_arguments_verified = True
+            context.log(
+                "DEVTOOLS ARGUMENT VERIFIED processTree="
+                + json.dumps(launch_snapshot["processTree"], ensure_ascii=False)
+            )
+            context.checkpoint()
         candidates = sorted(webview_data.rglob("DevToolsActivePort"))
         if not candidates:
             last_error = RuntimeError("WebView2 DevToolsActivePort not published yet")
@@ -1278,6 +1350,26 @@ def assert_system_proxy_audit_zero(snapshot: dict[str, Any], label: str) -> None
     )
 
 
+def assert_result_proxy_audit_passable(result: dict[str, Any]) -> None:
+    safety = result["diagnostics"]["networkSafety"]
+    audit = safety.get("systemProxyAudit") or {}
+    assert_true(audit.get("status") == "captured", "system proxy audit was not captured")
+    assert_true(
+        safety.get("proxyCommandsInvoked") is False,
+        f"proxyCommandsInvoked was not false: {safety.get('proxyCommandsInvoked')!r}",
+    )
+    for snapshot_name in ("baseline", "afterNegativeControl", "afterRetrySuccess"):
+        snapshot = audit.get(snapshot_name) or {}
+        assert_system_proxy_audit_zero(snapshot, f"RESULT {snapshot_name}")
+    for phase_name in ("negativeControlDelta", "retrySuccessDelta", "totalDelta"):
+        phase = audit.get(phase_name) or {}
+        assert_true(
+            all(int(phase.get(field, 0)) == 0 for field in ("capture", "restore", "bind", "mutation"))
+            and not phase.get("events"),
+            f"RESULT {phase_name} crossed a Rust system-proxy boundary: {phase}",
+        )
+
+
 def assert_isolated_verification_recovered(
     cdp: CDP,
     context: RunContext,
@@ -1646,6 +1738,7 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
             process, cdp, hwnd = launch(executable, output_dir, context)
 
         with context.step("capture zh-CN and en native 800x540 screenshots"):
+            context.result["ui"]["status"] = "running"
             set_language(cdp, "zh-CN")
             assert_custom_window_chrome(cdp)
             assert_desktop_interaction_polish(cdp)
@@ -1681,6 +1774,7 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
             )
 
         with context.step("discover IPC paths, back up user state, and disable TUN settings"):
+            context.result["ipc"]["status"] = "running"
             paths = invoke(cdp, context, "config_paths")
             runtime_paths = invoke(cdp, context, "runtime_paths")
             canonical_path = Path(paths["xrayConfigPath"])
@@ -1756,6 +1850,7 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
 
             selected_node_port = free_port()
             context.result["diagnostics"]["networkSafety"]["isolatedXrayVerificationInvoked"] = True
+            context.result["ipc"]["isolatedNodeVerification"] = {"status": "running"}
             verification_e2e = verify_selected_local_xray_node(
                 cdp,
                 context,
@@ -1897,6 +1992,9 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
             status = "failed"
             failure = {"type": "IntegrationFindings", "message": "; ".join(findings)}
         else:
+            assert_result_proxy_audit_passable(context.result)
+            context.result["ipc"]["status"] = "passed"
+            context.result["ui"]["status"] = "passed"
             status = "passed"
     except BaseException as error:  # noqa: BLE001 - always persist failure diagnostics.
         failure = {
@@ -1906,7 +2004,7 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
         }
         context.log(f"WORKER FAIL {type(error).__name__}: {error}")
         for language, record in context.result["screenshots"].items():
-            if record["status"] in {"not-run", "running"}:
+            if record["status"] == "running":
                 record.update(status="failed", error=f"blocked by {type(error).__name__}: {error}")
     finally:
         if cdp is not None:
@@ -2033,7 +2131,7 @@ def supervise(executable: Path, xray: Path, output_dir: Path, timeout: int) -> i
             "message": f"global hard timeout reached after {timeout}s; worker process tree terminated",
         }
         for language, record in result.get("screenshots", {}).items():
-            if record.get("status") in {"not-run", "running"}:
+            if record.get("status") == "running":
                 record.update(status="failed", error=result["failure"]["message"])
     elif supervisor_error is not None:
         result["status"] = "failed"
@@ -2049,6 +2147,17 @@ def supervise(executable: Path, xray: Path, output_dir: Path, timeout: int) -> i
             "type": "WorkerExitError",
             "message": f"worker exited {worker.returncode} without a final result",
         }
+    failure_message = (result.get("failure") or {}).get("message", "worker did not finish")
+    for record in result.get("diagnostics", {}).get("steps", []):
+        if record.get("status") == "running":
+            record.update(status="failed", finishedAt=timestamp(), error=failure_message)
+    for section_name in ("ipc", "ui"):
+        section = result.get(section_name)
+        if isinstance(section, dict) and section.get("status") == "running":
+            section["status"] = "failed"
+    isolated = result.get("ipc", {}).get("isolatedNodeVerification")
+    if isinstance(isolated, dict) and isolated.get("status") == "running":
+        isolated["status"] = "failed"
     atomic_write_json(result_path, result)
     supervisor.log(f"SUPERVISOR RESULT status={result.get('status')} worker-exit={worker.returncode}")
     print(json.dumps(result, ensure_ascii=False, indent=2))

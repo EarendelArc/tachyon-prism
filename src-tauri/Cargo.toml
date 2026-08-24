@@ -12,6 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 default = []
 custom-protocol = ["tauri/custom-protocol"]
+native-e2e = []
 system-keyring-live-test = []
 
 [build-dependencies]

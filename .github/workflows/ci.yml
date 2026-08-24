@@ -207,7 +207,7 @@ jobs:
 
       - name: Build real Prism release executable
         timeout-minutes: 15
-        run: npm run build -- --no-bundle
+        run: npm run build:native-e2e -- --no-bundle
 
       - name: Run native subscription-to-dual-proxy E2E
         timeout-minutes: 6
@@ -223,7 +223,12 @@ jobs:
           $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
           if ($result.status -ne "passed") { throw "native E2E did not pass: $($result.failure.message)" }
           if ($result.head -ne $env:GITHUB_SHA) { throw "RESULT head $($result.head) != GITHUB_SHA $env:GITHUB_SHA" }
+          foreach ($step in @($result.diagnostics.steps)) {
+            if ($step.status -ne "passed") { throw "native E2E step was not completed: $($step.name)=$($step.status)" }
+          }
+          if ($result.ipc.status -ne "passed" -or $result.ui.status -ne "passed") { throw "native E2E top-level phase status was not passed" }
           $verification = $result.ipc.isolatedNodeVerification
+          if ($verification.status -ne "passed") { throw "isolated node verification phase was not passed" }
           if ($verification.selectedUpstreamIngress.delta -ne 2) { throw "selected upstream ingress delta != 2" }
           if ($verification.fixtureRequests -ne 2) { throw "fixture delta != 2" }
           if (-not $verification.negativeControl.verificationFailed) { throw "negative control did not fail" }
@@ -509,8 +514,25 @@ jobs:
         run: cargo test --target ${{ matrix.rust_target }}
 
       - name: Verify Tauri bundle without publishing
+        if: runner.os != 'macOS'
         working-directory: .
         run: npm run build -- --target ${{ matrix.rust_target }} ${{ matrix.bundle_args }}
+
+      - name: Verify macOS DMG bundle without publishing
+        if: runner.os == 'macOS'
+        working-directory: .
+        shell: bash
+        run: bash .github/scripts/run-tauri-dmg-bundle.sh "${{ matrix.rust_target }}"
+
+      - name: Upload macOS DMG failure diagnostics
+        if: failure() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: tachyon-prism-dmg-failure-${{ matrix.asset_name }}-${{ github.sha }}
+          path: artifacts/ci-dmg-diagnostics/${{ matrix.rust_target }}/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
 
   required-ci-gate:
     name: Required CI gate

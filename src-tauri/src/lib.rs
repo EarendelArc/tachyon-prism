@@ -14135,8 +14135,27 @@ pub fn run() {
                 .find(|window| window.label == "main")
                 .ok_or_else(|| "missing main window config".to_string())?;
 
-            let window =
-                tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?.build()?;
+            let window_builder =
+                tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?;
+            #[cfg(all(target_os = "windows", feature = "native-e2e"))]
+            let window_builder = {
+                let data_directory = std::env::var_os(
+                    "TACHYON_PRISM_NATIVE_E2E_WEBVIEW_DATA_DIRECTORY",
+                )
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .ok_or_else(|| {
+                    "native-e2e requires an absolute TACHYON_PRISM_NATIVE_E2E_WEBVIEW_DATA_DIRECTORY"
+                        .to_string()
+                })?;
+                window_builder
+                    .additional_browser_args(
+                        "--remote-debugging-address=127.0.0.1 --remote-debugging-port=0 \
+                         --remote-allow-origins=* --disable-background-networking",
+                    )
+                    .data_directory(data_directory)
+            };
+            let window = window_builder.build()?;
             let _ = window;
             Ok(())
         })
