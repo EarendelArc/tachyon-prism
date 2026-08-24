@@ -381,6 +381,37 @@ describe("buildXrayClientConfigDraft", () => {
     expect(target?.protocol).toBe(protocol);
   });
 
+  it.each(["direct", "global", "rule"] as const)(
+    "isolates both explicit proxy inbounds from the user's %s routing mode",
+    (routingMode) => {
+      const config = buildXrayClientConfigDraft(mockVMessNode, {
+        enableStats: true,
+        purpose: "node-verification",
+        routingMode,
+      });
+      const inbounds = config.inbounds as Array<Record<string, unknown>>;
+      const rules = (config.routing as Record<string, unknown>).rules as Array<
+        Record<string, unknown>
+      >;
+      const route = rules[0];
+      const target = (config.outbounds as Array<Record<string, unknown>>).find(
+        (outbound) => outbound.tag === route.outboundTag,
+      );
+
+      expect(inbounds.map((inbound) => inbound.protocol)).toEqual(["socks", "http"]);
+      expect(rules).toHaveLength(1);
+      expect(route).toEqual({
+        type: "field",
+        inboundTag: inbounds.map((inbound) => inbound.tag),
+        network: "tcp,udp",
+        outboundTag: "tachyon-proxy",
+      });
+      expect(target?.protocol).toBe("vmess");
+      expect(config).not.toHaveProperty("api");
+      expect(config).not.toHaveProperty("stats");
+    },
+  );
+
   it("isolates managed proxy, direct, and block tags from imported tag conflicts", () => {
     const nodes = parseSubscription(
       JSON.stringify({

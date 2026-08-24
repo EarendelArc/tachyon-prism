@@ -327,8 +327,11 @@ struct LocalProxyProbeReport {
 #[serde(rename_all = "camelCase")]
 struct XrayNodeVerificationResult {
     code: String,
+    config_digest: String,
+    node_id: String,
     ok: bool,
     report: Option<LocalProxyProbeReport>,
+    request_token: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -448,6 +451,7 @@ struct RuntimeState {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum XrayConfigTrustMode {
     Managed,
+    Verification,
     Advanced,
 }
 
@@ -1161,6 +1165,37 @@ impl XrayCoordinator {
         binary_path: String,
         config_path: String,
     ) -> Result<ProcessStatus, String> {
+        self.apply_xray_with_identity(app, proxy, binary_path, config_path, None, false)
+    }
+
+    fn apply_xray_isolated(
+        &mut self,
+        app: &tauri::AppHandle,
+        proxy: &system_proxy::SystemProxyRuntime,
+        binary_path: String,
+        config_path: String,
+        node_id: String,
+        config_digest: String,
+    ) -> Result<ProcessStatus, String> {
+        self.apply_xray_with_identity(
+            app,
+            proxy,
+            binary_path,
+            config_path,
+            Some((node_id, config_digest)),
+            true,
+        )
+    }
+
+    fn apply_xray_with_identity(
+        &mut self,
+        app: &tauri::AppHandle,
+        proxy: &system_proxy::SystemProxyRuntime,
+        binary_path: String,
+        config_path: String,
+        verification_identity: Option<(String, String)>,
+        isolated: bool,
+    ) -> Result<ProcessStatus, String> {
         self.stop_proxy_watchdog();
         let binary = PathBuf::from(clean_path_input(&binary_path));
         let source = PathBuf::from(clean_path_input(&config_path));
@@ -1190,12 +1225,21 @@ impl XrayCoordinator {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let node_id = format!("managed-config-{}", &digest[..16]);
+        let (node_id, routing_revision) = verification_identity
+            .map(|(node_id, expected_digest)| {
+                if expected_digest != digest {
+                    Err("Xray verification identity changed before apply".to_string())
+                } else {
+                    Ok((node_id, expected_digest))
+                }
+            })
+            .transpose()?
+            .unwrap_or_else(|| (format!("managed-config-{}", &digest[..16]), digest.clone()));
         self.generations
             .select_desired_with_probe(
                 &config,
                 node_id,
-                digest,
+                routing_revision,
                 managed_listeners,
                 egress_probe_settings(&settings)?,
             )
@@ -1214,9 +1258,12 @@ impl XrayCoordinator {
             config_mode: authorization.mode,
             settings,
         };
-        generations
-            .execute_latest(&mut backend)
-            .map_err(generation_apply_error)?;
+        if isolated {
+            generations.execute_latest_isolated(&mut backend)
+        } else {
+            generations.execute_latest(&mut backend)
+        }
+        .map_err(generation_apply_error)?;
         Ok(processes.xray.status())
     }
 
@@ -1225,6 +1272,23 @@ impl XrayCoordinator {
         app: &tauri::AppHandle,
         proxy: &system_proxy::SystemProxyRuntime,
     ) -> Result<ProcessStatus, String> {
+        self.stop_xray_with_policy(app, proxy, false)
+    }
+
+    fn stop_xray_isolated(
+        &mut self,
+        app: &tauri::AppHandle,
+        proxy: &system_proxy::SystemProxyRuntime,
+    ) -> Result<ProcessStatus, String> {
+        self.stop_xray_with_policy(app, proxy, true)
+    }
+
+    fn stop_xray_with_policy(
+        &mut self,
+        app: &tauri::AppHandle,
+        proxy: &system_proxy::SystemProxyRuntime,
+        isolated: bool,
+    ) -> Result<ProcessStatus, String> {
         self.stop_proxy_watchdog();
         let process_status = self.processes.xray.status();
         let generation_status = self.generations.status();
@@ -1232,7 +1296,9 @@ impl XrayCoordinator {
             return Err("refusing to stop uncoordinated Xray process".to_string());
         }
         if generation_status.active.is_none() {
-            self.set_proxy_binding(app, proxy, false)?;
+            if !isolated {
+                self.set_proxy_binding(app, proxy, false)?;
+            }
             return Ok(process_status);
         }
         let settings = load_runtime_settings(app)?;
@@ -1261,9 +1327,12 @@ impl XrayCoordinator {
             config_mode,
             settings,
         };
-        generations
-            .stop_active(&mut backend)
-            .map_err(generation_apply_error)?;
+        if isolated {
+            generations.stop_active_isolated(&mut backend)
+        } else {
+            generations.stop_active(&mut backend)
+        }
+        .map_err(generation_apply_error)?;
         Ok(processes.xray.status())
     }
 
@@ -2223,10 +2292,22 @@ fn verify_xray_node(
     state: tauri::State<RuntimeState>,
     proxy_state: tauri::State<system_proxy::SystemProxyRuntime>,
     contents: String,
+    node_id: String,
+    config_digest: String,
+    request_token: String,
     target_url: Option<String>,
     timeout_ms: Option<u64>,
 ) -> XrayNodeVerificationResult {
+    let identity = XrayNodeVerificationIdentity {
+        node_id,
+        config_digest,
+        request_token,
+    };
     let verification = (|| {
+        validate_xray_node_verification_identity(&identity)?;
+        if sha256_hex(contents.as_bytes()) != identity.config_digest {
+            return Err("Xray verification config digest mismatch".to_string());
+        }
         let settings = load_runtime_settings(&app)?;
         let mut coordinator = state
             .xray
@@ -2235,14 +2316,17 @@ fn verify_xray_node(
         if coordinator.processes.xray.status().state == "running"
             || coordinator.generations.status().active.is_some()
         {
-            return Ok(xray_node_verification_result("xray-busy", None));
+            return Ok(xray_node_verification_result("xray-busy", None, &identity));
         }
 
         if contents.len() > CANONICAL_XRAY_CONFIG_LIMIT_BYTES {
             return Err("managed Xray verification config exceeds the size limit".to_string());
         }
-        let authorization =
-            authorize_xray_config(contents.as_bytes(), XrayConfigTrustMode::Managed, &settings)?;
+        let authorization = authorize_xray_config(
+            contents.as_bytes(),
+            XrayConfigTrustMode::Verification,
+            &settings,
+        )?;
         let paths = draft_paths(&app)?;
         let canonical = PathBuf::from(paths.xray_config_path);
         let candidate = SyncedTempFile::create(&canonical, &contents)?;
@@ -2255,16 +2339,18 @@ fn verify_xray_node(
         let previous_authorization = coordinator.xray_config_authorization.clone();
         coordinator.xray_config_authorization = Some(authorization);
         if coordinator
-            .apply_xray(
+            .apply_xray_isolated(
                 &app,
                 &proxy_state,
                 settings.xray_binary_path.clone(),
                 path_string(&candidate.path),
+                identity.node_id.clone(),
+                identity.config_digest.clone(),
             )
             .is_err()
         {
             let cleanup_failed = coordinator.processes.xray.status().state == "running"
-                && coordinator.stop_xray(&app, &proxy_state).is_err();
+                && coordinator.stop_xray_isolated(&app, &proxy_state).is_err();
             if !cleanup_failed {
                 coordinator.xray_config_authorization = previous_authorization;
             }
@@ -2275,6 +2361,7 @@ fn verify_xray_node(
                     "start-failed"
                 },
                 None,
+                &identity,
             ));
         }
 
@@ -2284,34 +2371,79 @@ fn verify_xray_node(
             .unwrap_or_else(|| "http://cp.cloudflare.com/generate_204".to_string());
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(5000).clamp(500, 30000));
         let report = probe_xray_local_proxies(&settings, &url, timeout).ok();
-        let cleanup_failed = coordinator.stop_xray(&app, &proxy_state).is_err();
+        let cleanup_failed = coordinator.stop_xray_isolated(&app, &proxy_state).is_err();
         if !cleanup_failed {
             coordinator.xray_config_authorization = previous_authorization;
         }
         if cleanup_failed {
-            return Ok(xray_node_verification_result("cleanup-failed", report));
+            return Ok(xray_node_verification_result(
+                "cleanup-failed",
+                report,
+                &identity,
+            ));
         }
         Ok(match report {
-            Some(report) if report.ok => xray_node_verification_result("success", Some(report)),
-            report => xray_node_verification_result("probe-failed", report),
+            Some(report) if report.ok => {
+                xray_node_verification_result("success", Some(report), &identity)
+            }
+            report => xray_node_verification_result("probe-failed", report, &identity),
         })
     })();
 
-    verification.unwrap_or_else(xray_node_verification_start_failure)
+    verification.unwrap_or_else(|error| xray_node_verification_start_failure(error, &identity))
 }
 
-fn xray_node_verification_start_failure(_error: String) -> XrayNodeVerificationResult {
-    xray_node_verification_result("start-failed", None)
+struct XrayNodeVerificationIdentity {
+    config_digest: String,
+    node_id: String,
+    request_token: String,
+}
+
+fn validate_xray_node_verification_identity(
+    identity: &XrayNodeVerificationIdentity,
+) -> Result<(), String> {
+    let safe_opaque = |value: &str, min: usize, max: usize| {
+        (min..=max).contains(&value.len())
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    };
+    if !safe_opaque(&identity.node_id, 1, 256) {
+        return Err("Xray verification node identity is invalid".to_string());
+    }
+    if identity.config_digest.len() != 64
+        || !identity
+            .config_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("Xray verification config digest is invalid".to_string());
+    }
+    if !safe_opaque(&identity.request_token, 16, 128) {
+        return Err("Xray verification request token is invalid".to_string());
+    }
+    Ok(())
+}
+
+fn xray_node_verification_start_failure(
+    _error: String,
+    identity: &XrayNodeVerificationIdentity,
+) -> XrayNodeVerificationResult {
+    xray_node_verification_result("start-failed", None, identity)
 }
 
 fn xray_node_verification_result(
     code: &str,
     report: Option<LocalProxyProbeReport>,
+    identity: &XrayNodeVerificationIdentity,
 ) -> XrayNodeVerificationResult {
     XrayNodeVerificationResult {
         code: code.to_string(),
+        config_digest: identity.config_digest.clone(),
+        node_id: identity.node_id.clone(),
         ok: code == "success",
         report,
+        request_token: identity.request_token.clone(),
     }
 }
 
@@ -7998,6 +8130,13 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    sha256_bytes(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn issue_advanced_xray_authorization(
     state: &mut AdvancedXrayAuthorizations,
     config_digest: [u8; 32],
@@ -8062,10 +8201,83 @@ fn validate_xray_config_value(
     let object = config
         .as_object()
         .ok_or_else(|| "Xray config must be a JSON object".to_string())?;
-    if mode == XrayConfigTrustMode::Advanced {
-        return Ok(());
+    match mode {
+        XrayConfigTrustMode::Advanced => Ok(()),
+        XrayConfigTrustMode::Managed => validate_prism_managed_xray_config(object, settings),
+        XrayConfigTrustMode::Verification => {
+            validate_prism_isolated_xray_verification_config(object, settings)
+        }
     }
-    validate_prism_managed_xray_config(object, settings)
+}
+
+fn validate_prism_isolated_xray_verification_config(
+    config: &serde_json::Map<String, Value>,
+    settings: &RuntimeSettings,
+) -> Result<(), String> {
+    use std::collections::HashSet;
+
+    let mut verification_settings = settings.clone();
+    verification_settings.xray_stats_enabled = false;
+    validate_prism_managed_xray_config(config, &verification_settings)?;
+
+    let inbounds = config
+        .get("inbounds")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "isolated Xray verification requires explicit inbounds".to_string())?;
+    let inbound_tags = inbounds
+        .iter()
+        .filter_map(|inbound| inbound.get("tag").and_then(Value::as_str))
+        .collect::<HashSet<_>>();
+    let routing = config
+        .get("routing")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "isolated Xray verification requires explicit routing".to_string())?;
+    if routing.get("domainStrategy").and_then(Value::as_str) != Some("AsIs") {
+        return Err("isolated Xray verification requires AsIs routing".to_string());
+    }
+    let rules = routing
+        .get("rules")
+        .and_then(Value::as_array)
+        .filter(|rules| rules.len() == 1)
+        .ok_or_else(|| "isolated Xray verification requires one routing rule".to_string())?;
+    let rule = rules[0]
+        .as_object()
+        .ok_or_else(|| "isolated Xray verification routing rule is invalid".to_string())?;
+    if rule.len() != 4
+        || rule.get("type").and_then(Value::as_str) != Some("field")
+        || rule.get("network").and_then(Value::as_str) != Some("tcp,udp")
+    {
+        return Err("isolated Xray verification routing rule is not explicit".to_string());
+    }
+    let routed_inbounds = rule
+        .get("inboundTag")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "isolated Xray verification is missing inbound tags".to_string())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<HashSet<_>>();
+    if routed_inbounds != inbound_tags || routed_inbounds.len() != 2 {
+        return Err("isolated Xray verification must route both explicit inbounds".to_string());
+    }
+    let target = rule
+        .get("outboundTag")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "isolated Xray verification is missing its node target".to_string())?;
+    let target_protocol = config
+        .get("outbounds")
+        .and_then(Value::as_array)
+        .and_then(|outbounds| {
+            outbounds.iter().find_map(|outbound| {
+                (outbound.get("tag").and_then(Value::as_str) == Some(target))
+                    .then(|| outbound.get("protocol").and_then(Value::as_str))
+                    .flatten()
+            })
+        })
+        .ok_or_else(|| "isolated Xray verification target is missing".to_string())?;
+    if matches!(target_protocol, "freedom" | "blackhole") {
+        return Err("isolated Xray verification target is not a subscription node".to_string());
+    }
+    Ok(())
 }
 
 fn validate_prism_managed_xray_config(
@@ -9380,14 +9592,23 @@ mod tests {
     #[test]
     fn xray_node_verification_start_failure_discards_sensitive_diagnostics() {
         let secret = "subscription-private-key";
-        let result = xray_node_verification_start_failure(format!(
-            "Xray rejected password={secret} in a generated config"
-        ));
+        let identity = XrayNodeVerificationIdentity {
+            config_digest: "a".repeat(64),
+            node_id: "node-a".to_string(),
+            request_token: "request-token-a".to_string(),
+        };
+        let result = xray_node_verification_start_failure(
+            format!("Xray rejected password={secret} in a generated config"),
+            &identity,
+        );
         let serialized = serde_json::to_string(&result).unwrap();
 
         assert_eq!(result.code, "start-failed");
         assert!(!result.ok);
         assert!(result.report.is_none());
+        assert_eq!(result.node_id, identity.node_id);
+        assert_eq!(result.config_digest, identity.config_digest);
+        assert_eq!(result.request_token, identity.request_token);
         assert!(!serialized.contains(secret));
         assert!(!serialized.contains("password"));
     }
@@ -9442,6 +9663,25 @@ mod tests {
         })
     }
 
+    fn isolated_xray_verification_test_config() -> Value {
+        let mut config = managed_xray_test_config();
+        config["routing"] = serde_json::json!({
+            "domainStrategy": "AsIs",
+            "rules": [{
+                "type": "field",
+                "inboundTag": ["tachyon-socks", "tachyon-http"],
+                "network": "tcp,udp",
+                "outboundTag": "tachyon-proxy"
+            }]
+        });
+        config["outbounds"][0] = serde_json::json!({
+            "tag": "tachyon-proxy",
+            "protocol": "socks",
+            "settings": { "servers": [{ "address": "127.0.0.1", "port": 18080 }] }
+        });
+        config
+    }
+
     #[test]
     fn managed_xray_apply_plan_accepts_only_prism_owned_controls() {
         let settings = managed_xray_test_settings();
@@ -9452,6 +9692,81 @@ mod tests {
             validate_xray_apply_plan(&plan, XrayConfigTrustMode::Managed, &settings).is_ok(),
             "valid Prism-managed apply plan was rejected"
         );
+    }
+
+    #[test]
+    fn isolated_xray_verification_requires_both_inbounds_to_one_node_outbound() {
+        let mut settings = managed_xray_test_settings();
+        settings.xray_stats_enabled = true;
+        let config = isolated_xray_verification_test_config();
+        let bytes = serde_json::to_vec(&config).expect("serialize isolated config");
+        let plan = xray_generation::apply_plan_for_test(bytes);
+
+        assert!(
+            validate_xray_apply_plan(&plan, XrayConfigTrustMode::Verification, &settings,).is_ok()
+        );
+    }
+
+    #[test]
+    fn isolated_xray_verification_rejects_user_routing_and_safety_outbounds() {
+        let settings = managed_xray_test_settings();
+        let base = isolated_xray_verification_test_config();
+        let mut cases = Vec::new();
+
+        let mut direct = base.clone();
+        direct["routing"]["rules"][0]["outboundTag"] = serde_json::json!("tachyon-direct");
+        cases.push(direct);
+
+        let mut global = base.clone();
+        global["routing"]["rules"][0]
+            .as_object_mut()
+            .expect("global rule")
+            .remove("inboundTag");
+        cases.push(global);
+
+        let mut rule = base;
+        rule["routing"]["rules"]
+            .as_array_mut()
+            .expect("rules")
+            .insert(
+                0,
+                serde_json::json!({
+                    "type": "field",
+                    "inboundTag": ["tachyon-socks", "tachyon-http"],
+                    "ip": ["geoip:private"],
+                    "outboundTag": "tachyon-direct"
+                }),
+            );
+        cases.push(rule);
+
+        for config in cases {
+            let bytes = serde_json::to_vec(&config).expect("serialize rejected config");
+            let plan = xray_generation::apply_plan_for_test(bytes);
+            assert!(
+                validate_xray_apply_plan(&plan, XrayConfigTrustMode::Verification, &settings,)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn xray_verification_identity_requires_exact_canonical_digest_and_opaque_token() {
+        let identity = XrayNodeVerificationIdentity {
+            config_digest: sha256_hex(b"{}"),
+            node_id: "node-a".to_string(),
+            request_token: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
+        };
+        assert!(validate_xray_node_verification_identity(&identity).is_ok());
+
+        let mut wrong_digest = XrayNodeVerificationIdentity {
+            config_digest: identity.config_digest.to_ascii_uppercase(),
+            node_id: identity.node_id.clone(),
+            request_token: identity.request_token.clone(),
+        };
+        assert!(validate_xray_node_verification_identity(&wrong_digest).is_err());
+        wrong_digest.config_digest = "a".repeat(64);
+        wrong_digest.request_token = "short".to_string();
+        assert!(validate_xray_node_verification_identity(&wrong_digest).is_err());
     }
 
     #[test]

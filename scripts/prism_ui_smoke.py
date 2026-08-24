@@ -55,9 +55,19 @@ class QuietHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
-        if path in {"/smoke-subscription", "/smoke-subscription-slow", "/smoke-subscription-error"}:
+        if path in {
+            "/generate_204",
+            "/smoke-subscription",
+            "/smoke-subscription-slow",
+            "/smoke-subscription-error",
+        }:
             with self.request_counts_lock:
                 self.request_counts[path] = self.request_counts.get(path, 0) + 1
+        if path == "/generate_204":
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            return
         if path == "/smoke-subscription-error":
             self.send_response(502)
             self.send_header("Access-Control-Allow-Origin", "*")

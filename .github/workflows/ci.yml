@@ -57,6 +57,51 @@ jobs:
       - name: Verify production vault boundary
         run: python scripts/verify_production_bundle.py --dist dist
 
+  xray-contract:
+    name: Xray contract (linux-x64)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      XRAY_VERSION: v26.3.27
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.3
+
+      - name: Setup Node
+        uses: actions/setup-node@v5.0.0
+        with:
+          node-version: "26.4.0"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Install pinned Xray contract binary
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/Xray-linux-64.zip"
+          digest_file="${archive}.dgst"
+          install_dir="${RUNNER_TEMP}/tachyon-xray-contract"
+          release_url="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}"
+          curl --fail --location --retry 3 --retry-all-errors --connect-timeout 10 --max-time 120 \
+            --output "${archive}" "${release_url}/Xray-linux-64.zip"
+          curl --fail --location --retry 3 --retry-all-errors --connect-timeout 10 --max-time 60 \
+            --output "${digest_file}" "${release_url}/Xray-linux-64.zip.dgst"
+          digest="$(sed -n 's/^SHA2-256= //p' "${digest_file}")"
+          test "${#digest}" -eq 64
+          printf '%s  %s\n' "${digest}" "${archive}" | sha256sum --check --strict
+          mkdir -p "${install_dir}"
+          unzip -q "${archive}" -d "${install_dir}"
+          chmod +x "${install_dir}/xray"
+          "${install_dir}/xray" version
+          echo "TACHYON_XRAY_BINARY_PATH=${install_dir}/xray" >> "${GITHUB_ENV}"
+
+      - name: Validate managed and isolated configs with real Xray
+        timeout-minutes: 5
+        run: npm run test:xray-contract
+
   ui-evidence:
     name: Immutable UI evidence
     runs-on: windows-latest
@@ -367,6 +412,7 @@ jobs:
     needs:
       - release-contract
       - typecheck
+      - xray-contract
       - ui-evidence
       - core-contract
       - system-keyring-live
@@ -377,6 +423,7 @@ jobs:
         env:
           RELEASE_CONTRACT_RESULT: ${{ needs.release-contract.result }}
           TYPECHECK_RESULT: ${{ needs.typecheck.result }}
+          XRAY_CONTRACT_RESULT: ${{ needs.xray-contract.result }}
           UI_EVIDENCE_RESULT: ${{ needs.ui-evidence.result }}
           CORE_CONTRACT_RESULT: ${{ needs.core-contract.result }}
           SYSTEM_KEYRING_RESULT: ${{ needs.system-keyring-live.result }}
@@ -388,6 +435,7 @@ jobs:
           results = {
               "release-contract": os.environ["RELEASE_CONTRACT_RESULT"],
               "typecheck": os.environ["TYPECHECK_RESULT"],
+              "xray-contract": os.environ["XRAY_CONTRACT_RESULT"],
               "ui-evidence": os.environ["UI_EVIDENCE_RESULT"],
               "core-contract": os.environ["CORE_CONTRACT_RESULT"],
               "system-keyring-live": os.environ["SYSTEM_KEYRING_RESULT"],

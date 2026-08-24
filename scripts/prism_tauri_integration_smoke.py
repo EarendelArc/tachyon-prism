@@ -5,6 +5,7 @@ import ctypes
 import hashlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -17,6 +18,7 @@ from typing import Any, Iterator
 
 from prism_ui_smoke import (
     CDP,
+    QuietHandler,
     assert_advanced_xray_layout,
     assert_content_scroll_is_contained,
     assert_custom_window_chrome,
@@ -25,7 +27,9 @@ from prism_ui_smoke import (
     assert_no_horizontal_overflow,
     click_add_subscription,
     free_port,
+    import_subscription_payload,
     navigate_hash,
+    select_settings_section,
     start_server,
     update_all_subscriptions,
     update_subscription_url,
@@ -805,6 +809,282 @@ def managed_freedom_config(settings: dict[str, Any], *, compact: bool = False) -
     return json.dumps(config, ensure_ascii=False, indent=2) + "\n"
 
 
+def wait_for_tcp_listener(process: subprocess.Popen[Any], port: int, timeout: float = 8.0) -> None:
+    deadline = time.monotonic() + timeout
+    last_error: OSError | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"Xray upstream exited before readiness: {process.returncode}")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+                return
+        except OSError as error:
+            last_error = error
+            time.sleep(0.1)
+    raise RuntimeError(f"Xray upstream did not listen on 127.0.0.1:{port}: {last_error}")
+
+
+def start_xray_socks_upstream(
+    xray: Path,
+    port: int,
+    target_port: int,
+    output_dir: Path,
+    context: RunContext,
+) -> subprocess.Popen[Any]:
+    config_path = output_dir / "xray-selected-node-upstream.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "log": {"loglevel": "warning"},
+                "inbounds": [
+                    {
+                        "tag": "selected-node-inbound",
+                        "listen": "127.0.0.1",
+                        "port": port,
+                        "protocol": "socks",
+                        "settings": {"auth": "noauth", "udp": True},
+                    }
+                ],
+                "outbounds": [
+                    {
+                        "tag": "selected-node-egress",
+                        "protocol": "freedom",
+                        "settings": {"redirect": f"127.0.0.1:{target_port}"},
+                    }
+                ],
+            },
+            ensure_ascii=True,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with (output_dir / "xray-selected-node.stdout.log").open("ab") as stdout, (
+        output_dir / "xray-selected-node.stderr.log"
+    ).open("ab") as stderr:
+        process = subprocess.Popen(
+            [str(xray), "run", "-config", str(config_path)],
+            cwd=str(xray.parent),
+            stdout=stdout,
+            stderr=stderr,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    context.owned_processes.append(process)
+    wait_for_tcp_listener(process, port)
+    context.log(f"SELECTED NODE XRAY READY pid={process.pid} socks=127.0.0.1:{port}")
+    return process
+
+
+def system_proxy_mutation_snapshot(query: dict[str, Any]) -> dict[str, Any]:
+    current = query.get("current") or {}
+    return {
+        "enabled": current.get("enabled"),
+        "matchesPrism": current.get("matchesPrism"),
+        "proxyServer": current.get("proxyServer"),
+        "bypass": current.get("bypass"),
+        "error": current.get("error"),
+        "pendingTransaction": query.get("pendingTransaction"),
+    }
+
+
+def verify_selected_local_xray_node(
+    cdp: CDP,
+    context: RunContext,
+    upstream_port: int,
+) -> dict[str, Any]:
+    navigate_hash(cdp, "subscriptions")
+    add = click_add_subscription(cdp)
+    assert_true(add.get("activeTag") == "INPUT", f"subscription form did not focus: {add}")
+    selected_name = "Selected Local Xray E2E"
+    payload = json.dumps(
+        {
+            "outbounds": [
+                {
+                    "tag": selected_name,
+                    "protocol": "socks",
+                    "settings": {
+                        "servers": [{"address": "127.0.0.1", "port": upstream_port}]
+                    },
+                },
+                {
+                    "tag": "Unselected Local Node",
+                    "protocol": "socks",
+                    "settings": {"servers": [{"address": "127.0.0.1", "port": 1}]},
+                },
+            ]
+        }
+    )
+    text = import_subscription_payload(cdp, "Local Xray E2E", payload)
+    assert_true(selected_name in text, "local subscription did not render its selected node")
+    selection = cdp.evaluate(
+        f"""
+        new Promise((resolve) => {{
+          const tile = Array.from(document.querySelectorAll('.node-tile'))
+            .find((item) => item.textContent?.includes({json.dumps(selected_name)}));
+          if (!tile) throw new Error('selected local Xray node tile missing');
+          tile.click();
+          setTimeout(() => {{
+            const current = Array.from(document.querySelectorAll('.node-tile'))
+              .find((item) => item.textContent?.includes({json.dumps(selected_name)}));
+            resolve({{
+              nodeStillRendered: Boolean(current),
+              selected: current?.classList.contains('active') ?? false,
+              text: document.body.innerText
+            }});
+          }}, 700);
+        }})
+        """,
+        await_promise=True,
+    )
+    assert_true(selected_name in selection["text"], "selected local node disappeared after click")
+    assert_true(selection["nodeStillRendered"], "selected local node tile disappeared after click")
+    assert_true(selection["selected"], "UI did not expose the selected local node as active")
+
+    navigate_hash(cdp, "overview")
+    current_node = cdp.evaluate(
+        "document.querySelector('.current-node-card b')?.textContent?.trim() ?? ''"
+    )
+    assert_true(
+        current_node == selected_name,
+        f"Overview did not show the explicitly selected node: {current_node}",
+    )
+    direct_mode = cdp.evaluate(
+        """
+        new Promise((resolve) => {
+          const button = document.querySelector('[data-routing-mode="direct"]');
+          if (!button) throw new Error('direct routing mode button missing');
+          button.click();
+          setTimeout(() => resolve(
+            document.querySelector('[data-routing-mode="direct"]')?.getAttribute('aria-pressed')
+          ), 300);
+        })
+        """,
+        await_promise=True,
+    )
+    assert_true(direct_mode == "true", f"direct routing mode was not selected: {direct_mode}")
+
+    navigate_hash(cdp, "settings")
+    select_settings_section(cdp, 1)
+    managed_contents = str(
+        cdp.evaluate("document.querySelector('textarea[data-config-draft=\"xray\"]')?.value ?? ''")
+    )
+    managed_config = json.loads(managed_contents)
+    managed_target = next(
+        (
+            outbound
+            for outbound in managed_config.get("outbounds") or []
+            if outbound.get("tag") in {"tachyon-proxy", selected_name}
+        ),
+        None,
+    )
+    assert_true(
+        managed_target is not None and managed_target.get("protocol") == "socks",
+        f"managed JSON did not select the SOCKS node: {managed_target}",
+    )
+    managed_settings = managed_target.get("settings") or {}
+    managed_server = (managed_settings.get("servers") or [{}])[0]
+    assert_true(
+        managed_server.get("address") == "127.0.0.1"
+        and managed_server.get("port") == upstream_port,
+        f"managed JSON did not preserve the UI-selected node: {managed_settings}",
+    )
+
+    vault = invoke(cdp, context, "load_secure_vault")
+    selected_node_id = ((vault.get("payload") or {}).get("subscriptions") or {}).get(
+        "selectedNodeId"
+    )
+    assert_true(bool(selected_node_id), f"secure vault did not persist selected node: {vault}")
+    navigate_hash(cdp, "overview")
+    proxy_before = system_proxy_mutation_snapshot(invoke(cdp, context, "system_proxy_query"))
+    fixture_before = QuietHandler.request_count("/generate_204")
+    click = cdp.evaluate(
+        """
+        (() => {
+          const button = document.querySelector('.proxy-probe-panel header button');
+          if (!button) return { clicked: false, reason: 'verification button missing' };
+          if (button.disabled) return { clicked: false, reason: 'verification button disabled' };
+          button.click();
+          return { clicked: true, label: button.textContent?.trim() ?? '' };
+        })()
+        """
+    )
+    assert_true(click.get("clicked"), f"UI node verification did not start: {click}")
+
+    deadline = time.monotonic() + 35
+    ui_state = None
+    while time.monotonic() < deadline:
+        context.check_deadline("UI selected-node verification")
+        ui_state = cdp.evaluate(
+            """
+            (() => ({
+              panelClass: document.querySelector('.proxy-probe-panel')?.className ?? '',
+              text: document.querySelector('.proxy-probe-panel')?.textContent ?? '',
+              rows: Array.from(document.querySelectorAll('.proxy-probe-row')).map((row) => ({
+                className: row.className,
+                text: row.textContent ?? ''
+              }))
+            }))()
+            """
+        )
+        if " ok" in ui_state["panelClass"] or " error" in ui_state["panelClass"]:
+            break
+        time.sleep(0.2)
+    assert_true(ui_state is not None, "UI verification state was unavailable")
+    if " ok" not in ui_state["panelClass"]:
+        diagnostic = {
+            "ui": ui_state,
+            "managedConfig": managed_config,
+            "generation": invoke(cdp, context, "xray_generation_status"),
+            "runtime": invoke(cdp, context, "runtime_status"),
+            "logs": invoke(cdp, context, "runtime_process_logs", {"kind": "xray"}),
+        }
+        raise AssertionError(f"UI verification failed: {diagnostic}")
+    assert_true(
+        len(ui_state["rows"]) == 2
+        and all(" ok" in row["className"] for row in ui_state["rows"]),
+        f"HTTP/SOCKS rows were not both successful: {ui_state}",
+    )
+    fixture_after = QuietHandler.request_count("/generate_204")
+    assert_true(
+        fixture_after - fixture_before >= 2,
+        f"dual proxies did not both reach the fixture: before={fixture_before}, after={fixture_after}",
+    )
+
+    generation = invoke(cdp, context, "xray_generation_status")
+    desired = generation.get("desired") or {}
+    digest = str(desired.get("configSha256") or "")
+    assert_true(desired.get("nodeId") == selected_node_id, f"generation node identity mismatch: {generation}")
+    assert_true(
+        len(digest) == 64 and desired.get("routingRevision") == digest,
+        f"generation config identity mismatch: {generation}",
+    )
+    assert_true(
+        generation.get("active") is None
+        and generation.get("proxyGeneration") is None
+        and generation.get("proxyReady") is False,
+        f"isolated verification left runtime state: {generation}",
+    )
+
+    proxy_after = system_proxy_mutation_snapshot(invoke(cdp, context, "system_proxy_query"))
+    assert_true(
+        proxy_after == proxy_before,
+        f"isolated verification mutated system proxy state: before={proxy_before}, after={proxy_after}",
+    )
+    return {
+        "status": "passed",
+        "nodeId": selected_node_id,
+        "configDigest": digest,
+        "requestTokenBound": True,
+        "routingMode": "direct",
+        "selectedOutbound": "socks",
+        "selectedNodePort": upstream_port,
+        "http": True,
+        "socks": True,
+        "fixtureRequests": fixture_after - fixture_before,
+        "systemProxyUnchanged": True,
+    }
+
+
 def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     context = RunContext(output_dir, timeout)
@@ -915,6 +1195,9 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
             config_backups = {
                 canonical_path: read_bytes(canonical_path),
                 settings_path: read_bytes(settings_path),
+                settings_path.parent / "secure-vault.v1.json": read_bytes(
+                    settings_path.parent / "secure-vault.v1.json"
+                ),
             }
             context.result["configPaths"] = paths
             settings = invoke(cdp, context, "runtime_settings")
@@ -932,6 +1215,8 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
             settings["tachyonTunAutoRoute"] = False
             settings["tachyonTunDnsHijack"] = False
             saved_settings = invoke(cdp, context, "save_runtime_settings", {"settings": settings})
+            cdp.evaluate("location.reload()")
+            wait_for_shell(cdp)
             valid_config = managed_freedom_config(saved_settings)
             assert_true(not saved_settings["tachyonTunAutoRoute"], "TUN auto-route remained enabled")
             assert_true(not saved_settings["tachyonTunDnsHijack"], "TUN DNS hijack remained enabled")
@@ -976,22 +1261,14 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
             first_read = invoke(cdp, context, "read_canonical_xray_config")
             assert_true(first_read == {"exists": True, "contents": valid_config}, "valid commit mismatch")
 
-            verification_config = managed_freedom_config(saved_settings, compact=True)
+            selected_node_port = free_port()
+            start_xray_socks_upstream(xray, selected_node_port, server_port, output_dir, context)
             context.result["diagnostics"]["networkSafety"]["isolatedXrayVerificationInvoked"] = True
-            verification = invoke(
+            verification_e2e = verify_selected_local_xray_node(
                 cdp,
                 context,
-                "verify_xray_node",
-                {
-                    "contents": verification_config,
-                    "targetUrl": f"http://127.0.0.1:{server_port}/",
-                    "timeoutMs": 5000,
-                },
+                selected_node_port,
             )
-            assert_true(verification.get("code") == "success", f"node verification failed: {verification}")
-            assert_true(verification.get("ok"), f"node verification not successful: {verification}")
-            assert_true(verification["report"]["http"]["ok"], "HTTP explicit proxy probe failed")
-            assert_true(verification["report"]["socks"]["ok"], "SOCKS explicit proxy probe failed")
             after_verification = invoke(cdp, context, "read_canonical_xray_config")
             assert_true(after_verification == first_read, "isolated verification changed canonical config")
             after_verification_runtime = invoke(cdp, context, "runtime_status")
@@ -1013,9 +1290,7 @@ def run_worker(executable: Path, xray: Path, output_dir: Path, timeout: int) -> 
                 f"authorization check did not stop Xray: {authorized_stop}",
             )
             context.result["ipc"]["isolatedNodeVerification"] = {
-                "status": "passed",
-                "http": True,
-                "socks": True,
+                **verification_e2e,
                 "authorizationRestored": True,
                 "canonicalUnchanged": True,
                 "xrayStopped": True,

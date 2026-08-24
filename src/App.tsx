@@ -175,7 +175,9 @@ import { localizeTelemetryError, TelemetryClient } from "./domain/telemetry";
 import type { TelemetryState } from "./domain/telemetry";
 import { invokeDesktop, isTauriRuntime } from "./domain/tauri";
 import {
+  createXrayNodeVerificationRequest,
   verifySelectedXrayNode,
+  XrayNodeVerificationGate,
   type XrayNodeVerificationCode,
 } from "./domain/xrayNodeVerification";
 
@@ -1725,6 +1727,28 @@ function managedXrayDraftText(
   );
 }
 
+function isolatedXrayVerificationDraftText(
+  activeNode: ProxyNode | undefined,
+  routingMode: XrayRoutingMode,
+  runtimeSettings: RuntimeSettings,
+  ui: typeof zh,
+): string {
+  if (!activeNode) {
+    throw new Error(ui.xraySelectNodeRequired);
+  }
+  return stringifyDraft(
+    buildXrayClientConfigDraft(activeNode, {
+      configMode: "managed",
+      httpListen: runtimeSettings.xrayHttpListen,
+      httpPort: runtimeSettings.xrayHttpPort,
+      purpose: "node-verification",
+      routingMode,
+      socksListen: runtimeSettings.xraySocksListen,
+      socksPort: runtimeSettings.xraySocksPort,
+    }),
+  );
+}
+
 function parseLocalAddrs(value: string): string[] {
   return value
     .split(/[\n,]+/)
@@ -1900,6 +1924,8 @@ export function App() {
   });
   const [xrayNodeVerification, setXrayNodeVerification] =
     useState<XrayNodeVerificationStatus>({ code: null, report: null, state: "idle" });
+  const xrayNodeVerificationGateRef = useRef(new XrayNodeVerificationGate());
+  const xrayNodeVerificationAttemptRef = useRef<string | null>(null);
   const [trafficSamples, setTrafficSamples] = useState<TimedTrafficSample[]>([]);
   const previousTrafficRef = useRef<{ at: number; totals: TrafficTotals } | null>(null);
   const subscriptionNameInputRef = useRef<HTMLInputElement | null>(null);
@@ -1921,6 +1947,44 @@ export function App() {
     () => runtimeWithTachyonServer(runtimeInputs, currentTachyonServer),
     [currentTachyonServer, runtimeInputs],
   );
+  const isolatedXrayVerificationDraft = useMemo(() => {
+    try {
+      return isolatedXrayVerificationDraftText(
+        activeNode,
+        routingMode,
+        effectiveRuntimeInputs,
+        ui,
+      );
+    } catch {
+      return "";
+    }
+  }, [activeNode, effectiveRuntimeInputs, language, routingMode]);
+  const xrayNodeVerificationContext = useMemo(
+    () => JSON.stringify([
+      subscription.updatedAt,
+      activeNode?.id ?? "",
+      isolatedXrayVerificationDraft,
+      routingMode,
+      xrayAdvancedEditor.enabled,
+      xrayAdvancedEditor.mode,
+      xrayAdvancedEditor.text,
+    ]),
+    [
+      activeNode?.id,
+      isolatedXrayVerificationDraft,
+      routingMode,
+      subscription.updatedAt,
+      xrayAdvancedEditor.enabled,
+      xrayAdvancedEditor.mode,
+      xrayAdvancedEditor.text,
+    ],
+  );
+  const previousXrayNodeVerificationContextRef = useRef(xrayNodeVerificationContext);
+  if (previousXrayNodeVerificationContextRef.current !== xrayNodeVerificationContext) {
+    previousXrayNodeVerificationContextRef.current = xrayNodeVerificationContext;
+    xrayNodeVerificationGateRef.current.invalidate();
+    xrayNodeVerificationAttemptRef.current = null;
+  }
   const generatedDrafts = useMemo(
     () => draftText(activeNode, profiles, gameRoutes, launcherSettings, routingMode, effectiveRuntimeInputs, ui),
     [activeNode, effectiveRuntimeInputs, gameRoutes, launcherSettings, language, profiles, routingMode],
@@ -3346,24 +3410,58 @@ export function App() {
     if (xrayNodeVerification.state === "running") {
       return;
     }
+    if (!activeNode) {
+      setXrayNodeVerification({ code: "node-required", report: null, state: "error" });
+      setMessage(ui.proxyProbeNeedNode);
+      return;
+    }
+    const node = activeNode;
+    const requestToken = globalThis.crypto.randomUUID();
+    xrayNodeVerificationAttemptRef.current = requestToken;
+    xrayNodeVerificationGateRef.current.invalidate();
     setXrayNodeVerification({ code: null, report: null, state: "running" });
     setMessage(ui.xrayVerifyRunning);
-    const verification = await verifySelectedXrayNode({
-      hasSelectedNode: Boolean(activeNode),
-      verify: async () => {
-        const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
-        setRuntimeInputs(settings);
-        const contents = managedXrayDraftText(activeNode, routingMode, settings, ui);
-        return verifyXrayNode(contents);
-      },
-    });
-    setXrayNodeVerification({
-      code: verification.code,
-      report: verification.report,
-      state: verification.ok ? "ok" : "error",
-    });
-    setMessage(xrayNodeVerificationMessage(verification.code, verification.report, ui));
-    await refreshRuntime();
+    try {
+      const settings = await saveRuntimeSettings(effectiveRuntimeInputs);
+      setRuntimeInputs(settings);
+      const contents = isolatedXrayVerificationDraftText(node, routingMode, settings, ui);
+      const request = await createXrayNodeVerificationRequest(
+        node.id,
+        contents,
+        requestToken,
+      );
+      if (xrayNodeVerificationAttemptRef.current !== requestToken) {
+        return;
+      }
+      xrayNodeVerificationGateRef.current.begin(request);
+      const verification = await verifySelectedXrayNode({
+        hasSelectedNode: true,
+        request,
+        verify: verifyXrayNode,
+      });
+      if (
+        xrayNodeVerificationAttemptRef.current !== requestToken
+        || !xrayNodeVerificationGateRef.current.accepts(verification)
+      ) {
+        return;
+      }
+      setXrayNodeVerification({
+        code: verification.code,
+        report: verification.report,
+        state: verification.ok ? "ok" : "error",
+      });
+      setMessage(xrayNodeVerificationMessage(verification.code, verification.report, ui));
+    } catch {
+      if (xrayNodeVerificationAttemptRef.current !== requestToken) {
+        return;
+      }
+      setXrayNodeVerification({ code: "start-failed", report: null, state: "error" });
+      setMessage(ui.xrayVerifyStartFailed);
+    } finally {
+      if (xrayNodeVerificationAttemptRef.current === requestToken) {
+        await refreshRuntime();
+      }
+    }
   }
 
   async function startRuntime(kind: ManagedBinaryKind): Promise<RuntimeStartResult> {
@@ -3566,6 +3664,14 @@ export function App() {
       globalThis.history?.replaceState(null, "", nextHash);
     }
   }
+
+  useEffect(() => {
+    setXrayNodeVerification((current) =>
+      current.state === "idle"
+        ? current
+        : { code: null, report: null, state: "idle" },
+    );
+  }, [xrayNodeVerificationContext]);
 
   useEffect(() => {
     let active = true;
